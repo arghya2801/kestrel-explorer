@@ -3,6 +3,7 @@ pub mod crash;
 pub mod events;
 pub mod format;
 pub mod listing;
+pub mod places;
 pub mod shell;
 pub mod sort;
 pub mod ui;
