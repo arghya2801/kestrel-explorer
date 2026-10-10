@@ -23,9 +23,7 @@ pub fn guard<T>(f: impl FnOnce() -> T) -> Option<T> {
 }
 
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("FileExplorerPro")
 }
 
@@ -33,14 +31,9 @@ pub fn data_dir() -> PathBuf {
 pub fn log(msg: &str) {
     let dir = data_dir();
     let _ = fs::create_dir_all(&dir);
-    if let Ok(mut f) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("log.txt"))
-    {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(dir.join("log.txt")) {
+        let secs =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let _ = writeln!(f, "[{secs}] {msg}");
     }
 }
@@ -50,10 +43,7 @@ pub fn install() {
     panic::set_hook(Box::new(|info| {
         let thread = std::thread::current();
         let bt = std::backtrace::Backtrace::force_capture();
-        log(&format!(
-            "panic on thread {:?}: {info}\n{bt}",
-            thread.name().unwrap_or("?")
-        ));
+        log(&format!("panic on thread {:?}: {info}\n{bt}", thread.name().unwrap_or("?")));
     }));
     unsafe { SetUnhandledExceptionFilter(Some(on_native_crash)) };
 }
@@ -68,10 +58,7 @@ unsafe extern "system" fn on_native_crash(ep: *const EXCEPTION_POINTERS) -> i32 
 pub fn write_minidump(ep: *const EXCEPTION_POINTERS) -> Option<PathBuf> {
     let dir = data_dir().join("crashes");
     fs::create_dir_all(&dir).ok()?;
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     let path = dir.join(format!("{secs}-{}.dmp", std::process::id()));
     let file = fs::File::create(&path).ok()?;
     let info = MINIDUMP_EXCEPTION_INFORMATION {

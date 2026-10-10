@@ -12,18 +12,8 @@ fn main() {
         let snap = list_dir(dir.as_ref()).unwrap();
         let listed = t.elapsed();
         let t = Instant::now();
-        let order = sorted_order(
-            &snap,
-            Sort {
-                key: SortKey::Name,
-                descending: false,
-            },
-            true,
-        );
+        let order = sorted_order(&snap, Sort { key: SortKey::Name, descending: false }, true);
         let sorted = t.elapsed();
-        println!(
-            "run {run}: {} items, list {listed:?}, sort {sorted:?}",
-            order.len()
-        );
+        println!("run {run}: {} items, list {listed:?}, sort {sorted:?}", order.len());
     }
 }

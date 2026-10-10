@@ -32,11 +32,7 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn new(dir: PathBuf) -> Self {
-        Snapshot {
-            dir,
-            entries: Vec::new(),
-            names: Vec::new(),
-        }
+        Snapshot { dir, entries: Vec::new(), names: Vec::new() }
     }
     pub fn add(&mut self, name: &[u16], attrs: u32, size: u64, modified: u64) {
         self.entries.push(Entry {
@@ -139,11 +135,7 @@ fn to_io(e: windows::core::Error) -> io::Error {
 }
 
 fn push(snap: &mut Snapshot, d: &WIN32_FIND_DATAW) {
-    let len = d
-        .cFileName
-        .iter()
-        .position(|&c| c == 0)
-        .unwrap_or(d.cFileName.len());
+    let len = d.cFileName.iter().position(|&c| c == 0).unwrap_or(d.cFileName.len());
     let name = &d.cFileName[..len];
     if name == [b'.' as u16] || name == [b'.' as u16, b'.' as u16] {
         return;
@@ -188,18 +180,12 @@ mod tests {
 
     #[test]
     fn verbatim_prefixes_drive_and_unc_paths() {
-        assert_eq!(
-            String::from_utf16(&verbatim(Path::new(r"C:\x"))).unwrap(),
-            r"\\?\C:\x"
-        );
+        assert_eq!(String::from_utf16(&verbatim(Path::new(r"C:\x"))).unwrap(), r"\\?\C:\x");
         assert_eq!(
             String::from_utf16(&verbatim(Path::new(r"\\srv\share\d"))).unwrap(),
             r"\\?\UNC\srv\share\d"
         );
-        assert_eq!(
-            String::from_utf16(&verbatim(Path::new(r"\\?\C:\x"))).unwrap(),
-            r"\\?\C:\x"
-        );
+        assert_eq!(String::from_utf16(&verbatim(Path::new(r"\\?\C:\x"))).unwrap(), r"\\?\C:\x");
     }
 
     #[test]
@@ -240,10 +226,7 @@ mod tests {
     #[test]
     fn lists_paths_longer_than_max_path() {
         let t = TempDir::new();
-        let deep =
-            t.0.join("d".repeat(120))
-                .join("e".repeat(120))
-                .join("f".repeat(120));
+        let deep = t.0.join("d".repeat(120)).join("e".repeat(120)).join("f".repeat(120));
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("x"), "").unwrap();
         assert!(deep.as_os_str().len() > 260);

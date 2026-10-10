@@ -42,9 +42,7 @@ fn push_sort_key(name: &[u16], buf: &mut Vec<u16>, out: &mut Vec<u8>) {
 
 /// Visible entries in display order. Ties on size/date fall back to name, ascending.
 pub fn sorted_order(s: &Snapshot, sort: Sort, show_hidden: bool) -> Vec<u32> {
-    let mut v: Vec<u32> = (0..s.len() as u32)
-        .filter(|&i| show_hidden || !s.is_hidden(i as usize))
-        .collect();
+    let mut v: Vec<u32> = (0..s.len() as u32).filter(|&i| show_hidden || !s.is_hidden(i as usize)).collect();
 
     let mut keys = Vec::new();
     let mut buf = vec![0u16; 1024];
@@ -63,15 +61,8 @@ pub fn sorted_order(s: &Snapshot, sort: Sort, show_hidden: bool) -> Vec<u32> {
             SortKey::Size => s.entries[a].size.cmp(&s.entries[b].size),
             SortKey::Modified => s.entries[a].modified.cmp(&s.entries[b].modified),
         };
-        let primary = if sort.descending {
-            primary.reverse()
-        } else {
-            primary
-        };
-        s.is_dir(b)
-            .cmp(&s.is_dir(a))
-            .then(primary)
-            .then_with(|| key(a).cmp(key(b)))
+        let primary = if sort.descending { primary.reverse() } else { primary };
+        s.is_dir(b).cmp(&s.is_dir(a)).then(primary).then_with(|| key(a).cmp(key(b)))
     });
     v
 }
@@ -102,30 +93,14 @@ mod tests {
 
     #[test]
     fn names_sort_naturally_and_ignore_case() {
-        let s = snap(&[
-            ("file10", 0, 0, 0),
-            ("file2", 0, 0, 0),
-            ("File1", 0, 0, 0),
-            ("b", 0, 0, 0),
-        ]);
-        assert_eq!(
-            sorted(&s, SortKey::Name, false, true),
-            ["b", "File1", "file2", "file10"]
-        );
+        let s = snap(&[("file10", 0, 0, 0), ("file2", 0, 0, 0), ("File1", 0, 0, 0), ("b", 0, 0, 0)]);
+        assert_eq!(sorted(&s, SortKey::Name, false, true), ["b", "File1", "file2", "file10"]);
     }
 
     #[test]
     fn numbers_inside_names_compare_numerically() {
-        let s = snap(&[
-            ("v1.10", 0, 0, 0),
-            ("v1.9", 0, 0, 0),
-            ("x 100 y", 0, 0, 0),
-            ("x 20 y", 0, 0, 0),
-        ]);
-        assert_eq!(
-            sorted(&s, SortKey::Name, false, true),
-            ["v1.9", "v1.10", "x 20 y", "x 100 y"]
-        );
+        let s = snap(&[("v1.10", 0, 0, 0), ("v1.9", 0, 0, 0), ("x 100 y", 0, 0, 0), ("x 20 y", 0, 0, 0)]);
+        assert_eq!(sorted(&s, SortKey::Name, false, true), ["v1.9", "v1.10", "x 20 y", "x 100 y"]);
     }
 
     #[test]
@@ -141,30 +116,16 @@ mod tests {
     #[test]
     fn max_length_names_compare_on_their_last_char() {
         let base: String = "Ünïcødé 名前 ".repeat(20).chars().take(200).collect();
-        let (a, b) = (
-            format!("{base}{}b", "x".repeat(54)),
-            format!("{base}{}a", "x".repeat(54)),
-        );
+        let (a, b) = (format!("{base}{}b", "x".repeat(54)), format!("{base}{}a", "x".repeat(54)));
         let s = snap(&[(&a, 0, 0, 0), (&b, 0, 0, 0)]);
         assert_eq!(sorted(&s, SortKey::Name, false, true), [b, a]);
     }
 
     #[test]
     fn folders_come_first_even_descending() {
-        let s = snap(&[
-            ("aaa", 0, 0, 0),
-            ("zzz", DIR, 0, 0),
-            ("mmm", DIR, 0, 0),
-            ("bbb", 0, 0, 0),
-        ]);
-        assert_eq!(
-            sorted(&s, SortKey::Name, false, true),
-            ["mmm", "zzz", "aaa", "bbb"]
-        );
-        assert_eq!(
-            sorted(&s, SortKey::Name, true, true),
-            ["zzz", "mmm", "bbb", "aaa"]
-        );
+        let s = snap(&[("aaa", 0, 0, 0), ("zzz", DIR, 0, 0), ("mmm", DIR, 0, 0), ("bbb", 0, 0, 0)]);
+        assert_eq!(sorted(&s, SortKey::Name, false, true), ["mmm", "zzz", "aaa", "bbb"]);
+        assert_eq!(sorted(&s, SortKey::Name, true, true), ["zzz", "mmm", "bbb", "aaa"]);
     }
 
     #[test]
@@ -177,11 +138,7 @@ mod tests {
 
     #[test]
     fn hidden_items_are_filtered_unless_shown() {
-        let s = snap(&[
-            ("seen", 0, 0, 0),
-            ("secret", HIDDEN, 0, 0),
-            ("hdir", DIR | HIDDEN, 0, 0),
-        ]);
+        let s = snap(&[("seen", 0, 0, 0), ("secret", HIDDEN, 0, 0), ("hdir", DIR | HIDDEN, 0, 0)]);
         assert_eq!(sorted(&s, SortKey::Name, false, false), ["seen"]);
         assert_eq!(sorted(&s, SortKey::Name, false, true), ["hdir", "secret", "seen"]);
     }
