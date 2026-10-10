@@ -1,12 +1,18 @@
+//! Drives the real window: creates it on a temp folder, sends the messages a
+//! user's input would produce, and pumps until the background work shows up.
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use file_explorer_pro::ui;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, SetFileAttributesW};
 use windows::Win32::UI::Controls::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_BACK;
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PWSTR, w};
+use windows::core::{HSTRING, PWSTR, w};
+
+const WAIT: Duration = Duration::from_secs(5);
 
 struct TempDir(PathBuf);
 impl TempDir {
@@ -14,7 +20,8 @@ impl TempDir {
         let p = std::env::temp_dir().join(format!("fep-ui-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
-        TempDir(p)
+        // Long form, so it compares equal to paths the shell hands back.
+        TempDir(dunce(std::fs::canonicalize(&p).unwrap()))
     }
 }
 impl Drop for TempDir {
@@ -23,15 +30,22 @@ impl Drop for TempDir {
     }
 }
 
-/// Runs this thread's message loop until `done` or the timeout.
+/// Strips the `\\?\` that canonicalize adds.
+fn dunce(p: PathBuf) -> PathBuf {
+    PathBuf::from(p.display().to_string().trim_start_matches(r"\\?\"))
+}
+
+/// Runs this thread's message loop (with the app's shortcuts) until `done` or the timeout.
 fn pump_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
     let start = Instant::now();
     let mut msg = MSG::default();
     while start.elapsed() < timeout {
         unsafe {
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+                if !ui::translate(&msg) {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
             }
         }
         if done() {
@@ -42,8 +56,12 @@ fn pump_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
     false
 }
 
+fn find(main: HWND, class: windows::core::PCWSTR) -> HWND {
+    unsafe { FindWindowExW(Some(main), None, class, None) }.unwrap()
+}
+
 fn list_of(main: HWND) -> HWND {
-    unsafe { FindWindowExW(Some(main), None, w!("SysListView32"), None) }.unwrap()
+    find(main, w!("SysListView32"))
 }
 
 fn item_count(list: HWND) -> usize {
@@ -60,9 +78,66 @@ fn item_text(list: HWND, row: usize) -> String {
     String::from_utf16_lossy(&buf[..n.0 as usize])
 }
 
+fn rows(list: HWND) -> Vec<String> {
+    (0..item_count(list)).map(|r| item_text(list, r)).collect()
+}
+
+fn selected(list: HWND) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = -1isize;
+    loop {
+        i = unsafe {
+            SendMessageW(
+                list,
+                LVM_GETNEXTITEM,
+                Some(WPARAM(i as usize)),
+                Some(LPARAM(LVNI_SELECTED as isize)),
+            )
+        }
+        .0;
+        if i < 0 {
+            return out;
+        }
+        out.push(item_text(list, i as usize));
+    }
+}
+
+fn status_text(main: HWND) -> String {
+    let status = find(main, w!("msctls_statusbar32"));
+    let mut buf = [0u16; 1024];
+    unsafe { SendMessageW(status, SB_GETTEXTW, Some(WPARAM(0)), Some(LPARAM(buf.as_mut_ptr() as isize))) };
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+    String::from_utf16_lossy(&buf[..n])
+}
+
+fn key(to: HWND, vk: VIRTUAL_KEY) {
+    unsafe { PostMessageW(Some(to), WM_KEYDOWN, WPARAM(vk.0 as usize), LPARAM(0)) }.unwrap();
+}
+
+fn alt_key(to: HWND, vk: VIRTUAL_KEY) {
+    unsafe { PostMessageW(Some(to), WM_SYSKEYDOWN, WPARAM(vk.0 as usize), LPARAM(1 << 29)) }.unwrap();
+}
+
+/// Sends the WM_NOTIFY a ListView would send to its parent.
+fn notify<T>(main: HWND, mut payload: T) {
+    unsafe { SendMessageW(main, WM_NOTIFY, Some(WPARAM(0)), Some(LPARAM(&mut payload as *mut T as isize))) };
+}
+
+fn hdr(list: HWND, code: u32) -> NMHDR {
+    NMHDR { hwndFrom: list, idFrom: 0, code }
+}
+
+fn activate(main: HWND, list: HWND, row: i32) {
+    notify(main, NMITEMACTIVATE { hdr: hdr(list, LVN_ITEMACTIVATE), iItem: row, ..Default::default() });
+}
+
 fn open(dir: &Path) -> HWND {
     ui::init_process().unwrap();
     ui::create_main_window(dir).unwrap()
+}
+
+fn close(hwnd: HWND) {
+    unsafe { DestroyWindow(hwnd) }.unwrap();
 }
 
 #[test]
@@ -70,7 +145,7 @@ fn main_window_creates_and_destroys() {
     let t = TempDir::new("create");
     let hwnd = open(&t.0);
     assert!(unsafe { IsWindow(Some(hwnd)) }.as_bool());
-    unsafe { DestroyWindow(hwnd) }.unwrap();
+    close(hwnd);
     assert!(!unsafe { IsWindow(Some(hwnd)) }.as_bool());
 }
 
@@ -83,22 +158,9 @@ fn shows_folder_contents_folders_first() {
 
     let hwnd = open(&t.0);
     let list = list_of(hwnd);
-    assert!(pump_until(Duration::from_secs(5), || item_count(list) == 3), "folder never loaded");
-    assert_eq!((0..3).map(|r| item_text(list, r)).collect::<Vec<_>>(), ["zdir", "a.txt", "b.txt"]);
-    unsafe { DestroyWindow(hwnd) }.unwrap();
-}
-
-/// Sends the WM_NOTIFY a ListView would send to its parent.
-fn notify<T>(main: HWND, mut payload: T) {
-    unsafe { SendMessageW(main, WM_NOTIFY, Some(WPARAM(0)), Some(LPARAM(&mut payload as *mut T as isize))) };
-}
-
-fn hdr(list: HWND, code: u32) -> NMHDR {
-    NMHDR { hwndFrom: list, idFrom: 0, code }
-}
-
-fn rows(list: HWND) -> Vec<String> {
-    (0..item_count(list)).map(|r| item_text(list, r)).collect()
+    assert!(pump_until(WAIT, || item_count(list) == 3), "folder never loaded");
+    assert_eq!(rows(list), ["zdir", "a.txt", "b.txt"]);
+    close(hwnd);
 }
 
 #[test]
@@ -106,43 +168,150 @@ fn column_click_sorts_by_size_then_toggles() {
     let t = TempDir::new("sort");
     std::fs::write(t.0.join("a.txt"), "xxx").unwrap();
     std::fs::write(t.0.join("b.txt"), "x").unwrap();
-    std::fs::write(t.0.join("c.txt"), "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".repeat(40))
-        .unwrap();
+    std::fs::write(t.0.join("c.txt"), "x".repeat(5000)).unwrap();
     let hwnd = open(&t.0);
     let list = list_of(hwnd);
-    assert!(pump_until(Duration::from_secs(5), || item_count(list) == 3));
+    assert!(pump_until(WAIT, || item_count(list) == 3));
 
     let click = |col| {
         notify(hwnd, NMLISTVIEW { hdr: hdr(list, LVN_COLUMNCLICK), iSubItem: col, ..Default::default() })
     };
     click(2); // Size ascending, by bytes: b (1) < a (3) < c
-    assert!(
-        pump_until(Duration::from_secs(5), || rows(list) == ["b.txt", "a.txt", "c.txt"]),
-        "{:?}",
-        rows(list)
-    );
+    assert!(pump_until(WAIT, || rows(list) == ["b.txt", "a.txt", "c.txt"]), "{:?}", rows(list));
     click(2); // same column again: descending
-    assert!(
-        pump_until(Duration::from_secs(5), || rows(list) == ["c.txt", "a.txt", "b.txt"]),
-        "{:?}",
-        rows(list)
-    );
-    unsafe { DestroyWindow(hwnd) }.unwrap();
+    assert!(pump_until(WAIT, || rows(list) == ["c.txt", "a.txt", "b.txt"]), "{:?}", rows(list));
+    close(hwnd);
 }
 
 #[test]
-fn activating_a_folder_opens_it_and_backspace_goes_up() {
+fn opening_a_folder_then_backspace_returns_and_selects_it() {
     let t = TempDir::new("nav");
+    std::fs::create_dir(t.0.join("first")).unwrap();
     std::fs::create_dir(t.0.join("inner")).unwrap();
     std::fs::write(t.0.join("inner").join("deep.txt"), "").unwrap();
     let hwnd = open(&t.0);
     let list = list_of(hwnd);
-    assert!(pump_until(Duration::from_secs(5), || rows(list) == ["inner"]));
+    assert!(pump_until(WAIT, || rows(list) == ["first", "inner"]));
 
-    notify(hwnd, NMITEMACTIVATE { hdr: hdr(list, LVN_ITEMACTIVATE), iItem: 0, ..Default::default() });
-    assert!(pump_until(Duration::from_secs(5), || rows(list) == ["deep.txt"]), "{:?}", rows(list));
+    activate(hwnd, list, 1);
+    assert!(pump_until(WAIT, || rows(list) == ["deep.txt"]), "{:?}", rows(list));
 
-    notify(hwnd, NMLVKEYDOWN { hdr: hdr(list, LVN_KEYDOWN), wVKey: VK_BACK.0, flags: 0 });
-    assert!(pump_until(Duration::from_secs(5), || rows(list) == ["inner"]), "{:?}", rows(list));
-    unsafe { DestroyWindow(hwnd) }.unwrap();
+    key(list, VK_BACK);
+    assert!(pump_until(WAIT, || rows(list) == ["first", "inner"]), "{:?}", rows(list));
+    assert_eq!(selected(list), ["inner"]);
+    close(hwnd);
+}
+
+#[test]
+fn alt_arrows_go_back_forward_and_up() {
+    let t = TempDir::new("alt");
+    std::fs::create_dir_all(t.0.join("a").join("b")).unwrap();
+    let hwnd = open(&t.0.join("a"));
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["b"]));
+
+    alt_key(list, VK_UP);
+    assert!(pump_until(WAIT, || rows(list) == ["a"]), "up: {:?}", rows(list));
+    assert_eq!(selected(list), ["a"]);
+    alt_key(list, VK_LEFT);
+    assert!(pump_until(WAIT, || rows(list) == ["b"]), "back: {:?}", rows(list));
+    alt_key(list, VK_RIGHT);
+    assert!(pump_until(WAIT, || rows(list) == ["a"]), "forward: {:?}", rows(list));
+    close(hwnd);
+}
+
+#[test]
+fn address_bar_enter_navigates_and_rejects_nonsense() {
+    let t = TempDir::new("addr");
+    std::fs::create_dir(t.0.join("there")).unwrap();
+    std::fs::write(t.0.join("there").join("file.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    let edit = find(hwnd, w!("Edit"));
+    assert!(pump_until(WAIT, || rows(list) == ["there"]));
+
+    let type_and_enter = |text: &str| {
+        unsafe { SetWindowTextW(edit, &HSTRING::from(text)) }.unwrap();
+        key(edit, VK_RETURN);
+    };
+    type_and_enter(&format!("  \"{}\"  ", t.0.join("there").display()));
+    assert!(pump_until(WAIT, || rows(list) == ["file.txt"]), "{:?}", rows(list));
+
+    type_and_enter("..");
+    assert!(pump_until(WAIT, || rows(list) == ["there"]), "{:?}", rows(list));
+
+    type_and_enter("   ");
+    assert!(pump_until(WAIT, || status_text(hwnd).starts_with("Not a location")), "{}", status_text(hwnd));
+    close(hwnd);
+}
+
+#[test]
+fn escape_abandons_a_hanging_network_folder() {
+    let t = TempDir::new("esc");
+    std::fs::write(t.0.join("still here.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    let edit = find(hwnd, w!("Edit"));
+    assert!(pump_until(WAIT, || rows(list) == ["still here.txt"]));
+
+    // Nothing answers at this address, so listing it blocks for a long time.
+    unsafe { SetWindowTextW(edit, w!(r"\\10.255.255.1\nothing")) }.unwrap();
+    key(edit, VK_RETURN);
+    assert!(pump_until(WAIT, || status_text(hwnd).starts_with("Loading")), "{}", status_text(hwnd));
+
+    key(list, VK_ESCAPE);
+    assert!(pump_until(WAIT, || status_text(hwnd).starts_with("Stopped loading")), "{}", status_text(hwnd));
+    assert_eq!(rows(list), ["still here.txt"]);
+    close(hwnd);
+}
+
+#[test]
+fn ctrl_h_toggles_hidden_files() {
+    let t = TempDir::new("hidden");
+    std::fs::write(t.0.join("seen.txt"), "").unwrap();
+    let secret = t.0.join("secret.txt");
+    std::fs::write(&secret, "").unwrap();
+    unsafe { SetFileAttributesW(&HSTRING::from(secret.as_os_str()), FILE_ATTRIBUTE_HIDDEN) }.unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["seen.txt"]), "{:?}", rows(list));
+
+    let ctrl_h = || unsafe {
+        let mut keys = [0u8; 256];
+        GetKeyboardState(&mut keys).unwrap();
+        keys[VK_CONTROL.0 as usize] = 0x80;
+        SetKeyboardState(&keys).unwrap();
+        key(list, VK_H);
+        pump_until(Duration::from_millis(50), || false);
+        keys[VK_CONTROL.0 as usize] = 0;
+        SetKeyboardState(&keys).unwrap();
+    };
+    ctrl_h();
+    assert!(pump_until(WAIT, || rows(list) == ["secret.txt", "seen.txt"]), "{:?}", rows(list));
+    ctrl_h();
+    assert!(pump_until(WAIT, || rows(list) == ["seen.txt"]), "{:?}", rows(list));
+    close(hwnd);
+}
+
+#[test]
+fn shortcut_to_a_folder_opens_inside_the_app() {
+    let t = TempDir::new("lnk");
+    let target = t.0.join("target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("inside.txt"), "").unwrap();
+    let lnk = t.0.join("go.lnk");
+    let script = format!(
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{}'); $s.TargetPath='{}'; $s.Save()",
+        lnk.display(),
+        target.display()
+    );
+    let ok = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).status();
+    assert!(ok.unwrap().success() && lnk.exists());
+
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["target", "go.lnk"]), "{:?}", rows(list));
+    activate(hwnd, list, 1);
+    assert!(pump_until(WAIT, || rows(list) == ["inside.txt"]), "{:?}", rows(list));
+    close(hwnd);
 }

@@ -5,32 +5,46 @@
 
 use std::cell::RefCell;
 use std::io;
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread::JoinHandle;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CreateFontIndirectW, DeleteObject, HFONT, HGDIOBJ};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, HBRUSH, HFONT, HGDIOBJ, InvalidateRect,
+};
 use windows::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX, SetErrorMode,
 };
+use windows::Win32::System::IO::CancelSynchronousIo;
 use windows::Win32::System::LibraryLoader::{
     GetModuleHandleW, LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
 };
 use windows::Win32::System::Ole::OleInitialize;
+use windows::Win32::System::SystemServices::{
+    APPCOMMAND_BROWSER_BACKWARD, APPCOMMAND_BROWSER_FORWARD, APPCOMMAND_BROWSER_REFRESH, APPCOMMAND_ID,
+};
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_BACK};
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, PWSTR, Result, w};
 
-use crate::browser::{Browser, SortJob};
+use crate::browser::{Applied, Browser, ListJob, SortJob, parse_location};
 use crate::events::Events;
 use crate::listing::{Snapshot, list_dir};
 use crate::sort::{Sort, SortKey, sorted_order};
-use crate::{crash, format};
+use crate::{crash, format, shell};
 
 const CLASS: PCWSTR = w!("FileExplorerPro");
 const WM_APP_EVENTS: u32 = WM_APP + 1;
+const ID_BACK: usize = 1;
+const ID_FORWARD: usize = 2;
+const ID_UP: usize = 3;
+/// Listing threads stuck on dead network paths we tolerate before refusing new ones.
+const MAX_LISTERS: usize = 8;
 const COLUMNS: [(PCWSTR, i32, SortKey); 3] = [
     (w!("Name"), 320, SortKey::Name),
     (w!("Date modified"), 160, SortKey::Modified),
@@ -38,16 +52,34 @@ const COLUMNS: [(PCWSTR, i32, SortKey); 3] = [
 ];
 
 enum Event {
-    Listed { generation: u64, result: io::Result<(Snapshot, Vec<u32>)> },
-    Sorted { generation: u64, sort: Sort, order: Vec<u32> },
+    Listed {
+        generation: u64,
+        result: io::Result<(Snapshot, Vec<u32>)>,
+    },
+    Sorted {
+        generation: u64,
+        sort: Sort,
+        show_hidden: bool,
+        order: Vec<u32>,
+    },
+    /// A shortcut resolved to a folder: show it.
+    Navigate(PathBuf),
+    /// One-off status bar message.
+    Message(String),
 }
 
 struct App {
+    hwnd: HWND,
     list: HWND,
+    address: HWND,
+    buttons: [HWND; 3],
     status: HWND,
     font: HFONT,
     browser: Browser,
     events: Arc<Events<Event>>,
+    /// Thread listing the folder being loaded, so Esc can cancel its blocking I/O.
+    lister: Option<JoinHandle<()>>,
+    live_listers: Arc<AtomicUsize>,
 }
 
 thread_local! {
@@ -82,6 +114,32 @@ pub fn init_process() -> Result<()> {
     Ok(())
 }
 
+unsafe fn child(
+    parent: HWND,
+    class: PCWSTR,
+    text: PCWSTR,
+    style: WINDOW_STYLE,
+    ex: WINDOW_EX_STYLE,
+    id: usize,
+) -> Result<HWND> {
+    unsafe {
+        CreateWindowExW(
+            ex,
+            class,
+            text,
+            WS_CHILD | WS_VISIBLE | style,
+            0,
+            0,
+            0,
+            0,
+            Some(parent),
+            Some(HMENU(id as _)),
+            Some(GetModuleHandleW(None)?.into()),
+            None,
+        )
+    }
+}
+
 pub fn create_main_window(start: &Path) -> Result<HWND> {
     unsafe {
         let hinstance = GetModuleHandleW(None)?.into();
@@ -90,6 +148,7 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as _),
             lpszClassName: CLASS,
             ..Default::default()
         };
@@ -98,7 +157,7 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
             WINDOW_EX_STYLE::default(),
             CLASS,
             w!("File Explorer Pro"),
-            WS_OVERLAPPEDWINDOW,
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             1100,
@@ -109,19 +168,24 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
             None,
         )?;
 
-        let list = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+        let none = WINDOW_EX_STYLE::default();
+        let button = |text, id| child(hwnd, WC_BUTTONW, text, WS_TABSTOP | WS_DISABLED, none, id);
+        let buttons = [button(w!("←"), ID_BACK)?, button(w!("→"), ID_FORWARD)?, button(w!("↑"), ID_UP)?];
+        let address = child(
+            hwnd,
+            WC_EDITW,
+            w!(""),
+            WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+            WS_EX_CLIENTEDGE,
+            0,
+        )?;
+        let list = child(
+            hwnd,
             WC_LISTVIEWW,
-            None,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS),
+            w!(""),
+            WS_TABSTOP | WINDOW_STYLE(LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS),
+            none,
             0,
-            0,
-            0,
-            0,
-            Some(hwnd),
-            None,
-            Some(hinstance),
-            None,
         )?;
         let ex = LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER;
         SendMessageW(
@@ -131,48 +195,44 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
             Some(LPARAM(ex as isize)),
         );
         let _ = SetWindowTheme(list, w!("Explorer"), None);
-        let scale = |px: i32| px * GetDpiForWindow(hwnd) as i32 / 96;
         for (i, (title, width, key)) in COLUMNS.iter().enumerate() {
             let col = LVCOLUMNW {
                 mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
                 fmt: if *key == SortKey::Size { LVCFMT_RIGHT } else { LVCFMT_LEFT },
-                cx: scale(*width),
+                cx: scale(hwnd, *width),
                 pszText: PWSTR(title.0 as *mut _),
                 ..Default::default()
             };
             SendMessageW(list, LVM_INSERTCOLUMNW, Some(WPARAM(i)), Some(LPARAM(&col as *const _ as isize)));
         }
-
-        let status = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
-            STATUSCLASSNAMEW,
-            None,
-            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(SBARS_SIZEGRIP),
-            0,
-            0,
-            0,
-            0,
-            Some(hwnd),
-            None,
-            Some(hinstance),
-            None,
-        )?;
+        let status = child(hwnd, STATUSCLASSNAMEW, w!(""), WINDOW_STYLE(SBARS_SIZEGRIP), none, 0)?;
 
         let font = message_font(hwnd);
-        set_font(&[list, status], font);
+        set_font(&[list, status, address, buttons[0], buttons[1], buttons[2]], font);
 
         let target = hwnd.0 as isize;
         let events = Arc::new(Events::new(move || {
             PostMessageW(Some(HWND(target as _)), WM_APP_EVENTS, WPARAM(0), LPARAM(0)).is_ok()
         }));
         APP.with(|cell| {
-            *cell.borrow_mut() = Some(App { list, status, font, browser: Browser::default(), events })
+            *cell.borrow_mut() = Some(App {
+                hwnd,
+                list,
+                address,
+                buttons,
+                status,
+                font,
+                browser: Browser::default(),
+                events,
+                lister: None,
+                live_listers: Arc::new(AtomicUsize::new(0)),
+            })
         });
 
         layout(hwnd);
         update_sort_arrows();
         let _ = SetFocus(Some(list));
-        navigate(start.to_path_buf());
+        go(start.to_path_buf());
         Ok(hwnd)
     }
 }
@@ -182,10 +242,77 @@ pub fn run_message_loop() {
     unsafe {
         // GetMessageW returns -1 on error, 0 on WM_QUIT.
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            if !translate(&msg) {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
     }
+}
+
+/// App-wide keyboard shortcuts, checked before a message is dispatched.
+/// Returns true if the message was consumed. Call from every message loop.
+pub fn translate(msg: &MSG) -> bool {
+    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+        return false;
+    }
+    crash::guard(|| on_key(msg)).unwrap_or(false)
+}
+
+fn on_key(msg: &MSG) -> bool {
+    let Some((list, address)) = with_app(|a| (a.list, a.address)) else { return false };
+    if msg.hwnd != list && msg.hwnd != address {
+        return false;
+    }
+    let key = VIRTUAL_KEY(msg.wParam.0 as u16);
+    let in_address = msg.hwnd == address;
+    let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+    if msg.message == WM_SYSKEYDOWN {
+        match key {
+            VK_LEFT => run(Browser::back),
+            VK_RIGHT => run(Browser::forward),
+            VK_UP => run(Browser::up),
+            VK_D => focus_address(),
+            _ => return false,
+        }
+        return true;
+    }
+    match key {
+        VK_BACK if !in_address => run(Browser::back),
+        VK_F5 => run(Browser::refresh),
+        VK_F4 => focus_address(),
+        VK_L if ctrl => focus_address(),
+        VK_H if ctrl && !in_address => {
+            if let Some(job) = with_app(|a| a.browser.toggle_hidden()).flatten() {
+                spawn_sort(job);
+            }
+        }
+        VK_RETURN if in_address => {
+            let text = window_text(address);
+            let current = with_app(|a| a.browser.dir().map(Path::to_path_buf)).flatten();
+            match parse_location(&text, current.as_deref()) {
+                Some(dir) => {
+                    go(dir);
+                    unsafe {
+                        let _ = SetFocus(Some(list));
+                    }
+                }
+                None => set_status(&format!("Not a location: {text}")),
+            }
+        }
+        VK_ESCAPE if in_address => {
+            show_location();
+            unsafe {
+                let _ = SetFocus(Some(list));
+            }
+        }
+        VK_ESCAPE => cancel_loading(),
+        VK_TAB => unsafe {
+            let _ = SetFocus(Some(if in_address { list } else { address }));
+        },
+        _ => return false,
+    }
+    true
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -203,6 +330,28 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_NOTIFY => {
                 on_notify(&*(lp.0 as *const NMHDR), lp).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
+            }
+            WM_COMMAND => {
+                match wp.0 & 0xFFFF {
+                    ID_BACK => run(Browser::back),
+                    ID_FORWARD => run(Browser::forward),
+                    ID_UP => run(Browser::up),
+                    _ => return DefWindowProcW(hwnd, msg, wp, lp),
+                }
+                if let Some(list) = with_app(|a| a.list) {
+                    let _ = SetFocus(Some(list));
+                }
+                LRESULT(0)
+            }
+            // Mouse back/forward buttons and keyboard browser keys arrive here.
+            WM_APPCOMMAND => {
+                match APPCOMMAND_ID(((lp.0 >> 16) as u32) & !FAPPCOMMAND_MASK & 0xFFFF) {
+                    APPCOMMAND_BROWSER_BACKWARD => run(Browser::back),
+                    APPCOMMAND_BROWSER_FORWARD => run(Browser::forward),
+                    APPCOMMAND_BROWSER_REFRESH => run(Browser::refresh),
+                    _ => return DefWindowProcW(hwnd, msg, wp, lp),
+                }
+                LRESULT(1)
             }
             WM_SIZE => {
                 layout(hwnd);
@@ -226,10 +375,11 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
                 let font = message_font(hwnd);
-                if let Some((old, list, status)) =
-                    with_app(|a| (std::mem::replace(&mut a.font, font), a.list, a.status))
-                {
-                    set_font(&[list, status], font);
+                if let Some((old, controls)) = with_app(|a| {
+                    let c = [a.list, a.status, a.address, a.buttons[0], a.buttons[1], a.buttons[2]];
+                    (std::mem::replace(&mut a.font, font), c)
+                }) {
+                    set_font(&controls, font);
                     let _ = DeleteObject(HGDIOBJ(old.0));
                 }
                 layout(hwnd);
@@ -285,22 +435,12 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
             }
             LVN_ITEMACTIVATE => {
                 let row = (*(lp.0 as *const NMITEMACTIVATE)).iItem;
-                let target = with_app(|a| {
-                    let s = a.browser.snapshot()?;
-                    let i = *a.browser.order.get(usize::try_from(row).ok()?)? as usize;
-                    s.is_dir(i).then(|| s.dir.join(s.name_string(i)))
-                });
-                if let Some(dir) = target.flatten() {
-                    navigate(dir);
-                }
-                Some(LRESULT(0))
-            }
-            LVN_KEYDOWN => {
-                if (*(lp.0 as *const NMLVKEYDOWN)).wVKey == VK_BACK.0 {
-                    let parent = with_app(|a| a.browser.dir().and_then(Path::parent).map(Path::to_path_buf));
-                    if let Some(p) = parent.flatten() {
-                        navigate(p);
-                    }
+                let target =
+                    usize::try_from(row).ok().and_then(|r| with_app(|a| a.browser.path_at(r)).flatten());
+                match target {
+                    Some((dir, true)) => go(dir),
+                    Some((file, false)) => open_file(file),
+                    None => {}
                 }
                 Some(LRESULT(0))
             }
@@ -336,29 +476,64 @@ fn write(item: &mut LVITEMW, text: &[u16]) {
 fn apply(ev: Event) {
     match ev {
         Event::Listed { generation, result } => {
-            if with_app(|a| a.browser.on_listed(generation, result)) == Some(true) {
-                refresh(true);
-                if let Some(job) = with_app(|a| a.browser.sort_job()).flatten() {
-                    spawn_sort(job);
+            let sel = selected_rows();
+            let applied = with_app(|a| {
+                let r = a.browser.on_listed(generation, result, &sel);
+                if r != Applied::Stale {
+                    a.lister = None;
                 }
+                r
+            });
+            match applied {
+                Some(Applied::Shown { select, new_folder }) => {
+                    refresh(&select, new_folder);
+                    if let Some(job) = with_app(|a| a.browser.sort_job()).flatten() {
+                        spawn_sort(job);
+                    }
+                }
+                Some(Applied::Failed) => update_chrome(),
+                _ => {}
             }
         }
-        Event::Sorted { generation, sort, order } => {
-            if with_app(|a| a.browser.on_sorted(generation, sort, order)) == Some(true) {
-                refresh(false);
+        Event::Sorted { generation, sort, show_hidden, order } => {
+            let sel = selected_rows();
+            if let Some(Applied::Shown { select, .. }) =
+                with_app(|a| a.browser.on_sorted(generation, sort, show_hidden, order, &sel))
+            {
+                refresh(&select, false);
             }
         }
+        Event::Navigate(dir) => go(dir),
+        Event::Message(text) => set_status(&text),
     }
 }
 
-fn navigate(dir: PathBuf) {
-    let Some((generation, sort, show_hidden, events)) = with_app(|a| {
-        let g = a.browser.navigate(dir.clone());
-        (g, a.browser.sort, a.browser.show_hidden, a.events.clone())
-    }) else {
-        return;
-    };
-    spawn("list", move || {
+/// Runs a browser navigation (`Browser::back`, `up`, ...) and lists its target.
+fn run(nav: impl FnOnce(&mut Browser) -> Option<ListJob>) {
+    if with_app(|a| a.live_listers.load(Ordering::SeqCst) >= MAX_LISTERS) == Some(true) {
+        return set_status("Too many folders still loading (network?). Wait a moment and try again.");
+    }
+    if let Some(job) = with_app(|a| nav(&mut a.browser)).flatten() {
+        spawn_list(job);
+    }
+}
+
+fn go(dir: PathBuf) {
+    run(|b| Some(b.go(dir)));
+}
+
+fn spawn_list(job: ListJob) {
+    let Some((events, live)) = with_app(|a| (a.events.clone(), a.live_listers.clone())) else { return };
+    live.fetch_add(1, Ordering::SeqCst);
+    let worker = spawn("list", move || {
+        struct Done(Arc<AtomicUsize>);
+        impl Drop for Done {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let _done = Done(live);
+        let ListJob { generation, dir, sort, show_hidden } = job;
         let result = crash::guard(|| {
             list_dir(&dir).map(|s| {
                 let order = sorted_order(&s, sort, show_hidden);
@@ -368,63 +543,175 @@ fn navigate(dir: PathBuf) {
         .unwrap_or_else(|| Err(io::Error::other("internal error while listing")));
         events.send(Event::Listed { generation, result });
     });
-    update_status();
+    if worker.is_none() {
+        with_app(|a| a.live_listers.fetch_sub(1, Ordering::SeqCst));
+    }
+    with_app(|a| a.lister = worker);
+    update_chrome();
+}
+
+fn cancel_loading() {
+    let Some(worker) = with_app(|a| a.browser.cancel().then(|| a.lister.take()).flatten()).flatten() else {
+        return update_chrome();
+    };
+    // Wakes the thread if it's blocked in a synchronous call (e.g. a dead network path).
+    // If it isn't, this fails harmlessly; either way its result is now stale.
+    unsafe {
+        let _ = CancelSynchronousIo(HANDLE(worker.as_raw_handle()));
+    }
+    update_chrome();
 }
 
 fn spawn_sort(job: SortJob) {
-    let Some((show_hidden, events)) = with_app(|a| (a.browser.show_hidden, a.events.clone())) else { return };
+    let Some(events) = with_app(|a| a.events.clone()) else { return };
     spawn("sort", move || {
-        if let Some(order) = crash::guard(|| sorted_order(&job.snapshot, job.sort, show_hidden)) {
-            events.send(Event::Sorted { generation: job.generation, sort: job.sort, order });
+        if let Some(order) = crash::guard(|| sorted_order(&job.snapshot, job.sort, job.show_hidden)) {
+            events.send(Event::Sorted {
+                generation: job.generation,
+                sort: job.sort,
+                show_hidden: job.show_hidden,
+                order,
+            });
         }
     });
 }
 
-/// Starts a worker thread. If the OS refuses, the failure is logged; the UI stays as is.
-fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
-    if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(f) {
-        crash::log(&format!("could not start {name} thread: {e}"));
+fn open_file(path: PathBuf) {
+    let Some((events, hwnd)) = with_app(|a| (a.events.clone(), a.hwnd.0 as isize)) else { return };
+    spawn("open", move || {
+        let ev = match crash::guard(|| shell::open(&path, HWND(hwnd as _))) {
+            Some(Ok(Some(dir))) => Event::Navigate(dir),
+            Some(Ok(None)) => return,
+            Some(Err(e)) => Event::Message(e),
+            None => Event::Message(format!("Can't open {}", path.display())),
+        };
+        events.send(ev);
+    });
+}
+
+/// Starts a worker thread. If the OS refuses, the failure is logged and shown.
+fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Option<JoinHandle<()>> {
+    match std::thread::Builder::new().name(name.into()).spawn(f) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            crash::log(&format!("could not start {name} thread: {e}"));
+            set_status("Out of resources: could not start a background task.");
+            None
+        }
     }
 }
 
-/// Pushes browser state to the controls. `new_folder` resets scroll and selection.
-fn refresh(new_folder: bool) {
-    let Some((list, count, title)) = with_app(|a| {
-        let title = a.browser.dir().map(|d| d.display().to_string()).unwrap_or_default();
-        (a.list, a.browser.order.len(), title)
+fn selected_rows() -> Vec<usize> {
+    let Some(list) = with_app(|a| a.list) else { return Vec::new() };
+    let mut rows = Vec::new();
+    let mut i = -1isize;
+    loop {
+        i = unsafe {
+            SendMessageW(
+                list,
+                LVM_GETNEXTITEM,
+                Some(WPARAM(i as usize)),
+                Some(LPARAM(LVNI_SELECTED as isize)),
+            )
+        }
+        .0;
+        if i < 0 {
+            return rows;
+        }
+        rows.push(i as usize);
+    }
+}
+
+/// Pushes the browser's contents to the list, selecting `select`.
+fn refresh(select: &[usize], new_folder: bool) {
+    let Some((list, count)) = with_app(|a| (a.list, a.browser.order.len())) else { return };
+    unsafe {
+        let set = |row: isize, state: u32| {
+            let item = LVITEMW {
+                state: LIST_VIEW_ITEM_STATE_FLAGS(state),
+                stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0),
+                ..Default::default()
+            };
+            SendMessageW(
+                list,
+                LVM_SETITEMSTATE,
+                Some(WPARAM(row as usize)),
+                Some(LPARAM(&item as *const _ as isize)),
+            );
+        };
+        set(-1, 0);
+        let flags = if new_folder { 0 } else { LVSICF_NOSCROLL };
+        SendMessageW(list, LVM_SETITEMCOUNT, Some(WPARAM(count)), Some(LPARAM(flags as isize)));
+        // ponytail: one message per selected row; slow only for "select all" in 100k+ folders.
+        for &row in select {
+            set(row as isize, LVIS_SELECTED.0);
+        }
+        if let Some(&first) = select.first() {
+            set(first as isize, LVIS_SELECTED.0 | LVIS_FOCUSED.0);
+            SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(first)), Some(LPARAM(0)));
+        } else if new_folder && count > 0 {
+            SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(0)), Some(LPARAM(0)));
+        }
+        let _ = InvalidateRect(Some(list), None, false);
+    }
+    update_chrome();
+}
+
+/// Title, address bar, button states and status text from the browser.
+fn update_chrome() {
+    let Some((hwnd, buttons, enabled, title)) = with_app(|a| {
+        let b = &a.browser;
+        let title = b.dir().map(|d| d.display().to_string()).unwrap_or_default();
+        (a.hwnd, a.buttons, [b.can_back(), b.can_forward(), b.can_up()], title)
     }) else {
         return;
     };
     unsafe {
-        // Selection is by row index, so it is meaningless after any reorder.
-        // ponytail: selection dropped on re-sort; remap by name if it annoys.
-        let clear = LVITEMW {
-            stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0),
-            ..Default::default()
-        };
-        SendMessageW(
-            list,
-            LVM_SETITEMSTATE,
-            Some(WPARAM(usize::MAX)),
-            Some(LPARAM(&clear as *const _ as isize)),
-        );
-        SendMessageW(list, LVM_SETITEMCOUNT, Some(WPARAM(count)), Some(LPARAM(0)));
-        if new_folder && count > 0 {
-            SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(0)), Some(LPARAM(0)));
+        for (button, on) in buttons.iter().zip(enabled) {
+            let _ = EnableWindow(*button, on);
         }
-        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(list), None, false);
-        if let Ok(parent) = GetParent(list) {
-            let _ = SetWindowTextW(parent, &HSTRING::from(format!("{title} - File Explorer Pro")));
-        }
+        let _ = SetWindowTextW(hwnd, &HSTRING::from(format!("{title} - File Explorer Pro")));
     }
-    update_status();
+    show_location();
+    if let Some(text) = with_app(|a| a.browser.status()) {
+        set_status(&text);
+    }
 }
 
-fn update_status() {
-    let Some((status, text)) = with_app(|a| (a.status, a.browser.status())) else { return };
+/// Puts the current folder in the address bar, unless the user is typing there.
+fn show_location() {
+    let Some((address, dir)) = with_app(|a| (a.address, a.browser.dir().map(Path::to_path_buf))) else {
+        return;
+    };
+    unsafe {
+        if GetFocus() != address {
+            let text = dir.map(|d| d.display().to_string()).unwrap_or_default();
+            let _ = SetWindowTextW(address, &HSTRING::from(text));
+        }
+    }
+}
+
+fn focus_address() {
+    let Some(address) = with_app(|a| a.address) else { return };
+    unsafe {
+        let _ = SetFocus(Some(address));
+        SendMessageW(address, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+    }
+}
+
+fn set_status(text: &str) {
+    let Some(status) = with_app(|a| a.status) else { return };
     let text = HSTRING::from(text);
     unsafe {
         SendMessageW(status, SB_SETTEXTW, Some(WPARAM(0)), Some(LPARAM(text.as_ptr() as isize)));
+    }
+}
+
+fn window_text(hwnd: HWND) -> String {
+    unsafe {
+        let mut buf = vec![0u16; GetWindowTextLengthW(hwnd) as usize + 1];
+        let n = GetWindowTextW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..n as usize])
     }
 }
 
@@ -444,15 +731,29 @@ fn update_sort_arrows() {
     }
 }
 
+fn scale(hwnd: HWND, px: i32) -> i32 {
+    px * unsafe { GetDpiForWindow(hwnd) } as i32 / 96
+}
+
 fn layout(hwnd: HWND) {
-    let Some((list, status)) = with_app(|a| (a.list, a.status)) else { return };
+    let Some((list, status, address, buttons)) = with_app(|a| (a.list, a.status, a.address, a.buttons))
+    else {
+        return;
+    };
     unsafe {
         SendMessageW(status, WM_SIZE, None, None);
         let (mut client, mut sr) = (RECT::default(), RECT::default());
         let _ = GetClientRect(hwnd, &mut client);
         let _ = GetWindowRect(status, &mut sr);
-        let h = client.bottom - (sr.bottom - sr.top);
-        let _ = MoveWindow(list, 0, 0, client.right, h.max(0), true);
+        let (pad, bar, bw) = (scale(hwnd, 4), scale(hwnd, 28), scale(hwnd, 32));
+        for (i, b) in buttons.iter().enumerate() {
+            let _ = MoveWindow(*b, pad + i as i32 * (bw + pad), pad, bw, bar, true);
+        }
+        let ax = pad + 3 * (bw + pad);
+        let _ = MoveWindow(address, ax, pad, (client.right - ax - pad).max(0), bar, true);
+        let top = bar + 2 * pad;
+        let h = client.bottom - (sr.bottom - sr.top) - top;
+        let _ = MoveWindow(list, 0, top, client.right, h.max(0), true);
     }
 }
 
