@@ -18,6 +18,18 @@ Rules that hold for every stage:
 | M0 | Window, manifest, crash guard, panic log, minidumps, no "insert disk" dialogs |
 | M1 | Listing (`FindFirstFileExW`), long paths, natural sort with sort keys, size/date text |
 | M2 | Virtual ListView, worker listing/sorting, generations, sort arrows, type-to-find, status bar |
+| M3 | History, address bar, Esc cancels stalled loads, opening files and folder shortcuts, Ctrl+H, F5, selection kept |
+| M4 | Sidebar: Quick access, drives with labels, lazy folder tree, splitter, Tab order |
+| M5 | System icons (per extension; per file for programs/shortcuts), Type column and sort |
+
+Notes from building M3 to M5:
+
+- Opening a file never shows a modal error; only "How do you want to open this file?" remains.
+- Icons are requested while painting, which already limits lookups to visible rows,
+  so `LVN_ODCACHEHINT` wasn't needed.
+- Shortcut arrow overlays are skipped: overlay queries run every installed overlay
+  handler (cloud sync, Git), a known source of slowness.
+- The shell's image list setup races between threads on first use; it runs once per process.
 
 ## M3: navigation and opening files
 
