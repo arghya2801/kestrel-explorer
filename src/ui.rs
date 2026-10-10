@@ -241,6 +241,8 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            // Resource 1 from res/app.rc; absent in test binaries, which is fine.
+            hIcon: LoadIconW(Some(hinstance), PCWSTR(1 as _)).unwrap_or_default(),
             hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as _),
             lpszClassName: CLASS,
             ..Default::default()

@@ -1,6 +1,6 @@
 [package]
 name = "file-explorer-pro"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies.windows]
@@ -38,3 +38,6 @@ lto = "fat"
 codegen-units = 1
 panic = "unwind"
 debug = 1
+
+[build-dependencies]
+embed-resource = "=3.0.12"
