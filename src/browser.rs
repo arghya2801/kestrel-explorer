@@ -18,6 +18,8 @@ pub struct ListJob {
     pub dir: PathBuf,
     pub sort: Sort,
     pub show_hidden: bool,
+    /// Keep only names containing this (folded); empty keeps all.
+    pub filter: Vec<u16>,
 }
 
 /// Work for a sort thread: re-order `snapshot` (shown as `generation`).
@@ -26,6 +28,7 @@ pub struct SortJob {
     pub snapshot: Arc<Snapshot>,
     pub sort: Sort,
     pub show_hidden: bool,
+    pub filter: Vec<u16>,
 }
 
 /// Result of feeding a worker result to the browser.
@@ -59,10 +62,12 @@ pub struct Browser {
     current: Option<Arc<Snapshot>>,
     /// Display order: indices into `current`, matching `order_spec`.
     pub order: Vec<u32>,
-    order_spec: (Sort, bool),
+    order_spec: (Sort, bool, Vec<u16>),
     pub sort: Sort,
     pub show_hidden: bool,
-    loading: Option<(PathBuf, Nav, Sort, bool)>,
+    loading: Option<(PathBuf, Nav, Sort, bool, Vec<u16>)>,
+    /// Folded filter text; empty shows everything.
+    filter: Vec<u16>,
     error: Option<String>,
     back: Vec<PathBuf>,
     forward: Vec<PathBuf>,
@@ -80,7 +85,8 @@ impl Default for Browser {
             shown_generation: 0,
             current: None,
             order: Vec::new(),
-            order_spec: (sort, false),
+            order_spec: (sort, false, Vec::new()),
+            filter: Vec::new(),
             sort,
             show_hidden: false,
             loading: None,
@@ -96,13 +102,26 @@ impl Default for Browser {
 impl Browser {
     fn start(&mut self, dir: PathBuf, nav: Nav) -> ListJob {
         self.generation += 1;
-        self.loading = Some((dir.clone(), nav, self.sort, self.show_hidden));
         self.error = None;
         self.dirty = false;
         if self.dir() != Some(dir.as_path()) {
+            // A different folder: a filter typed for the old one would only confuse.
             self.select_next = None;
+            self.filter.clear();
         }
-        ListJob { generation: self.generation, dir, sort: self.sort, show_hidden: self.show_hidden }
+        let filter = self.filter.clone();
+        self.loading = Some((dir.clone(), nav, self.sort, self.show_hidden, filter.clone()));
+        ListJob { generation: self.generation, dir, sort: self.sort, show_hidden: self.show_hidden, filter }
+    }
+
+    /// Narrows the view to names containing `text`, ignoring case.
+    pub fn set_filter(&mut self, text: &str) -> Option<SortJob> {
+        self.filter = crate::sort::fold(&text.encode_utf16().collect::<Vec<_>>());
+        self.sort_job()
+    }
+
+    pub fn filter(&self) -> String {
+        String::from_utf16_lossy(&self.filter)
     }
 
     pub fn go(&mut self, dir: PathBuf) -> ListJob {
@@ -191,7 +210,7 @@ impl Browser {
         if generation != self.generation {
             return Applied::Stale;
         }
-        let Some((dir, nav, sort, hidden)) = self.loading.take() else { return Applied::Stale };
+        let Some((dir, nav, sort, hidden, filter)) = self.loading.take() else { return Applied::Stale };
         let (snap, order) = match result {
             Ok(ok) => ok,
             Err(_) if matches!(nav, Nav::Changed | Nav::Escape) && dir.parent().is_some() => {
@@ -234,7 +253,7 @@ impl Browser {
         }
         self.current = Some(Arc::new(snap));
         self.order = order;
-        self.order_spec = (sort, hidden);
+        self.order_spec = (sort, hidden, filter);
         self.shown_generation = generation;
         let mut select: Vec<usize> = keep.iter().filter_map(|n| self.row_named(n)).collect();
         if let Some(row) = self.select_next.as_deref().and_then(|n| self.row_named(n)) {
@@ -257,11 +276,13 @@ impl Browser {
     /// A job to run if the shown order doesn't match the wanted sort and filter.
     pub fn sort_job(&self) -> Option<SortJob> {
         let snapshot = self.current.clone()?;
-        (self.order_spec != (self.sort, self.show_hidden)).then_some(SortJob {
+        let wanted = (self.sort, self.show_hidden, self.filter.clone());
+        (self.order_spec != wanted).then_some(SortJob {
             generation: self.shown_generation,
             snapshot,
             sort: self.sort,
             show_hidden: self.show_hidden,
+            filter: self.filter.clone(),
         })
     }
 
@@ -270,15 +291,17 @@ impl Browser {
         generation: u64,
         sort: Sort,
         show_hidden: bool,
+        filter: &[u16],
         order: Vec<u32>,
         selected: &[usize],
     ) -> Applied {
-        if generation != self.shown_generation || (sort, show_hidden) != (self.sort, self.show_hidden) {
+        let wanted = (self.sort, self.show_hidden, self.filter.as_slice());
+        if generation != self.shown_generation || (sort, show_hidden, filter) != wanted {
             return Applied::Stale;
         }
         let keep: Vec<u32> = self.entries_at(selected).collect();
         self.order = order;
-        self.order_spec = (sort, show_hidden);
+        self.order_spec = (sort, show_hidden, filter.to_vec());
         let mut row_of = vec![usize::MAX; self.snapshot().map_or(0, Snapshot::len)];
         for (row, &e) in self.order.iter().enumerate() {
             row_of[e as usize] = row;
@@ -338,7 +361,9 @@ impl Browser {
         if let Some(e) = &self.error {
             return e.clone();
         }
+        let total = self.snapshot().map_or(0, Snapshot::len);
         match self.order.len() {
+            n if !self.filter.is_empty() => format!("{n} of {total} items"),
             1 => "1 item".into(),
             n => format!("{n} items"),
         }
@@ -539,9 +564,9 @@ mod tests {
         let req = b.set_sort(by_size).unwrap();
         assert_eq!(req.generation, g);
         let by_date = Sort { key: SortKey::Modified, descending: false };
-        assert_eq!(b.on_sorted(g, by_date, false, vec![1, 0], &[]), Applied::Stale);
-        assert_eq!(b.on_sorted(g + 1, by_size, false, vec![1, 0], &[]), Applied::Stale);
-        assert_eq!(b.on_sorted(g, by_size, false, vec![1, 0], &[0]), shown(&[1], false));
+        assert_eq!(b.on_sorted(g, by_date, false, &[], vec![1, 0], &[]), Applied::Stale);
+        assert_eq!(b.on_sorted(g + 1, by_size, false, &[], vec![1, 0], &[]), Applied::Stale);
+        assert_eq!(b.on_sorted(g, by_size, false, &[], vec![1, 0], &[0]), shown(&[1], false));
         assert_eq!(b.order, [1, 0]);
     }
 
@@ -554,7 +579,7 @@ mod tests {
         b.on_listed(job.generation, listed(r"C:\a", &["x"]), &[]); // listed with the old sort
         let resort = b.sort_job().expect("resort needed");
         assert_eq!((resort.generation, resort.sort), (job.generation, by_size));
-        b.on_sorted(job.generation, by_size, false, vec![0], &[]);
+        b.on_sorted(job.generation, by_size, false, &[], vec![0], &[]);
         assert!(b.sort_job().is_none());
     }
 
@@ -564,8 +589,11 @@ mod tests {
         visit(&mut b, r"C:\a", &["x"]);
         let job = b.toggle_hidden().unwrap();
         assert!(job.show_hidden);
-        assert_eq!(b.on_sorted(job.generation, job.sort, false, vec![], &[]), Applied::Stale);
-        assert!(matches!(b.on_sorted(job.generation, job.sort, true, vec![0], &[]), Applied::Shown { .. }));
+        assert_eq!(b.on_sorted(job.generation, job.sort, false, &[], vec![], &[]), Applied::Stale);
+        assert!(matches!(
+            b.on_sorted(job.generation, job.sort, true, &[], vec![0], &[]),
+            Applied::Shown { .. }
+        ));
         assert!(b.sort_job().is_none());
     }
 
@@ -661,6 +689,27 @@ mod tests {
             b.on_listed(again.generation, listed(r"C:", &["New folder", "x", "y"]), &[2]),
             shown(&[2], false)
         );
+    }
+
+    #[test]
+    fn filter_narrows_the_view_and_resets_on_navigation() {
+        let mut b = Browser::default();
+        visit(&mut b, r"C:", &["apple", "banana", "grape"]);
+        let job = b.set_filter("AP").expect("refilter");
+        assert_eq!(job.filter, w("ap"));
+        assert_eq!(
+            b.on_sorted(job.generation, job.sort, job.show_hidden, &[], vec![], &[]),
+            Applied::Stale,
+            "old filter"
+        );
+        let r = b.on_sorted(job.generation, job.sort, job.show_hidden, &job.filter, vec![0, 2], &[]);
+        assert_eq!(r, shown(&[], false));
+        assert_eq!(b.status(), "2 of 3 items");
+        // A refresh keeps the filter; going elsewhere drops it.
+        assert_eq!(b.refresh().unwrap().filter, w("ap"));
+        let job = b.go(r"C:".into());
+        assert!(job.filter.is_empty());
+        assert_eq!(b.filter(), "");
     }
 
     #[test]

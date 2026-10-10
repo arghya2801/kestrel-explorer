@@ -48,6 +48,30 @@ fn lower_ext(name: &[u16]) -> impl Iterator<Item = u16> + '_ {
     name[start..].iter().map(|&c| if (b'A' as u16..=b'Z' as u16).contains(&c) { c + 32 } else { c })
 }
 
+/// Lowercase form used for filtering ("Ä" matches "ä").
+pub fn fold(text: &[u16]) -> Vec<u16> {
+    if text.iter().all(|&c| c < 128) {
+        return text
+            .iter()
+            .map(|&c| if (b'A' as u16..=b'Z' as u16).contains(&c) { c + 32 } else { c })
+            .collect();
+    }
+    String::from_utf16_lossy(text).to_lowercase().encode_utf16().collect()
+}
+
+/// The entries of `order` whose names contain `needle`, ignoring case; order kept.
+pub fn filter_order(s: &Snapshot, order: &[u32], needle: &[u16]) -> Vec<u32> {
+    if needle.is_empty() {
+        return order.to_vec();
+    }
+    let needle = fold(needle);
+    order
+        .iter()
+        .copied()
+        .filter(|&i| fold(s.name(i as usize)).windows(needle.len()).any(|w| w == needle.as_slice()))
+        .collect()
+}
+
 /// Visible entries in display order. Ties on size/date fall back to name, ascending.
 pub fn sorted_order(s: &Snapshot, sort: Sort, show_hidden: bool) -> Vec<u32> {
     let mut v: Vec<u32> = (0..s.len() as u32).filter(|&i| show_hidden || !s.is_hidden(i as usize)).collect();
@@ -141,6 +165,17 @@ mod tests {
         ]);
         assert_eq!(sorted(&s, SortKey::Type, false, true), ["d", "noext", "b.TXT", "c.txt", "a.zip"]);
         assert_eq!(sorted(&s, SortKey::Type, true, true), ["d", "a.zip", "b.TXT", "c.txt", "noext"]);
+    }
+
+    #[test]
+    fn filter_keeps_matching_names_in_order_ignoring_case() {
+        let s =
+            snap(&[("Report.txt", 0, 0, 0), ("notes", DIR, 0, 0), ("ÜBER report", 0, 0, 0), ("x", 0, 0, 0)]);
+        let w = |t: &str| t.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(filter_order(&s, &[0, 1, 2, 3], &w("REPORT")), [0, 2]);
+        assert_eq!(filter_order(&s, &[3, 2, 1, 0], &w("über")), [2]);
+        assert_eq!(filter_order(&s, &[3, 2, 1, 0], &w("")), [3, 2, 1, 0]);
+        assert!(filter_order(&s, &[0, 1, 2, 3], &w("zzz")).is_empty());
     }
 
     #[test]

@@ -39,7 +39,7 @@ use crate::events::Events;
 use crate::icons::{self, Done, Icons};
 use crate::listing::{Snapshot, list_dir};
 use crate::settings::Settings;
-use crate::sort::{Sort, SortKey, sorted_order};
+use crate::sort::{Sort, SortKey, filter_order, sorted_order};
 use crate::watch::Watcher;
 use crate::{crash, format, shell};
 
@@ -75,6 +75,7 @@ enum Event {
         generation: u64,
         sort: Sort,
         show_hidden: bool,
+        filter: Vec<u16>,
         order: Vec<u32>,
     },
     /// A shortcut resolved to a folder: show it.
@@ -785,10 +786,10 @@ fn apply(ev: Event) {
         Event::WatchReady { id, handle } => on_watch_ready(id, handle),
         Event::OpDone { result, edit } => commands::on_op_done(result, edit),
         Event::Resync => refresh(&selected_rows(), false),
-        Event::Sorted { generation, sort, show_hidden, order } => {
+        Event::Sorted { generation, sort, show_hidden, filter, order } => {
             let sel = selected_rows();
             if let Some(Applied::Shown { select, .. }) =
-                with_app(|a| a.browser.on_sorted(generation, sort, show_hidden, order, &sel))
+                with_app(|a| a.browser.on_sorted(generation, sort, show_hidden, &filter, order, &sel))
             {
                 refresh(&select, false);
             }
@@ -833,10 +834,10 @@ fn spawn_list(job: ListJob) {
             }
         }
         let _done = Done(live);
-        let ListJob { generation, dir, sort, show_hidden } = job;
+        let ListJob { generation, dir, sort, show_hidden, filter } = job;
         let result = crash::guard(|| {
             list_dir(&dir).map(|s| {
-                let order = sorted_order(&s, sort, show_hidden);
+                let order = filter_order(&s, &sorted_order(&s, sort, show_hidden), &filter);
                 (s, order)
             })
         })
@@ -1039,11 +1040,16 @@ fn cancel_loading() {
 fn spawn_sort(job: SortJob) {
     let Some(events) = with_app(|a| a.events.clone()) else { return };
     spawn("sort", move || {
-        if let Some(order) = crash::guard(|| sorted_order(&job.snapshot, job.sort, job.show_hidden)) {
+        let order = crash::guard(|| {
+            let s = &job.snapshot;
+            filter_order(s, &sorted_order(s, job.sort, job.show_hidden), &job.filter)
+        });
+        if let Some(order) = order {
             events.send(Event::Sorted {
                 generation: job.generation,
                 sort: job.sort,
                 show_hidden: job.show_hidden,
+                filter: job.filter,
                 order,
             });
         }
