@@ -124,6 +124,10 @@ impl Browser {
     pub fn can_up(&self) -> bool {
         self.dir().and_then(Path::parent).is_some()
     }
+    /// Generation of the folder on screen.
+    pub fn shown_generation(&self) -> u64 {
+        self.shown_generation
+    }
     pub fn is_loading(&self) -> bool {
         self.loading.is_some()
     }

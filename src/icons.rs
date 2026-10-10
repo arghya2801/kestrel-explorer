@@ -120,6 +120,10 @@ impl Icons {
         self.ext.get(ext)
     }
 
+    pub fn request_node(&self, node: usize, path: PathBuf) {
+        let _ = self.tx.send(Job::Node { node, path });
+    }
+
     /// Stores a worker result. Returns true if the list should repaint.
     pub fn on_done(&mut self, done: Done) -> bool {
         match done {
@@ -184,29 +188,26 @@ pub fn spawn_worker(
     rx: Receiver<Job>,
     latest: Arc<AtomicU64>,
     send: impl Fn(Done) + Send + 'static,
-) -> JoinHandle<()> {
-    std::thread::Builder::new()
-        .name("icons".into())
-        .spawn(move || {
-            let _com = crate::shell::Com::init();
-            for job in rx {
-                let done = crate::crash::guard(|| match job {
-                    Job::Ext(ext) => {
-                        let (icon, type_name) = ext_info(&ext).unwrap_or((0, String::new()));
-                        Some(Done::Ext { ext, icon, type_name })
-                    }
-                    Job::File { generation, .. } if generation != latest.load(Ordering::SeqCst) => None,
-                    Job::File { generation, entry, path } => {
-                        file_icon(&path).map(|icon| Done::File { generation, entry, icon })
-                    }
-                    Job::Node { node, path } => file_icon(&path).map(|icon| Done::Node { node, icon }),
-                });
-                if let Some(Some(d)) = done {
-                    send(d);
+) -> std::io::Result<JoinHandle<()>> {
+    std::thread::Builder::new().name("icons".into()).spawn(move || {
+        let _com = crate::shell::Com::init();
+        for job in rx {
+            let done = crate::crash::guard(|| match job {
+                Job::Ext(ext) => {
+                    let (icon, type_name) = ext_info(&ext).unwrap_or((0, String::new()));
+                    Some(Done::Ext { ext, icon, type_name })
                 }
+                Job::File { generation, .. } if generation != latest.load(Ordering::SeqCst) => None,
+                Job::File { generation, entry, path } => {
+                    file_icon(&path).map(|icon| Done::File { generation, entry, icon })
+                }
+                Job::Node { node, path } => file_icon(&path).map(|icon| Done::Node { node, icon }),
+            });
+            if let Some(Some(d)) = done {
+                send(d);
             }
-        })
-        .expect("start icon thread")
+        }
+    })
 }
 
 #[cfg(test)]
@@ -299,7 +300,7 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let _com = shell_ready();
         let latest = Arc::new(AtomicU64::new(3));
-        let worker = spawn_worker(rx, latest, move |d| done_tx.send(d).unwrap());
+        let worker = spawn_worker(rx, latest, move |d| done_tx.send(d).unwrap()).unwrap();
         tx.send(Job::File { generation: 2, entry: 0, path: r"C:\Windows\notepad.exe".into() }).unwrap();
         tx.send(Job::Ext(".txt".into())).unwrap();
         drop(tx);

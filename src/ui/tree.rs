@@ -45,11 +45,13 @@ pub(super) unsafe fn create(parent: HWND) -> Result<HWND> {
 pub(super) fn populate() {
     let quick = insert(None, "Quick access", None, true);
     for (name, path) in places::known_folders() {
-        insert(Some(quick), name, Some(path), true);
+        let node = insert(Some(quick), name, Some(path.clone()), true);
+        with_app(|a| a.icons.request_node(node, path));
     }
     let pc = insert(None, "This PC", None, true);
     for d in places::drives() {
         let node = insert(Some(pc), &places::drive_name(d.letter, d.kind, None), Some(d.root.clone()), true);
+        with_app(|a| a.icons.request_node(node, d.root.clone()));
         // Network drives can take a long time to answer; their generic name is good enough.
         if d.kind != DriveKind::Network
             && let Some(events) = with_app(|a| a.events.clone())
@@ -70,10 +72,10 @@ pub(super) fn populate() {
 /// Adds a node and returns its index (stored as the item's lParam).
 fn insert(parent: Option<usize>, text: &str, path: Option<PathBuf>, expandable: bool) -> usize {
     let loaded = path.is_none();
-    let Some((tree, idx, parent_item)) = with_app(|a| {
+    let Some((tree, idx, parent_item, folder)) = with_app(|a| {
         let parent_item = parent.map_or(TVI_ROOT.0, |p| a.nodes[p].item);
         a.nodes.push(Node { path, item: 0, state: if loaded { State::Loaded } else { State::Unloaded } });
-        (a.tree, a.nodes.len() - 1, parent_item)
+        (a.tree, a.nodes.len() - 1, parent_item, a.icons.folder)
     }) else {
         return usize::MAX;
     };
@@ -83,7 +85,9 @@ fn insert(parent: Option<usize>, text: &str, path: Option<PathBuf>, expandable: 
         hInsertAfter: TVI_LAST,
         Anonymous: TVINSERTSTRUCTW_0 {
             itemex: TVITEMEXW {
-                mask: TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN,
+                mask: TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN | TVIF_IMAGE | TVIF_SELECTEDIMAGE,
+                iImage: folder,
+                iSelectedImage: folder,
                 pszText: PWSTR(text.as_ptr() as *mut _),
                 cChildren: TVITEMEXW_CHILDREN(expandable as i32),
                 lParam: LPARAM(idx as isize),
@@ -182,6 +186,18 @@ pub(super) fn on_label(node: usize, text: String) {
         mask: TVIF_TEXT,
         hItem: HTREEITEM(item),
         pszText: PWSTR(text.as_ptr() as *mut _),
+        ..Default::default()
+    };
+    unsafe { SendMessageW(tree, TVM_SETITEMW, None, Some(LPARAM(&tv as *const _ as isize))) };
+}
+
+pub(super) fn on_icon(node: usize, icon: i32) {
+    let Some((tree, item)) = with_app(|a| (a.tree, a.nodes[node].item)) else { return };
+    let tv = TVITEMW {
+        mask: TVIF_IMAGE | TVIF_SELECTEDIMAGE,
+        hItem: HTREEITEM(item),
+        iImage: icon,
+        iSelectedImage: icon,
         ..Default::default()
     };
     unsafe { SendMessageW(tree, TVM_SETITEMW, None, Some(LPARAM(&tv as *const _ as isize))) };

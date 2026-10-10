@@ -9,6 +9,7 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -34,6 +35,7 @@ use windows::core::{HSTRING, PCWSTR, PWSTR, Result, w};
 
 use crate::browser::{Applied, Browser, ListJob, SortJob, parse_location};
 use crate::events::Events;
+use crate::icons::{self, Done, Icons};
 use crate::listing::{Snapshot, list_dir};
 use crate::sort::{Sort, SortKey, sorted_order};
 use crate::{crash, format, shell};
@@ -47,9 +49,10 @@ const ID_FORWARD: usize = 2;
 const ID_UP: usize = 3;
 /// Listing threads stuck on dead network paths we tolerate before refusing new ones.
 const MAX_LISTERS: usize = 8;
-const COLUMNS: [(PCWSTR, i32, SortKey); 3] = [
+const COLUMNS: [(PCWSTR, i32, SortKey); 4] = [
     (w!("Name"), 320, SortKey::Name),
     (w!("Date modified"), 160, SortKey::Modified),
+    (w!("Type"), 150, SortKey::Type),
     (w!("Size"), 100, SortKey::Size),
 ];
 
@@ -76,6 +79,7 @@ enum Event {
         node: usize,
         text: String,
     },
+    Icon(Done),
 }
 
 struct App {
@@ -96,6 +100,7 @@ struct App {
     split: i32,
     /// While dragging the splitter: where in the gap it was grabbed.
     drag_offset: Option<i32>,
+    icons: Icons,
 }
 
 impl App {
@@ -206,7 +211,7 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
             hwnd,
             WC_LISTVIEWW,
             w!(""),
-            WS_TABSTOP | WINDOW_STYLE(LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS),
+            WS_TABSTOP | WINDOW_STYLE(LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS),
             none,
             0,
         )?;
@@ -238,6 +243,30 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
         let events = Arc::new(Events::new(move || {
             PostMessageW(Some(HWND(target as _)), WM_APP_EVENTS, WPARAM(0), LPARAM(0)).is_ok()
         }));
+        let (image_list, folder_icon) = icons::system_image_list().unwrap_or_default();
+        if !image_list.is_invalid() {
+            SendMessageW(
+                list,
+                LVM_SETIMAGELIST,
+                Some(WPARAM(LVSIL_SMALL as usize)),
+                Some(LPARAM(image_list.0)),
+            );
+            SendMessageW(
+                tree,
+                TVM_SETIMAGELIST,
+                Some(WPARAM(TVSIL_NORMAL as usize)),
+                Some(LPARAM(image_list.0)),
+            );
+        }
+        let (icon_jobs, icon_rx) = mpsc::channel();
+        let icons = Icons::new(icon_jobs, folder_icon);
+        let icon_events = events.clone();
+        // The worker stops when `icons` (the only sender) is dropped with the window.
+        if let Err(e) =
+            icons::spawn_worker(icon_rx, icons.latest.clone(), move |d| icon_events.send(Event::Icon(d)))
+        {
+            crash::log(&format!("icons disabled: {e}"));
+        }
         APP.with(|cell| {
             *cell.borrow_mut() = Some(App {
                 hwnd,
@@ -254,6 +283,7 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
                 nodes: Vec::new(),
                 split: scale(hwnd, 240),
                 drag_offset: None,
+                icons,
             })
         });
 
@@ -485,9 +515,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
         match hdr.code {
             LVN_GETDISPINFOW => {
                 let item = &mut (*(lp.0 as *mut NMLVDISPINFOW)).item;
-                if item.mask.contains(LVIF_TEXT) {
-                    with_app(|a| fill_text(&a.browser, item));
-                }
+                with_app(|a| fill(&a.browser, &mut a.icons, item));
                 Some(LRESULT(0))
             }
             LVN_ODFINDITEMW => {
@@ -527,21 +555,30 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
     }
 }
 
-fn fill_text(b: &Browser, item: &mut LVITEMW) {
+/// Answers the list's request for a row's text and/or icon.
+fn fill(b: &Browser, icons: &mut Icons, item: &mut LVITEMW) {
     let (Some(s), Ok(row)) = (b.snapshot(), usize::try_from(item.iItem)) else { return write(item, &[]) };
-    let Some(&i) = b.order.get(row) else { return write(item, &[]) };
-    let i = i as usize;
-    match item.iSubItem {
-        0 => write(item, s.name(i)),
-        1 => write(item, &format::time(s.entries[i].modified).encode_utf16().collect::<Vec<_>>()),
-        2 if !s.is_dir(i) => write(item, &format::size(s.entries[i].size).encode_utf16().collect::<Vec<_>>()),
+    let Some(&entry) = b.order.get(row) else { return write(item, &[]) };
+    let i = entry as usize;
+    if item.mask.contains(LVIF_IMAGE) {
+        item.iImage = icons.icon(b.shown_generation(), entry, s.name(i), s.is_dir(i), &s.dir);
+    }
+    let wide = |t: String| t.encode_utf16().collect::<Vec<_>>();
+    match COLUMNS.get(item.iSubItem as usize).map(|c| c.2) {
+        Some(SortKey::Name) => write(item, s.name(i)),
+        Some(SortKey::Modified) => write(item, &wide(format::time(s.entries[i].modified))),
+        Some(SortKey::Type) => {
+            write(item, &wide(icons.type_name(s.name(i), s.is_dir(i)).unwrap_or_default()))
+        }
+        Some(SortKey::Size) if !s.is_dir(i) => write(item, &wide(format::size(s.entries[i].size))),
         _ => write(item, &[]),
     }
 }
 
-/// Copies `text` into the control's buffer, truncating to fit.
+/// Copies `text` into the control's buffer, truncating to fit. Only when the
+/// control asked for text: otherwise `pszText` isn't ours to write.
 fn write(item: &mut LVITEMW, text: &[u16]) {
-    if item.pszText.is_null() || item.cchTextMax <= 0 {
+    if !item.mask.contains(LVIF_TEXT) || item.pszText.is_null() || item.cchTextMax <= 0 {
         return;
     }
     let n = text.len().min(item.cchTextMax as usize - 1);
@@ -585,6 +622,14 @@ fn apply(ev: Event) {
         Event::Message(text) => set_status(&text),
         Event::TreeChildren { node, result } => tree::on_children(node, result),
         Event::DriveLabel { node, text } => tree::on_label(node, text),
+        Event::Icon(Done::Node { node, icon }) => tree::on_icon(node, icon),
+        Event::Icon(done) => {
+            if let Some((list, true)) = with_app(|a| (a.list, a.icons.on_done(done))) {
+                unsafe {
+                    let _ = InvalidateRect(Some(list), None, false);
+                }
+            }
+        }
     }
 }
 

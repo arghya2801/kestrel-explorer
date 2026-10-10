@@ -176,9 +176,9 @@ fn column_click_sorts_by_size_then_toggles() {
     let click = |col| {
         notify(hwnd, NMLISTVIEW { hdr: hdr(list, LVN_COLUMNCLICK), iSubItem: col, ..Default::default() })
     };
-    click(2); // Size ascending, by bytes: b (1) < a (3) < c
+    click(3); // Size ascending, by bytes: b (1) < a (3) < c
     assert!(pump_until(WAIT, || rows(list) == ["b.txt", "a.txt", "c.txt"]), "{:?}", rows(list));
-    click(2); // same column again: descending
+    click(3); // same column again: descending
     assert!(pump_until(WAIT, || rows(list) == ["c.txt", "a.txt", "b.txt"]), "{:?}", rows(list));
     close(hwnd);
 }
@@ -445,5 +445,53 @@ fn tab_cycles_address_sidebar_list() {
     key(list, VK_TAB);
     pump_until(Duration::from_millis(100), || false);
     assert_eq!(unsafe { GetFocus() }, edit);
+    close(hwnd);
+}
+
+// ---- icons and types ----
+
+fn item_image(list: HWND, row: usize) -> i32 {
+    let mut item = LVITEMW { mask: LVIF_IMAGE, iItem: row as i32, ..Default::default() };
+    unsafe { SendMessageW(list, LVM_GETITEMW, None, Some(LPARAM(&mut item as *mut _ as isize))) };
+    item.iImage
+}
+
+fn cell(list: HWND, row: usize, col: i32) -> String {
+    let mut buf = [0u16; 260];
+    let mut item = LVITEMW {
+        iSubItem: col,
+        pszText: PWSTR(buf.as_mut_ptr()),
+        cchTextMax: buf.len() as i32,
+        ..Default::default()
+    };
+    let n = unsafe {
+        SendMessageW(list, LVM_GETITEMTEXTW, Some(WPARAM(row)), Some(LPARAM(&mut item as *mut _ as isize)))
+    };
+    String::from_utf16_lossy(&buf[..n.0 as usize])
+}
+
+#[test]
+fn rows_get_type_names_and_icons() {
+    let t = TempDir::new("icons");
+    std::fs::create_dir(t.0.join("folder")).unwrap();
+    std::fs::write(t.0.join("notes.txt"), "").unwrap();
+    std::fs::copy(Path::new(&std::env::var("SystemRoot").unwrap()).join("notepad.exe"), t.0.join("app.exe"))
+        .unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["folder", "app.exe", "notes.txt"]), "{:?}", rows(list));
+
+    assert_eq!(cell(list, 0, 2), "File folder");
+    // Text Document's name is localized, so just wait for it to be filled in.
+    assert!(pump_until(WAIT, || !cell(list, 2, 2).is_empty() && !cell(list, 1, 2).is_empty()));
+    // Folder, program and text file each end up with a distinct icon; the .exe gets its own.
+    assert!(
+        pump_until(WAIT, || {
+            let (f, a, n) = (item_image(list, 0), item_image(list, 1), item_image(list, 2));
+            f != a && a != n && f != n && n > 0
+        }),
+        "{:?}",
+        (0..3).map(|r| item_image(list, r)).collect::<Vec<_>>()
+    );
     close(hwnd);
 }
