@@ -38,6 +38,7 @@ use crate::browser::{Applied, Browser, ListJob, SortJob, parse_location};
 use crate::events::Events;
 use crate::icons::{self, Done, Icons};
 use crate::listing::{Snapshot, list_dir};
+use crate::search;
 use crate::settings::Settings;
 use crate::sort::{Sort, SortKey, filter_order, sorted_order};
 use crate::watch::Watcher;
@@ -82,6 +83,8 @@ enum Event {
     Navigate(PathBuf),
     /// One-off status bar message.
     Message(String),
+    /// A search is running; this many matches so far.
+    SearchProgress(usize),
     TreeChildren {
         node: usize,
         result: io::Result<Vec<String>>,
@@ -111,6 +114,8 @@ struct App {
     hwnd: HWND,
     list: HWND,
     address: HWND,
+    /// Filter box: narrows the list as you type; Enter searches subfolders.
+    filter: HWND,
     buttons: [HWND; 3],
     status: HWND,
     font: HFONT,
@@ -118,6 +123,8 @@ struct App {
     events: Arc<Events<Event>>,
     /// Thread listing the folder being loaded, so Esc can cancel its blocking I/O.
     lister: Option<JoinHandle<()>>,
+    /// Tells a running search to stop.
+    lister_cancel: Arc<std::sync::atomic::AtomicBool>,
     live_listers: Arc<AtomicUsize>,
     tree: HWND,
     nodes: Vec<tree::Node>,
@@ -146,9 +153,9 @@ struct App {
 }
 
 impl App {
-    fn controls(&self) -> [HWND; 7] {
+    fn controls(&self) -> [HWND; 8] {
         let [b0, b1, b2] = self.buttons;
-        [self.list, self.status, self.address, self.tree, b0, b1, b2]
+        [self.list, self.status, self.address, self.filter, self.tree, b0, b1, b2]
     }
 }
 
@@ -293,6 +300,21 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
             WS_EX_CLIENTEDGE,
             0,
         )?;
+        let filter = child(
+            hwnd,
+            WC_EDITW,
+            w!(""),
+            WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+            WS_EX_CLIENTEDGE,
+            0,
+        )?;
+        // Grey hint text while empty; shown even when focused.
+        SendMessageW(
+            filter,
+            EM_SETCUEBANNER,
+            Some(WPARAM(1)),
+            Some(LPARAM(w!("Filter  (Enter: search subfolders)").0 as isize)),
+        );
         let list = child(
             hwnd,
             WC_LISTVIEWW,
@@ -326,7 +348,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let tree = tree::create(hwnd)?;
 
         let font = message_font(hwnd);
-        set_font(&[list, status, address, tree, buttons[0], buttons[1], buttons[2]], font);
+        set_font(&[list, status, address, filter, tree, buttons[0], buttons[1], buttons[2]], font);
 
         let target = hwnd.0 as isize;
         let events = Arc::new(Events::new(move || {
@@ -357,6 +379,8 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 },
                 events,
                 lister: None,
+                lister_cancel: Arc::default(),
+                filter,
                 live_listers: Arc::new(AtomicUsize::new(0)),
                 tree,
                 nodes: Vec::new(),
@@ -416,8 +440,10 @@ pub fn translate(msg: &MSG) -> bool {
 }
 
 fn on_key(msg: &MSG) -> bool {
-    let Some((list, address, tree)) = with_app(|a| (a.list, a.address, a.tree)) else { return false };
-    if ![list, address, tree].contains(&msg.hwnd) {
+    let Some((list, address, tree, filter)) = with_app(|a| (a.list, a.address, a.tree, a.filter)) else {
+        return false;
+    };
+    if ![list, address, tree, filter].contains(&msg.hwnd) {
         return false;
     }
     let key = VIRTUAL_KEY(msg.wParam.0 as u16);
@@ -436,7 +462,7 @@ fn on_key(msg: &MSG) -> bool {
         return true;
     }
     match key {
-        VK_BACK if !in_address => run(Browser::back),
+        VK_BACK if !in_address && msg.hwnd != filter => run(Browser::back),
         VK_F2 if in_list => _ = commands::run(commands::CMD_RENAME),
         VK_DELETE if in_list && shift => _ = commands::run(commands::CMD_DELETE_PERMANENTLY),
         VK_DELETE if in_list => _ = commands::run(commands::CMD_DELETE),
@@ -448,6 +474,23 @@ fn on_key(msg: &MSG) -> bool {
         VK_N if !in_address && ctrl && shift => _ = commands::run(commands::CMD_NEW_FOLDER),
         VK_F5 => run(Browser::refresh),
         VK_F4 => focus_address(),
+        VK_F if ctrl => unsafe {
+            let _ = SetFocus(Some(filter));
+            SendMessageW(filter, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+        },
+        VK_RETURN if msg.hwnd == filter => {
+            let text = window_text(filter);
+            run(|b| b.search(&text));
+            unsafe {
+                let _ = SetFocus(Some(list));
+            }
+        }
+        VK_ESCAPE if msg.hwnd == filter => unsafe {
+            let _ = SetWindowTextW(filter, w!("")); // EN_CHANGE clears the filter
+            let _ = SetFocus(Some(list));
+        },
+        // Keys with their own meaning in a text box.
+        VK_BACK | VK_DELETE | VK_A | VK_C | VK_X | VK_V | VK_N | VK_H if msg.hwnd == filter => return false,
         VK_L if ctrl => focus_address(),
         VK_H if ctrl && !in_address => {
             if let Some(job) = with_app(|a| a.browser.toggle_hidden()).flatten() {
@@ -476,10 +519,10 @@ fn on_key(msg: &MSG) -> bool {
         VK_ESCAPE => cancel_loading(),
         VK_TAB => unsafe {
             // Focus order: address bar, sidebar, list.
-            let order = [address, tree, list];
+            let order = [address, filter, tree, list];
             let at = order.iter().position(|&h| h == msg.hwnd).unwrap_or(0);
             let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
-            let next = if shift { (at + 2) % 3 } else { (at + 1) % 3 };
+            let next = if shift { (at + order.len() - 1) % order.len() } else { (at + 1) % order.len() };
             let _ = SetFocus(Some(order[next]));
         },
         _ => return false,
@@ -511,6 +554,15 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 // Only clicks on our buttons and menu picks. Edit controls (the address
                 // bar, the rename box) also send WM_COMMAND, with ids that can collide.
                 let (id, code, from) = (wp.0 & 0xFFFF, (wp.0 >> 16) & 0xFFFF, lp.0);
+                // Typing in the filter box narrows the list at once.
+                if code == EN_CHANGE as usize && with_app(|a| a.filter.0 as isize) == Some(from) {
+                    let text = window_text(HWND(from as _));
+                    if let Some(job) = with_app(|a| a.browser.set_filter(&text)).flatten() {
+                        spawn_sort(job);
+                    }
+                    update_chrome();
+                    return LRESULT(0);
+                }
                 let from_button = with_app(|a| a.buttons.iter().any(|b| b.0 as isize == from)) == Some(true);
                 let ours = (from == 0 && code == 0) || (from_button && code == BN_CLICKED as usize);
                 if !ours {
@@ -796,6 +848,11 @@ fn apply(ev: Event) {
         }
         Event::Navigate(dir) => go(dir),
         Event::Message(text) => set_status(&text),
+        Event::SearchProgress(found) => {
+            if with_app(|a| a.browser.is_loading()) == Some(true) {
+                set_status(&format!("Searching… {found} found so far  (Esc to stop)"));
+            }
+        }
         Event::TreeChildren { node, result } => tree::on_children(node, result),
         Event::DriveLabel { node, text } => tree::on_label(node, text),
         Event::Icon(Done::Node { node, icon }) => tree::on_icon(node, icon),
@@ -824,7 +881,14 @@ fn go(dir: PathBuf) {
 }
 
 fn spawn_list(job: ListJob) {
-    let Some((events, live)) = with_app(|a| (a.events.clone(), a.live_listers.clone())) else { return };
+    // A new listing supersedes any search still running.
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let Some((events, live)) = with_app(|a| {
+        std::mem::replace(&mut a.lister_cancel, cancel.clone()).store(true, Ordering::SeqCst);
+        (a.events.clone(), a.live_listers.clone())
+    }) else {
+        return;
+    };
     live.fetch_add(1, Ordering::SeqCst);
     let worker = spawn("list", move || {
         struct Done(Arc<AtomicUsize>);
@@ -834,9 +898,22 @@ fn spawn_list(job: ListJob) {
             }
         }
         let _done = Done(live);
-        let ListJob { generation, dir, sort, show_hidden, filter } = job;
+        let ListJob { generation, dir, query, sort, show_hidden, filter } = job;
         let result = crash::guard(|| {
-            list_dir(&dir).map(|s| {
+            let snap = match &query {
+                Some(q) => {
+                    let mut last = std::time::Instant::now();
+                    let mut progress = |found: usize| {
+                        if last.elapsed() > std::time::Duration::from_millis(250) {
+                            last = std::time::Instant::now();
+                            events.send(Event::SearchProgress(found));
+                        }
+                    };
+                    search::search(&dir, q, show_hidden, &|| cancel.load(Ordering::SeqCst), &mut progress)
+                }
+                None => list_dir(&dir),
+            };
+            snap.map(|s| {
                 let order = filter_order(&s, &sorted_order(&s, sort, show_hidden), &filter);
                 (s, order)
             })
@@ -1026,6 +1103,7 @@ fn on_device_change(event: u32, lp: LPARAM) {
 }
 
 fn cancel_loading() {
+    with_app(|a| a.lister_cancel.store(true, Ordering::SeqCst));
     let Some(worker) = with_app(|a| a.browser.cancel().then(|| a.lister.take()).flatten()).flatten() else {
         return update_chrome();
     };
@@ -1150,13 +1228,23 @@ fn refresh(select: &[usize], new_folder: bool) {
 
 /// Title, address bar, button states and status text from the browser.
 fn update_chrome() {
-    let Some((hwnd, buttons, enabled, title)) = with_app(|a| {
+    let Some((hwnd, buttons, enabled, title, filter, filter_text)) = with_app(|a| {
         let b = &a.browser;
-        let title = b.dir().map(|d| d.display().to_string()).unwrap_or_default();
-        (a.hwnd, a.buttons, [b.can_back(), b.can_forward(), b.can_up()], title)
+        let dir = b.dir().map(|d| d.display().to_string()).unwrap_or_default();
+        let title = match b.query() {
+            Some(q) => format!("\"{q}\" in {dir}"),
+            None => dir,
+        };
+        (a.hwnd, a.buttons, [b.can_back(), b.can_forward(), b.can_up()], title, a.filter, b.filter())
     }) else {
         return;
     };
+    // The browser drops the filter when going elsewhere: empty the box to match.
+    if filter_text.is_empty() && unsafe { GetFocus() } != filter && !window_text(filter).is_empty() {
+        unsafe {
+            let _ = SetWindowTextW(filter, w!(""));
+        }
+    }
     unsafe {
         for (button, on) in buttons.iter().zip(enabled) {
             let _ = EnableWindow(*button, on);
@@ -1227,8 +1315,8 @@ fn scale(hwnd: HWND, px: i32) -> i32 {
 }
 
 fn layout(hwnd: HWND) {
-    let Some((list, status, address, buttons, tree, split)) =
-        with_app(|a| (a.list, a.status, a.address, a.buttons, a.tree, a.split))
+    let Some((list, status, address, buttons, tree, split, filter)) =
+        with_app(|a| (a.list, a.status, a.address, a.buttons, a.tree, a.split, a.filter))
     else {
         return;
     };
@@ -1242,7 +1330,9 @@ fn layout(hwnd: HWND) {
             let _ = MoveWindow(*b, pad + i as i32 * (bw + pad), pad, bw, bar, true);
         }
         let ax = pad + 3 * (bw + pad);
-        let _ = MoveWindow(address, ax, pad, (client.right - ax - pad).max(0), bar, true);
+        let fw = scale(hwnd, 240).min((client.right / 3).max(0));
+        let _ = MoveWindow(address, ax, pad, (client.right - ax - fw - 2 * pad).max(0), bar, true);
+        let _ = MoveWindow(filter, client.right - fw - pad, pad, fw, bar, true);
         let top = bar + 2 * pad;
         let h = (client.bottom - (sr.bottom - sr.top) - top).max(0);
         let split = tree::clamp_split(split, client.right, GetDpiForWindow(hwnd));

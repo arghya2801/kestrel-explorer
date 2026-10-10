@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
@@ -70,6 +70,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::windows::ffi::OsStrExt;
+    use std::path::PathBuf;
 
     fn temp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("fep-search-{tag}-{}", std::process::id()));

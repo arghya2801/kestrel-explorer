@@ -11,15 +11,33 @@ use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use crate::listing::Snapshot;
 use crate::sort::{Sort, SortKey};
 
+/// A place in history: a folder, or search results below it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Location {
+    pub dir: PathBuf,
+    pub query: Option<String>,
+}
+
 /// Work for a listing thread.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListJob {
     pub generation: u64,
     pub dir: PathBuf,
+    /// Search below `dir` for this instead of listing it.
+    pub query: Option<String>,
     pub sort: Sort,
     pub show_hidden: bool,
     /// Keep only names containing this (folded); empty keeps all.
     pub filter: Vec<u16>,
+}
+
+/// A navigation waiting for its listing.
+struct Pending {
+    at: Location,
+    nav: Nav,
+    sort: Sort,
+    show_hidden: bool,
+    filter: Vec<u16>,
 }
 
 /// Work for a sort thread: re-order `snapshot` (shown as `generation`).
@@ -65,12 +83,14 @@ pub struct Browser {
     order_spec: (Sort, bool, Vec<u16>),
     pub sort: Sort,
     pub show_hidden: bool,
-    loading: Option<(PathBuf, Nav, Sort, bool, Vec<u16>)>,
+    loading: Option<Pending>,
     /// Folded filter text; empty shows everything.
     filter: Vec<u16>,
+    /// Set while the list shows search results rather than a folder.
+    shown_query: Option<String>,
     error: Option<String>,
-    back: Vec<PathBuf>,
-    forward: Vec<PathBuf>,
+    back: Vec<Location>,
+    forward: Vec<Location>,
     /// The folder changed again while a load was running.
     dirty: bool,
     /// Name to select once it appears in this folder (a new or renamed item).
@@ -87,6 +107,7 @@ impl Default for Browser {
             order: Vec::new(),
             order_spec: (sort, false, Vec::new()),
             filter: Vec::new(),
+            shown_query: None,
             sort,
             show_hidden: false,
             loading: None,
@@ -100,18 +121,47 @@ impl Default for Browser {
 }
 
 impl Browser {
-    fn start(&mut self, dir: PathBuf, nav: Nav) -> ListJob {
+    fn start(&mut self, at: Location, nav: Nav) -> ListJob {
         self.generation += 1;
         self.error = None;
         self.dirty = false;
-        if self.dir() != Some(dir.as_path()) {
-            // A different folder: a filter typed for the old one would only confuse.
+        if self.location().as_ref() != Some(&at) {
+            // Somewhere else: a filter typed for the old place would only confuse.
             self.select_next = None;
             self.filter.clear();
         }
         let filter = self.filter.clone();
-        self.loading = Some((dir.clone(), nav, self.sort, self.show_hidden, filter.clone()));
-        ListJob { generation: self.generation, dir, sort: self.sort, show_hidden: self.show_hidden, filter }
+        let job = ListJob {
+            generation: self.generation,
+            dir: at.dir.clone(),
+            query: at.query.clone(),
+            sort: self.sort,
+            show_hidden: self.show_hidden,
+            filter: filter.clone(),
+        };
+        self.loading = Some(Pending { at, nav, sort: self.sort, show_hidden: self.show_hidden, filter });
+        job
+    }
+
+    /// Where the list is now.
+    pub fn location(&self) -> Option<Location> {
+        Some(Location { dir: self.dir()?.to_path_buf(), query: self.shown_query.clone() })
+    }
+
+    /// The search shown, if the list holds search results.
+    pub fn query(&self) -> Option<&str> {
+        self.shown_query.as_deref()
+    }
+
+    /// Searches below the current folder for names containing `query`.
+    pub fn search(&mut self, query: &str) -> Option<ListJob> {
+        let query = query.trim();
+        if query.is_empty() {
+            return None;
+        }
+        let at = Location { dir: self.dir()?.to_path_buf(), query: Some(query.to_string()) };
+        let nav = if self.location().as_ref() == Some(&at) { Nav::Refresh } else { Nav::Go };
+        Some(self.start(at, nav))
     }
 
     /// Narrows the view to names containing `text`, ignoring case.
@@ -125,40 +175,47 @@ impl Browser {
     }
 
     pub fn go(&mut self, dir: PathBuf) -> ListJob {
-        let nav = if self.dir() == Some(dir.as_path()) { Nav::Refresh } else { Nav::Go };
-        self.start(dir, nav)
+        let at = Location { dir, query: None };
+        let nav = if self.location().as_ref() == Some(&at) { Nav::Refresh } else { Nav::Go };
+        self.start(at, nav)
     }
 
     // ponytail: pressing Back twice while the first is still loading goes back one step, not two.
     pub fn back(&mut self) -> Option<ListJob> {
-        let dir = self.back.last()?.clone();
-        Some(self.start(dir, Nav::Back))
+        let at = self.back.last()?.clone();
+        Some(self.start(at, Nav::Back))
     }
 
     pub fn forward(&mut self) -> Option<ListJob> {
-        let dir = self.forward.last()?.clone();
-        Some(self.start(dir, Nav::Forward))
+        let at = self.forward.last()?.clone();
+        Some(self.start(at, Nav::Forward))
     }
 
+    /// Up one folder; from search results, up to the folder that was searched.
     pub fn up(&mut self) -> Option<ListJob> {
-        let parent = self.dir()?.parent()?.to_path_buf();
-        Some(self.go(parent))
+        let dir = self.dir()?;
+        let target = if self.shown_query.is_some() { dir.to_path_buf() } else { dir.parent()?.to_path_buf() };
+        Some(self.go(target))
     }
 
     pub fn refresh(&mut self) -> Option<ListJob> {
-        let dir = self.dir()?.to_path_buf();
-        Some(self.start(dir, Nav::Refresh))
+        let at = self.location()?;
+        Some(self.start(at, Nav::Refresh))
     }
 
     /// The open folder changed on disk. Refreshes now, or once the running load
     /// finishes, so constant changes can't keep restarting a slow listing.
+    /// Search results aren't searched again for every change (F5 does that).
     pub fn on_dir_changed(&mut self) -> Option<ListJob> {
+        if self.shown_query.is_some() {
+            return None;
+        }
         if self.loading.is_some() {
             self.dirty = true;
             return None;
         }
         let dir = self.dir()?.to_path_buf();
-        Some(self.start(dir, Nav::Changed))
+        Some(self.start(Location { dir, query: None }, Nav::Changed))
     }
 
     /// Selects `name` after the refresh that first shows it.
@@ -168,11 +225,11 @@ impl Browser {
 
     /// The refresh owed for changes seen during the last load, if any.
     pub fn follow_up(&mut self) -> Option<ListJob> {
-        if !std::mem::take(&mut self.dirty) || self.loading.is_some() {
+        if !std::mem::take(&mut self.dirty) || self.loading.is_some() || self.shown_query.is_some() {
             return None;
         }
         let dir = self.dir()?.to_path_buf();
-        Some(self.start(dir, Nav::Changed))
+        Some(self.start(Location { dir, query: None }, Nav::Changed))
     }
 
     pub fn can_back(&self) -> bool {
@@ -194,9 +251,10 @@ impl Browser {
 
     /// Abandons the pending navigation. Returns false if nothing was loading.
     pub fn cancel(&mut self) -> bool {
-        let Some((dir, ..)) = self.loading.take() else { return false };
+        let Some(p) = self.loading.take() else { return false };
         self.generation += 1;
-        self.error = Some(format!("Stopped loading {}", dir.display()));
+        let what = if p.at.query.is_some() { "searching" } else { "loading" };
+        self.error = Some(format!("Stopped {what} {}", p.at.dir.display()));
         true
     }
 
@@ -210,31 +268,35 @@ impl Browser {
         if generation != self.generation {
             return Applied::Stale;
         }
-        let Some((dir, nav, sort, hidden, filter)) = self.loading.take() else { return Applied::Stale };
+        let Some(Pending { at, nav, sort, show_hidden: hidden, filter }) = self.loading.take() else {
+            return Applied::Stale;
+        };
         let (snap, order) = match result {
             Ok(ok) => ok,
-            Err(_) if matches!(nav, Nav::Changed | Nav::Escape) && dir.parent().is_some() => {
-                let parent = dir.parent().unwrap().to_path_buf();
-                return Applied::Gone(self.start(parent, Nav::Escape));
+            Err(_) if matches!(nav, Nav::Changed | Nav::Escape) && at.dir.parent().is_some() => {
+                let parent = at.dir.parent().unwrap().to_path_buf();
+                return Applied::Gone(self.start(Location { dir: parent, query: None }, Nav::Escape));
             }
             Err(e) => {
-                self.error = Some(format!("Can't open {}: {e}", dir.display()));
+                self.error = Some(format!("Can't open {}: {e}", at.dir.display()));
                 return Applied::Failed;
             }
         };
         let old = self.current.take();
-        let old_dir = old.as_ref().map(|s| s.dir.clone());
-        let same_dir = old_dir.as_deref() == Some(snap.dir.as_path());
+        let old_at = old.as_ref().map(|s| Location { dir: s.dir.clone(), query: self.shown_query.clone() });
+        let same_place = old_at.as_ref() == Some(&at);
         let keep: Vec<Vec<u16>> = match &old {
-            Some(o) if same_dir => self.entries_at(selected).map(|i| o.name(i as usize).to_vec()).collect(),
+            Some(o) if same_place => self.entries_at(selected).map(|i| o.name(i as usize).to_vec()).collect(),
             // Coming out of a folder (Up, or Back to its parent): select the folder we left.
-            Some(o) if o.dir.parent() == Some(snap.dir.as_path()) => {
+            Some(o) if o.dir.parent() == Some(snap.dir.as_path()) && self.shown_query.is_none() => {
                 o.dir.file_name().map(|n| n.to_string_lossy().encode_utf16().collect()).into_iter().collect()
             }
             _ => Vec::new(),
         };
+        self.shown_query = at.query;
+        let same_dir = same_place;
 
-        if let Some(prev) = old_dir.filter(|_| !same_dir) {
+        if let Some(prev) = old_at.filter(|_| !same_dir) {
             match nav {
                 Nav::Go | Nav::Escape => {
                     self.back.push(prev);
@@ -353,19 +415,24 @@ impl Browser {
     }
 
     pub fn status(&self) -> String {
-        if let Some((dir, nav, ..)) = &self.loading
-            && *nav != Nav::Changed
+        if let Some(p) = &self.loading
+            && p.nav != Nav::Changed
         {
-            return format!("Loading {}…  (Esc to stop)", dir.display());
+            return match &p.at.query {
+                Some(q) => format!("Searching for \"{q}\" in {}…  (Esc to stop)", p.at.dir.display()),
+                None => format!("Loading {}…  (Esc to stop)", p.at.dir.display()),
+            };
         }
         if let Some(e) = &self.error {
             return e.clone();
         }
         let total = self.snapshot().map_or(0, Snapshot::len);
-        match self.order.len() {
-            n if !self.filter.is_empty() => format!("{n} of {total} items"),
-            1 => "1 item".into(),
-            n => format!("{n} items"),
+        match (self.order.len(), &self.shown_query) {
+            (n, _) if !self.filter.is_empty() => format!("{n} of {total} items"),
+            (1, Some(q)) => format!("1 result for \"{q}\""),
+            (n, Some(q)) => format!("{n} results for \"{q}\""),
+            (1, None) => "1 item".into(),
+            (n, None) => format!("{n} items"),
         }
     }
 }
@@ -676,17 +743,17 @@ mod tests {
     #[test]
     fn a_new_or_renamed_item_is_selected_once_it_shows_up() {
         let mut b = Browser::default();
-        visit(&mut b, r"C:", &["x", "y"]);
+        visit(&mut b, r"C:\a", &["x", "y"]);
         b.select_after_refresh("New folder");
         // A refresh that started before the folder existed doesn't use up the request.
         let early = b.on_dir_changed().unwrap();
-        assert_eq!(b.on_listed(early.generation, listed(r"C:", &["x", "y"]), &[0]), shown(&[0], false));
+        assert_eq!(b.on_listed(early.generation, listed(r"C:\a", &["x", "y"]), &[0]), shown(&[0], false));
         let job = b.on_dir_changed().unwrap();
-        let r = b.on_listed(job.generation, listed(r"C:", &["New folder", "x", "y"]), &[1]);
+        let r = b.on_listed(job.generation, listed(r"C:\a", &["New folder", "x", "y"]), &[1]);
         assert_eq!(r, shown(&[0], false), "only the new item is selected");
         let again = b.on_dir_changed().unwrap();
         assert_eq!(
-            b.on_listed(again.generation, listed(r"C:", &["New folder", "x", "y"]), &[2]),
+            b.on_listed(again.generation, listed(r"C:\a", &["New folder", "x", "y"]), &[2]),
             shown(&[2], false)
         );
     }
@@ -694,7 +761,7 @@ mod tests {
     #[test]
     fn filter_narrows_the_view_and_resets_on_navigation() {
         let mut b = Browser::default();
-        visit(&mut b, r"C:", &["apple", "banana", "grape"]);
+        visit(&mut b, r"C:\a", &["apple", "banana", "grape"]);
         let job = b.set_filter("AP").expect("refilter");
         assert_eq!(job.filter, w("ap"));
         assert_eq!(
@@ -707,9 +774,37 @@ mod tests {
         assert_eq!(b.status(), "2 of 3 items");
         // A refresh keeps the filter; going elsewhere drops it.
         assert_eq!(b.refresh().unwrap().filter, w("ap"));
-        let job = b.go(r"C:".into());
+        let job = b.go(r"C:\b".into());
         assert!(job.filter.is_empty());
         assert_eq!(b.filter(), "");
+    }
+
+    #[test]
+    fn search_results_are_a_place_you_can_go_back_from() {
+        let mut b = Browser::default();
+        visit(&mut b, r"C:\a", &["x", "sub"]);
+        let job = b.search("rep").unwrap();
+        assert_eq!((job.dir.as_path(), job.query.as_deref()), (Path::new(r"C:\a"), Some("rep")));
+        assert!(b.status().starts_with(r#"Searching for "rep" in C:\a"#), "{}", b.status());
+        let r = b.on_listed(job.generation, listed(r"C:\a", &[r"sub\report.txt"]), &[]);
+        assert_eq!(r, shown(&[], true));
+        assert_eq!(b.status(), r#"1 result for "rep""#);
+        assert_eq!(b.query(), Some("rep"));
+        assert!(b.on_dir_changed().is_none(), "results aren't re-searched on every change");
+        assert_eq!(b.refresh().unwrap().query.as_deref(), Some("rep"), "F5 searches again");
+
+        let back = b.back().unwrap();
+        assert_eq!((back.dir.as_path(), back.query.as_deref()), (Path::new(r"C:\a"), None));
+        b.on_listed(back.generation, listed(r"C:\a", &["x", "sub"]), &[]);
+        assert_eq!(b.query(), None);
+        assert_eq!(b.forward().unwrap().query.as_deref(), Some("rep"));
+    }
+
+    #[test]
+    fn an_empty_search_does_nothing() {
+        let mut b = Browser::default();
+        visit(&mut b, r"C:\a", &["x"]);
+        assert!(b.search("   ").is_none());
     }
 
     #[test]

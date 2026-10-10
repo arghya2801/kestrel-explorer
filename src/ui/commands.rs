@@ -310,6 +310,10 @@ fn rename_selected() {
 pub(super) fn begin_rename(lp: LPARAM) -> LRESULT {
     let row = unsafe { (*(lp.0 as *const NMLVDISPINFOW)).item.iItem };
     let Some(list) = list() else { return LRESULT(1) };
+    // Search results show paths relative to the searched folder: rename in the folder itself.
+    if with_app(|a| a.browser.query().is_some()) == Some(true) {
+        return LRESULT(1);
+    }
     let Some((path, is_dir)) =
         usize::try_from(row).ok().and_then(|r| with_app(|a| a.browser.path_at(r)).flatten())
     else {

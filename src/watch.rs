@@ -109,7 +109,9 @@ fn run(dir: &Path, stop: &OwnedHandle, on_change: impl Fn(), on_ready: impl FnOn
     let done = unsafe { OwnedHandle::from_raw_handle(done.0) };
     let (folder_h, done_h, stop_h) =
         (HANDLE(folder.as_raw_handle()), HANDLE(done.as_raw_handle()), HANDLE(stop.as_raw_handle()));
-    on_ready(folder_h.0 as isize);
+    // Reported only once the first request is queued: Windows buffers changes
+    // from then on, so nothing that happens after "ready" can be missed.
+    let mut on_ready = Some(on_ready);
 
     let filter = FILE_NOTIFY_CHANGE_FILE_NAME
         | FILE_NOTIFY_CHANGE_DIR_NAME
@@ -135,6 +137,9 @@ fn run(dir: &Path, stop: &OwnedHandle, on_change: impl Fn(), on_ready: impl FnOn
         if started.is_err() {
             on_change(); // usually: the folder is being deleted
             return;
+        }
+        if let Some(ready) = on_ready.take() {
+            ready(folder_h.0 as isize);
         }
         let mut bytes = 0u32;
         if unsafe { WaitForMultipleObjects(&[done_h, stop_h], false, INFINITE) } != WAIT_OBJECT_0 {

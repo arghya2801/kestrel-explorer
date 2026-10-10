@@ -446,20 +446,22 @@ fn dragging_the_splitter_resizes_the_sidebar() {
 }
 
 #[test]
-fn tab_cycles_address_sidebar_list() {
+fn tab_cycles_address_filter_sidebar_list() {
     let t = TempDir::new("tab");
     let hwnd = open(&t.0);
-    let (edit, tree, list) = (find(hwnd, w!("Edit")), tree_of(hwnd), list_of(hwnd));
-    unsafe { SetFocus(Some(edit)) }.unwrap();
-    key(edit, VK_TAB);
-    pump_until(Duration::from_millis(100), || false);
-    assert_eq!(unsafe { GetFocus() }, tree);
-    key(tree, VK_TAB);
-    pump_until(Duration::from_millis(100), || false);
-    assert_eq!(unsafe { GetFocus() }, list);
-    key(list, VK_TAB);
-    pump_until(Duration::from_millis(100), || false);
-    assert_eq!(unsafe { GetFocus() }, edit);
+    let edit = find(hwnd, w!("Edit"));
+    let filter = unsafe { FindWindowExW(Some(hwnd), Some(edit), w!("Edit"), None) }.unwrap();
+    let order = [edit, filter, tree_of(hwnd), list_of(hwnd)];
+    for i in 0..order.len() {
+        // Other windows on the desktop may take activation mid-test; focus needs an active window.
+        unsafe {
+            let _ = SetActiveWindow(hwnd);
+            SetFocus(Some(order[i])).unwrap();
+        }
+        key(order[i], VK_TAB);
+        pump_until(Duration::from_millis(100), || false);
+        assert_eq!(unsafe { GetFocus() }, order[(i + 1) % order.len()], "after Tab #{}", i + 1);
+    }
     close(hwnd);
 }
 
@@ -907,4 +909,36 @@ fn the_shell_menu_helper_runs_in_its_own_process() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let items = String::from_utf8_lossy(&out.stdout);
     assert!(items.lines().count() >= 3, "{items}");
+}
+
+// ---- filter and search ----
+
+#[test]
+fn typing_in_the_filter_narrows_and_enter_searches_subfolders() {
+    let t = TempDir::new("filter");
+    std::fs::create_dir_all(t.0.join("deep").join("er")).unwrap();
+    std::fs::write(t.0.join("apple.txt"), "").unwrap();
+    std::fs::write(t.0.join("banana.txt"), "").unwrap();
+    std::fs::write(t.0.join("deep").join("er").join("pineapple.md"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["deep", "apple.txt", "banana.txt"]));
+    // The second Edit control is the filter box (the first is the address bar).
+    let address = find(hwnd, w!("Edit"));
+    let filter = unsafe { FindWindowExW(Some(hwnd), Some(address), w!("Edit"), None) }.unwrap();
+
+    type_into(filter, "APP");
+    assert!(pump_until(WAIT, || rows(list) == ["apple.txt"]), "{:?}", rows(list));
+    assert_eq!(status_text(hwnd), "1 of 3 items");
+
+    key(filter, VK_RETURN);
+    assert!(pump_until(WAIT, || rows(list).len() == 2), "{:?} / {}", rows(list), status_text(hwnd));
+    let mut found = rows(list);
+    found.sort();
+    assert_eq!(found, ["apple.txt", r"deep\er\pineapple.md"]);
+    assert!(status_text(hwnd).contains("results for \"APP\""), "{}", status_text(hwnd));
+
+    alt_key(list, VK_LEFT);
+    assert!(pump_until(WAIT, || rows(list) == ["deep", "apple.txt", "banana.txt"]), "{:?}", rows(list));
+    close(hwnd);
 }
