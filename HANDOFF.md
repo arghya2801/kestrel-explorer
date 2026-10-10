@@ -1,0 +1,49 @@
+# Handoff: remaining work
+
+State as of 2026-10-10. All of ROADMAP.md is built: v1.0.0 (tagged) plus every post-v1 item
+(drag and drop, full shell menu in a helper process, filter and search, tabs, dark mode,
+preview pane, side-by-side windows, network shares). 123 unit tests and 32 window tests pass.
+
+## How to work here
+
+- Toolchain: Rust stable MSVC. Shells don't have cargo on PATH: `export PATH="$USERPROFILE/.cargo/bin:$PATH"`.
+- `cargo test` runs everything; `cargo clippy --all-targets` should stay clean; `cargo fmt` before committing.
+- TDD: logic in plain modules with unit tests first; `ui.rs` and `src/ui/*` stay thin and are
+  covered by `tests/window.rs`, which drives the real window.
+- Rule that matters most: the UI thread never touches disk, network or shell. Workers report via `Events`.
+- Commit after each step. Read ROADMAP.md "Notes" for decisions already made.
+- Editing gotcha: inline shell heredocs and `python -c` mangle backslashes (`\\` becomes `\`,
+  `\a` becomes a bell character). Write scripts to a file, or use an editor tool.
+
+## Not verified since v1.0 (do these first)
+
+1. Re-run the stress test with the new features: `cargo run --release --example stress -- 600`.
+   Check handle/GDI/USER counts stay flat and note the worst stall.
+2. Re-measure startup (log line "startup (ms after process start)" in
+   `%LOCALAPPDATA%\FileExplorerPro\log.txt`); v1.0 was 54-70 ms to first paint.
+3. If both hold, update ROADMAP.md measurements and tag `v1.1.0`.
+
+## Known gaps (small, pick any)
+
+- Sidebar has no "Network" node; computers are reached by typing `\\server` in the address bar.
+- Sidebar doesn't follow the current folder, and doesn't refresh when Ctrl+H toggles hidden items.
+- Shortcut arrow overlays on icons are skipped on purpose (overlay handlers are slow); revisit only
+  if done off the UI thread.
+- Pressing Back twice while the first is still loading goes back one step (`browser.rs`, ponytail note).
+- Re-selecting after "select all" in 100k+ folders is one message per row (`ui.rs` refresh, ponytail note).
+- Menus stay light in dark mode (dark menus need undocumented uxtheme ordinals; deliberately avoided).
+- Open tabs aren't remembered between runs; only the active folder is.
+- Windows opened with Ctrl+N don't save their own settings (only the first window does).
+- Preview pane width is fixed at a third of the space; no splitter for it.
+- No large-icon / thumbnail grid view in the list (details view only).
+
+## Open findings
+
+- One 5.4 s UI stall in the very first stress run (while a release build and app launches ran
+  alongside). Not reproduced in six later runs. The hang watchdog writes a minidump to
+  `%LOCALAPPDATA%\FileExplorerPro\crashes` if it recurs; read its UI-thread stack.
+- Test flakiness that comes from the machine, not the app:
+  - Clipboard tests fail with "clipboard is busy" while a clipboard manager (Ditto is installed)
+    holds the clipboard open.
+  - Focus-dependent window tests take a shared lock and retry, but heavy desktop activity can still
+    take focus away.
