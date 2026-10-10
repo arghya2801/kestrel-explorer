@@ -1,6 +1,7 @@
 pub mod browser;
 pub mod clip;
 pub mod crash;
+pub mod dnd;
 pub mod events;
 pub mod format;
 pub mod icons;

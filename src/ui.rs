@@ -44,6 +44,7 @@ use crate::watch::Watcher;
 use crate::{crash, format, shell};
 
 mod commands;
+mod drag;
 pub use commands::{
     CMD_COPY, CMD_COPY_PATH, CMD_CUT, CMD_DELETE, CMD_DELETE_PERMANENTLY, CMD_NEW_FOLDER, CMD_OPEN,
     CMD_PASTE, CMD_RENAME, CMD_SELECT_ALL, CMD_SHOW_IN_EXPLORER,
@@ -138,6 +139,9 @@ struct App {
     renaming: Option<PathBuf>,
     /// The folder changed during the rename; sync the list once the box closes.
     resync_after_rename: bool,
+    /// Folder row highlighted as the destination of a drag in progress.
+    drop_row: Option<usize>,
+    drop_target: Option<windows::Win32::System::Ole::IDropTarget>,
 }
 
 impl App {
@@ -173,6 +177,11 @@ impl Drop for OpGuard {
     fn drop(&mut self) {
         RUNNING_OPS.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// The list's drop target, for tests that simulate a drop.
+pub fn drop_target() -> Option<windows::Win32::System::Ole::IDropTarget> {
+    with_app(|a| a.drop_target.clone()).flatten()
 }
 
 /// The settings captured when the main window closed on this thread.
@@ -360,9 +369,19 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 edit_pending: None,
                 renaming: None,
                 resync_after_rename: false,
+                drop_row: None,
+                drop_target: None,
             })
         });
 
+        // Drops from other apps (and from this list onto its own folders).
+        let target = drag::DropTarget::create(list);
+        if let Err(e) = windows::Win32::System::Ole::RegisterDragDrop(list, &target) {
+            crash::log(&format!("drag and drop into the list disabled: {e}"));
+        }
+        with_app(|a| a.drop_target = Some(target));
+        // Owner-data lists keep only selection and focus; the drop highlight comes from `fill`.
+        SendMessageW(list, LVM_SETCALLBACKMASK, Some(WPARAM(LVIS_DROPHILITED.0 as usize)), None);
         layout(hwnd);
         update_sort_arrows();
         let _ = SetFocus(Some(list));
@@ -604,6 +623,9 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_DESTROY => {
+                if let Some(list) = with_app(|a| a.list) {
+                    let _ = windows::Win32::System::Ole::RevokeDragDrop(list);
+                }
                 capture_settings(hwnd);
                 stop_watching();
                 if let Some(app) = APP.with(|cell| cell.try_borrow_mut().ok().and_then(|mut a| a.take())) {
@@ -630,7 +652,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
         match hdr.code {
             LVN_GETDISPINFOW => {
                 let item = &mut (*(lp.0 as *mut NMLVDISPINFOW)).item;
-                with_app(|a| fill(&a.browser, &mut a.icons, item));
+                with_app(|a| fill(&a.browser, &mut a.icons, a.drop_row, item));
                 Some(LRESULT(0))
             }
             LVN_ODFINDITEMW => {
@@ -654,6 +676,10 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
                 }
                 Some(LRESULT(0))
             }
+            LVN_BEGINDRAG | LVN_BEGINRDRAG => {
+                drag::begin_drag();
+                Some(LRESULT(0))
+            }
             LVN_BEGINLABELEDITW => Some(commands::begin_rename(lp)),
             LVN_ENDLABELEDITW => Some(commands::end_rename(lp)),
             LVN_ITEMACTIVATE => {
@@ -673,10 +699,14 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
 }
 
 /// Answers the list's request for a row's text and/or icon.
-fn fill(b: &Browser, icons: &mut Icons, item: &mut LVITEMW) {
+fn fill(b: &Browser, icons: &mut Icons, drop_row: Option<usize>, item: &mut LVITEMW) {
     let (Some(s), Ok(row)) = (b.snapshot(), usize::try_from(item.iItem)) else { return write(item, &[]) };
     let Some(&entry) = b.order.get(row) else { return write(item, &[]) };
     let i = entry as usize;
+    if item.mask.contains(LVIF_STATE) && Some(row) == drop_row {
+        item.state.0 |= LVIS_DROPHILITED.0;
+        item.stateMask.0 |= LVIS_DROPHILITED.0;
+    }
     if item.mask.contains(LVIF_IMAGE) {
         item.iImage = icons.icon(b.shown_generation(), entry, s.name(i), s.is_dir(i), &s.dir);
     }
@@ -828,8 +858,18 @@ fn late_init() {
     startup_mark("image list");
     if !image_list.is_invalid() {
         unsafe {
-            SendMessageW(list, LVM_SETIMAGELIST, Some(WPARAM(LVSIL_SMALL as usize)), Some(LPARAM(image_list.0)));
-            SendMessageW(tree, TVM_SETIMAGELIST, Some(WPARAM(TVSIL_NORMAL as usize)), Some(LPARAM(image_list.0)));
+            SendMessageW(
+                list,
+                LVM_SETIMAGELIST,
+                Some(WPARAM(LVSIL_SMALL as usize)),
+                Some(LPARAM(image_list.0)),
+            );
+            SendMessageW(
+                tree,
+                TVM_SETIMAGELIST,
+                Some(WPARAM(TVSIL_NORMAL as usize)),
+                Some(LPARAM(image_list.0)),
+            );
         }
     }
     with_app(|a| a.icons.folder = folder_icon);

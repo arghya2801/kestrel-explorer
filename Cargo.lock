@@ -44,6 +44,7 @@ version = "1.0.0"
 dependencies = [
  "embed-resource",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

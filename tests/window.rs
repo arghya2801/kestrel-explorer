@@ -823,3 +823,73 @@ fn a_start_folder_that_is_gone_falls_back_to_the_user_folder() {
     assert!(pump_until(WAIT, || text().eq_ignore_ascii_case(&home)), "{} / {}", text(), status_text(hwnd));
     close(hwnd);
 }
+
+// ---- drag and drop ----
+
+#[test]
+fn dropping_files_copies_onto_folders_and_moves_into_the_open_folder() {
+    use file_explorer_pro::dnd;
+    use windows::Win32::Foundation::{POINT, POINTL};
+    use windows::Win32::System::Ole::DROPEFFECT;
+    use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+    const MK_LBUTTON: u32 = 1;
+
+    let t = TempDir::new("drop");
+    let elsewhere = TempDir::new("drop-src");
+    std::fs::create_dir(t.0.join("dest")).unwrap();
+    std::fs::write(elsewhere.0.join("a.txt"), "A").unwrap();
+    std::fs::write(elsewhere.0.join("b.txt"), "B").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["dest"]));
+    let target = ui::drop_target().expect("list accepts drops");
+    let screen = |x: i32, y: i32| {
+        let mut p = POINT { x, y };
+        unsafe { windows::Win32::Graphics::Gdi::ClientToScreen(list, &mut p) }.unwrap();
+        POINTL { x: p.x, y: p.y }
+    };
+    let mut r = windows::Win32::Foundation::RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
+    unsafe { SendMessageW(list, LVM_GETITEMRECT, Some(WPARAM(0)), Some(LPARAM(&mut r as *mut _ as isize))) };
+    let on_dest = screen(r.left + 20, (r.top + r.bottom) / 2);
+    let below_rows = screen(r.left + 20, r.bottom + 200);
+    let highlighted = || {
+        let s = unsafe {
+            SendMessageW(list, LVM_GETITEMSTATE, Some(WPARAM(0)), Some(LPARAM(LVIS_DROPHILITED.0 as isize)))
+        };
+        s.0 as u32 & LVIS_DROPHILITED.0 != 0
+    };
+
+    // Ctrl-drag a.txt onto the "dest" row: copy into dest.
+    let data = dnd::data_object(&[elsewhere.0.join("a.txt")]).unwrap();
+    let keys = MODIFIERKEYS_FLAGS(MK_LBUTTON | dnd::MK_CONTROL);
+    let mut effect = DROPEFFECT(dnd::COPY | dnd::MOVE);
+    unsafe { target.DragEnter(&data, keys, on_dest, &mut effect) }.unwrap();
+    assert_eq!(effect.0, dnd::COPY);
+    assert!(highlighted(), "destination folder row is highlighted");
+    let mut effect = DROPEFFECT(dnd::COPY | dnd::MOVE);
+    unsafe { target.Drop(&data, keys, on_dest, &mut effect) }.unwrap();
+    assert_eq!(effect.0, dnd::COPY);
+    assert!(!highlighted());
+    assert!(pump_until(WAIT, || t.0.join("dest").join("a.txt").exists()));
+    assert!(elsewhere.0.join("a.txt").exists(), "copy keeps the source");
+
+    // Shift-drag b.txt onto empty space: move into the open folder; the source is told "none".
+    let data = dnd::data_object(&[elsewhere.0.join("b.txt")]).unwrap();
+    let keys = MODIFIERKEYS_FLAGS(MK_LBUTTON | dnd::MK_SHIFT);
+    let mut effect = DROPEFFECT(dnd::COPY | dnd::MOVE);
+    unsafe { target.DragEnter(&data, keys, below_rows, &mut effect) }.unwrap();
+    assert_eq!(effect.0, dnd::MOVE);
+    let mut effect = DROPEFFECT(dnd::COPY | dnd::MOVE);
+    unsafe { target.Drop(&data, keys, below_rows, &mut effect) }.unwrap();
+    assert_eq!(effect.0, dnd::NONE, "we move it ourselves; the source must not delete anything");
+    assert!(pump_until(WAIT, || rows(list) == ["dest", "b.txt"]), "{:?}", rows(list));
+    assert!(!elsewhere.0.join("b.txt").exists());
+
+    // Dropping a file back into the folder it's in does nothing.
+    let data = dnd::data_object(&[t.0.join("b.txt")]).unwrap();
+    let mut effect = DROPEFFECT(dnd::COPY | dnd::MOVE);
+    unsafe { target.DragEnter(&data, MODIFIERKEYS_FLAGS(MK_LBUTTON), below_rows, &mut effect) }.unwrap();
+    assert_eq!(effect.0, dnd::NONE);
+    unsafe { target.DragLeave() }.unwrap();
+    close(hwnd);
+}

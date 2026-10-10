@@ -214,6 +214,12 @@ fn show_in_explorer() {
     });
 }
 
+/// Copies or moves `paths` into `dest` (a drop).
+pub(super) fn transfer(paths: Vec<PathBuf>, dest: PathBuf, move_: bool) {
+    let op = if move_ { Op::Move { paths, dest } } else { Op::Copy { paths, dest } };
+    start_op(op, false);
+}
+
 /// Runs `op` on its own thread; `edit` starts renaming the item it creates.
 fn start_op(op: Op, edit: bool) {
     let Some((events, hwnd)) = with_app(|a| (a.events.clone(), a.hwnd.0 as isize)) else { return };
