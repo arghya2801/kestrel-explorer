@@ -21,96 +21,33 @@ Rules that hold for every stage:
 | M3 | History, address bar, Esc cancels stalled loads, opening files and folder shortcuts, Ctrl+H, F5, selection kept |
 | M4 | Sidebar: Quick access, drives with labels, lazy folder tree, splitter, Tab order |
 | M5 | System icons (per extension; per file for programs/shortcuts), Type column and sort |
+| M6 | Live updates: folder watcher, quiet refresh, deleted folder climbs to parent, USB eject, drive changes |
+| M7 | Delete/recycle, rename in place, new folder, copy/cut/paste with Explorer, right-click menu |
+| M8 | Settings, hang watchdog, startup timing, exit waits for copies, icon and version, stress test |
 
-Notes from building M3 to M5:
+Notes from building it:
 
 - Opening a file never shows a modal error; only "How do you want to open this file?" remains.
 - Icons are requested while painting, which already limits lookups to visible rows,
   so `LVN_ODCACHEHINT` wasn't needed.
+- Renames use the path captured when the edit box opens; list updates wait until it closes,
+  so a refresh can never rename the wrong file.
+- Closing the window while files are copying keeps the process alive until the copy finishes.
 - Shortcut arrow overlays are skipped: overlay queries run every installed overlay
   handler (cloud sync, Git), a known source of slowness.
 - The shell's image list setup races between threads on first use; it runs once per process.
 
-## M3: navigation and opening files
+## v1.0 measurements
 
-- Back/Forward history in `Browser`. Alt+Left/Right, mouse X1/X2 buttons.
-  Backspace changes from "up" to "back" to match Explorer. Alt+Up goes up.
-- Address bar (Edit control above the list). Enter navigates, Esc restores, Ctrl+L/Alt+D/F4 focus.
-  Input is normalized as a string only: quotes trimmed, `%VARS%` expanded, made absolute.
-- After Back or Up, select the folder you came from. The same select-by-name keeps the
-  selection across a re-sort, replacing the current "selection clears" behavior.
-- Open files with `ShellExecuteExW` on a worker thread. Errors go to the status bar, not dialogs.
-  A `.lnk` that points to a folder opens inside the app.
-- Esc while loading cancels: `CancelSynchronousIo` on the worker, then the generation is dropped.
-  At most 8 stalled workers; past that, new network navigations are refused with a message.
-- Ctrl+H toggles hidden files (re-filter on a worker, no re-listing). F5 re-lists.
-- Tests: history, input normalization, cancel, select-by-name (unit);
-  address bar navigation and Back/Forward (window).
-
-## M4: sidebar
-
-- TreeView on the left: Quick access (Desktop, Downloads, Documents, Pictures, Music, Videos
-  from `SHGetKnownFolderPath`) and This PC (`GetLogicalDrives` + `GetDriveTypeW`).
-- Drive labels and child folders load on workers. Optical, removable and network drives can block.
-- Folders expand lazily: every node starts expandable; the worker lists sub-folders on expand.
-- Draggable splitter between tree and list.
-- Not in v1: auto-expanding the tree to follow the current folder.
-- Tests: drive-type mapping, splitter clamping (unit); expanding a node fills it (window).
-
-## M5: icons and the Type column
-
-- One STA icon thread. `SHGetFileInfoW` with `SYSICONINDEX | USEFILEATTRIBUTES | TYPENAME`,
-  cached per extension, so most files never get opened.
-- Real per-file icons only for `.exe .ico .lnk .url .cpl`, only for rows on screen (`LVN_ODCACHEHINT`).
-- System image list shared by the ListView and TreeView.
-- Type column. Sorting by type uses the lowercase extension, which needs no shell call.
-- Tests: extension parsing (no extension, dotfiles, multiple dots), cache, stale results dropped.
-
-## M6: live updates
-
-Comes before file operations so that operations need no refresh code: the watcher shows their results,
-and changes made by other programs show up the same way.
-
-- Watcher thread for the current folder: `ReadDirectoryChangesW`, 64 KB buffer,
-  `FILE_SHARE_DELETE` so we never block renames or deletes, stopped with `CancelIoEx`.
-- Any change, overflow or `ERROR_NOTIFY_ENUM_DIR`: wait 100 ms for more, then re-list.
-  Selection, focus and scroll position are kept by name.
-- Folder deleted while open: go to the nearest parent that still exists.
-- USB eject: close the watcher on `DBT_DEVICEQUERYREMOVE` so "Safely remove" works.
-  Refresh the drive list on device arrival and removal.
-- Tests: debounce with a fake clock (unit); a file created in the open folder appears,
-  and deleting the open folder moves to its parent (window).
-
-## M7: file operations
-
-- One STA operations thread using `IFileOperation`: delete to Recycle Bin (Shift+Del deletes
-  permanently), rename, new folder, copy, move. Windows shows its own progress and conflict dialogs.
-- Multi-select (`LVN_ODSTATECHANGED`).
-- Rename in place with F2. Names are validated before the operation runs.
-- Clipboard: Ctrl+C/X/V with `CF_HDROP` + `Preferred DropEffect`, so copy and paste work
-  with Windows Explorer in both directions.
-- Our own right-click menu: Open, Cut, Copy, Paste, Rename, Delete, New folder, Copy as path,
-  Show in Explorer. The last one opens Explorer with the item selected, which gives access to the
-  full shell menu and Properties without loading third-party shell extensions into our process.
-- New and renamed items get selected once the watcher re-lists.
-- Not in v1: Undo.
-- Tests: name validation, `CF_HDROP` round trip (unit); rename, new folder, permanent delete,
-  clipboard copy/paste in a temp folder (window).
-
-## M8: hardening and v1.0
-
-- Debug-build watchdog: if the UI thread doesn't answer within 2 s, write a minidump.
-- Stress example: files churning plus random navigation every 50 ms for 30 minutes,
-  with handle, GDI and USER object counts flat.
-- Settings: window position, column widths, sort, hidden-files toggle, last folder. Stored as
-  `key=value` in `%LOCALAPPDATA%`, written to a temp file then renamed, so a crash can't corrupt it.
-  A bad file means defaults.
-- Startup time logged to first paint. Target under 100 ms.
-- App icon and version info.
-- Run the test matrix: empty card reader, `System Volume Information`, junctions,
-  paths over 260 characters, disconnected mapped drive, folder deleted while open,
-  200k+ items, odd file names.
-- Release build, tag `v1.0`.
+- First paint 54-70 ms after process start (80 ms on a cold first launch). The window and
+  controls paint first; the shell icon list and sidebar load right after.
+- Release exe 632 KB; about 23 MB of memory with icons loaded.
+- Stress test (`cargo run --release --example stress -- 600`): 10 minutes, about 12,000 UI actions
+  and 210,000 file changes. Handle, GDI and USER object counts flat. Worst UI stall 119 ms,
+  spent with the UI thread not running (antivirus scanning the churned files).
+- Open finding: one 5.4 s stall in the first stress run, while a release build and five app
+  launches ran alongside. Not reproduced in six later runs (about 27 minutes, one of them
+  during a release build). The hang watchdog writes a minidump if it ever happens again.
 
 ## After v1, in order
 

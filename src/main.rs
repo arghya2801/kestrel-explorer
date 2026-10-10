@@ -5,9 +5,11 @@ use std::time::Duration;
 
 use file_explorer_pro::settings::Settings;
 use file_explorer_pro::{crash, ui, watchdog};
+use windows::Win32::Graphics::Gdi::{RDW_ALLCHILDREN, RDW_UPDATENOW, RedrawWindow};
 use windows::Win32::UI::WindowsAndMessaging::{SW_SHOW, SW_SHOWMAXIMIZED, ShowWindow};
 
 fn main() {
+    ui::startup_mark("main");
     let settings = Settings::load_from(&Settings::file());
     // A folder given on the command line wins; then where the user left off; then their home.
     let start = std::env::args_os()
@@ -20,6 +22,7 @@ fn main() {
         crash::log(&format!("startup failed: {e}"));
         return;
     }
+    ui::startup_mark("init");
     let hwnd = match ui::create_main_window(&start, &settings) {
         Ok(hwnd) => hwnd,
         Err(e) => {
@@ -29,6 +32,8 @@ fn main() {
     };
     unsafe {
         let _ = ShowWindow(hwnd, if settings.maximized { SW_SHOWMAXIMIZED } else { SW_SHOW });
+        // Paint now: Windows otherwise paints only once every queued message is handled.
+        let _ = RedrawWindow(Some(hwnd), None, None, RDW_UPDATENOW | RDW_ALLCHILDREN);
     }
     if let Err(e) = watchdog::spawn(
         hwnd.0 as isize,

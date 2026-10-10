@@ -141,7 +141,11 @@ fn activate(main: HWND, list: HWND, row: i32) {
 
 fn open(dir: &Path) -> HWND {
     ui::init_process().unwrap();
-    ui::create_main_window(dir, &file_explorer_pro::settings::Settings::default()).unwrap()
+    let hwnd = ui::create_main_window(dir, &file_explorer_pro::settings::Settings::default()).unwrap();
+    // The sidebar fills in right after startup.
+    let tree = tree_of(hwnd);
+    assert!(pump_until(WAIT, || tv_next(tree, TVGN_ROOT, 0) != 0), "sidebar never filled");
+    hwnd
 }
 
 fn close(hwnd: HWND) {

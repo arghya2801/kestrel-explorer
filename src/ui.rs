@@ -52,6 +52,7 @@ mod tree;
 
 const CLASS: PCWSTR = w!("FileExplorerPro");
 const WM_APP_EVENTS: u32 = WM_APP + 1;
+const WM_APP_LATE_INIT: u32 = WM_APP + 2;
 const ID_BACK: usize = 1;
 const ID_FORWARD: usize = 2;
 const ID_UP: usize = 3;
@@ -321,23 +322,9 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let events = Arc::new(Events::new(move || {
             PostMessageW(Some(HWND(target as _)), WM_APP_EVENTS, WPARAM(0), LPARAM(0)).is_ok()
         }));
-        let (image_list, folder_icon) = icons::system_image_list().unwrap_or_default();
-        if !image_list.is_invalid() {
-            SendMessageW(
-                list,
-                LVM_SETIMAGELIST,
-                Some(WPARAM(LVSIL_SMALL as usize)),
-                Some(LPARAM(image_list.0)),
-            );
-            SendMessageW(
-                tree,
-                TVM_SETIMAGELIST,
-                Some(WPARAM(TVSIL_NORMAL as usize)),
-                Some(LPARAM(image_list.0)),
-            );
-        }
+        startup_mark("controls");
         let (icon_jobs, icon_rx) = mpsc::channel();
-        let icons = Icons::new(icon_jobs, folder_icon);
+        let icons = Icons::new(icon_jobs, 0); // folder icon known after `late_init`
         let icon_events = events.clone();
         // The worker stops when `icons` (the only sender) is dropped with the window.
         if let Err(e) =
@@ -376,12 +363,12 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
             })
         });
 
-        let this_pc = tree::populate();
-        with_app(|a| a.this_pc = this_pc);
         layout(hwnd);
         update_sort_arrows();
         let _ = SetFocus(Some(list));
         go(start.to_path_buf());
+        // Icons and the sidebar wait until the window has painted once.
+        let _ = PostMessageW(Some(hwnd), WM_APP_LATE_INIT, WPARAM(0), LPARAM(0));
         Ok(hwnd)
     }
 }
@@ -487,6 +474,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
+            WM_APP_LATE_INIT => {
+                late_init();
+                LRESULT(0)
+            }
             WM_APP_EVENTS => {
                 for ev in with_app(|a| a.events.drain()).unwrap_or_default() {
                     apply(ev);
@@ -829,6 +820,27 @@ fn spawn_list(job: ListJob) {
     update_chrome();
 }
 
+/// Startup work that can wait for the first paint: the shell's icon list
+/// (~20 ms the first time) and the sidebar.
+fn late_init() {
+    let Some((list, tree)) = with_app(|a| (a.list, a.tree)) else { return };
+    let (image_list, folder_icon) = icons::system_image_list().unwrap_or_default();
+    startup_mark("image list");
+    if !image_list.is_invalid() {
+        unsafe {
+            SendMessageW(list, LVM_SETIMAGELIST, Some(WPARAM(LVSIL_SMALL as usize)), Some(LPARAM(image_list.0)));
+            SendMessageW(tree, TVM_SETIMAGELIST, Some(WPARAM(TVSIL_NORMAL as usize)), Some(LPARAM(image_list.0)));
+        }
+    }
+    with_app(|a| a.icons.folder = folder_icon);
+    let this_pc = tree::populate();
+    startup_mark("sidebar");
+    with_app(|a| a.this_pc = this_pc);
+    unsafe {
+        let _ = InvalidateRect(Some(list), None, false);
+    }
+}
+
 /// Records the view state for saving once the window is gone.
 fn capture_settings(hwnd: HWND) {
     let Some((list, mut s)) = with_app(|a| {
@@ -860,21 +872,28 @@ fn capture_settings(hwnd: HWND) {
 /// Logs how long after process start the window first painted.
 fn log_first_paint() {
     static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if DONE.swap(true, Ordering::SeqCst) {
-        return;
+    if !DONE.swap(true, Ordering::SeqCst) {
+        startup_mark("first paint");
+        let marks = STARTUP_MARKS.lock().map(|m| m.join(", ")).unwrap_or_default();
+        crash::log(&format!("startup (ms after process start): {marks}"));
     }
+}
+
+static STARTUP_MARKS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Notes how long after process creation `what` happened; logged at first paint.
+pub fn startup_mark(what: &str) {
     use windows::Win32::Foundation::FILETIME;
     use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
     let ticks = |f: FILETIME| (f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64;
     let (mut created, mut x1, mut x2, mut x3) = Default::default();
     unsafe {
-        if GetProcessTimes(GetCurrentProcess(), &mut created, &mut x1, &mut x2, &mut x3).is_ok() {
-            let now = GetSystemTimeAsFileTime();
-            crash::log(&format!(
-                "first paint {} ms after process start",
-                (ticks(now) - ticks(created)) / 10_000
-            ));
+        if GetProcessTimes(GetCurrentProcess(), &mut created, &mut x1, &mut x2, &mut x3).is_ok()
+            && let Ok(mut marks) = STARTUP_MARKS.lock()
+        {
+            let ms = (ticks(GetSystemTimeAsFileTime()) - ticks(created)) / 10_000;
+            marks.push(format!("{what} {ms}"));
         }
     }
 }
