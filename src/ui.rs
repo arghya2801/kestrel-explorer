@@ -14,8 +14,8 @@ use std::thread::JoinHandle;
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, HBRUSH, HFONT, HGDIOBJ, InvalidateRect,
-    MONITOR_DEFAULTTONULL, MonitorFromRect, ScreenToClient,
+    COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, GetMonitorInfoW, HBRUSH, HDC, HFONT, HGDIOBJ,
+    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, ScreenToClient,
 };
 use windows::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX, SetErrorMode,
@@ -42,10 +42,12 @@ use crate::search;
 use crate::settings::Settings;
 use crate::sort::{Sort, SortKey, filter_order, sorted_order};
 use crate::tabs::Tabs;
+use crate::theme::{Palette, ThemeChoice, system_prefers_dark};
 use crate::watch::Watcher;
 use crate::{crash, format, shell};
 
 mod commands;
+mod dark;
 mod drag;
 mod tabbar;
 pub use commands::{
@@ -130,6 +132,9 @@ struct App {
     tabs: Tabs<tabbar::TabSlot>,
     tab_strip: HWND,
     next_tab_id: u64,
+    theme: ThemeChoice,
+    palette: Palette,
+    brushes: Option<dark::Brushes>,
     live_listers: Arc<AtomicUsize>,
     tree: HWND,
     nodes: Vec<tree::Node>,
@@ -276,11 +281,19 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         };
         RegisterClassExW(&wc); // fails harmlessly if already registered
         // A saved position on a monitor that's no longer there would open the window off-screen.
+        // Fit a saved position onto the nearest monitor: screens change between runs.
         let (x, y, w, h) = settings
             .window
-            .filter(|&(x, y, w, h)| {
+            .map(|(x, y, w, h)| {
                 let r = RECT { left: x, top: y, right: x + w, bottom: y + h };
-                !MonitorFromRect(&r, MONITOR_DEFAULTTONULL).is_invalid()
+                let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+                let monitor = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+                if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                    let wa = info.rcWork;
+                    crate::settings::fit_window((x, y, w, h), (wa.left, wa.top, wa.right, wa.bottom))
+                } else {
+                    (x, y, w, h)
+                }
             })
             .unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT, 1100, 700));
         let hwnd = CreateWindowExW(
@@ -393,6 +406,9 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 tabs: Tabs::new(tabbar::TabSlot::active(0)),
                 tab_strip,
                 next_tab_id: 1,
+                theme: settings.theme,
+                palette: Palette::new(false),
+                brushes: None,
                 filter,
                 live_listers: Arc::new(AtomicUsize::new(0)),
                 tree,
@@ -425,6 +441,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let _ = SetFocus(Some(list));
         go(start.to_path_buf());
         // Icons and the sidebar wait until the window has painted once.
+        dark::apply(hwnd, Palette::new(settings.theme.is_dark(system_prefers_dark())));
         let _ = PostMessageW(Some(hwnd), WM_APP_LATE_INIT, WPARAM(0), LPARAM(0));
         Ok(hwnd)
     }
@@ -605,6 +622,24 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     _ => return DefWindowProcW(hwnd, msg, wp, lp),
                 }
                 LRESULT(1)
+            }
+            WM_CTLCOLOREDIT => {
+                dark::edit_colors(HDC(wp.0 as _)).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
+            }
+            WM_ERASEBKGND if dark::erase(hwnd, HDC(wp.0 as _)) => LRESULT(1),
+            // Windows' light/dark app setting changed.
+            WM_SETTINGCHANGE => {
+                let area = if lp.0 == 0 {
+                    String::new()
+                } else {
+                    PCWSTR(lp.0 as *const u16).to_string().unwrap_or_default()
+                };
+                if area == "ImmersiveColorSet"
+                    && let Some(choice) = with_app(|a| a.theme)
+                {
+                    dark::apply(hwnd, Palette::new(choice.is_dark(system_prefers_dark())));
+                }
+                DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_SIZE => {
                 layout(hwnd);
@@ -989,6 +1024,7 @@ fn capture_settings(hwnd: HWND) {
             show_hidden: a.browser.show_hidden,
             split: Some(a.split),
             last_folder: a.browser.dir().map(Path::to_path_buf),
+            theme: a.theme,
             ..Default::default()
         };
         (a.list, s)

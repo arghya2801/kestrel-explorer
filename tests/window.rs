@@ -35,6 +35,14 @@ fn dunce(p: PathBuf) -> PathBuf {
     PathBuf::from(p.display().to_string().trim_start_matches(r"\\?\"))
 }
 
+/// Tests that show a window or depend on keyboard focus take this, so they
+/// don't steal activation from each other.
+static DESKTOP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn desktop() -> std::sync::MutexGuard<'static, ()> {
+    DESKTOP.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Runs this thread's message loop (with the app's shortcuts) until `done` or the timeout.
 fn pump_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
     let start = Instant::now();
@@ -447,20 +455,29 @@ fn dragging_the_splitter_resizes_the_sidebar() {
 
 #[test]
 fn tab_cycles_address_filter_sidebar_list() {
+    let _desktop = desktop();
     let t = TempDir::new("tab");
     let hwnd = open(&t.0);
     let edit = find(hwnd, w!("Edit"));
     let filter = unsafe { FindWindowExW(Some(hwnd), Some(edit), w!("Edit"), None) }.unwrap();
     let order = [edit, filter, tree_of(hwnd), list_of(hwnd)];
     for i in 0..order.len() {
-        // Other windows on the desktop may take activation mid-test; focus needs an active window.
-        unsafe {
-            let _ = SetActiveWindow(hwnd);
-            SetFocus(Some(order[i])).unwrap();
+        // Something else on the desktop can take activation away for a moment, leaving
+        // nothing focused. Retry then; focus landing on the wrong control fails at once.
+        let mut landed = HWND::default();
+        for _ in 0..5 {
+            unsafe {
+                let _ = SetActiveWindow(hwnd);
+                let _ = SetFocus(Some(order[i]));
+            }
+            key(order[i], VK_TAB);
+            pump_until(Duration::from_millis(100), || false);
+            landed = unsafe { GetFocus() };
+            if !landed.is_invalid() {
+                break;
+            }
         }
-        key(order[i], VK_TAB);
-        pump_until(Duration::from_millis(100), || false);
-        assert_eq!(unsafe { GetFocus() }, order[(i + 1) % order.len()], "after Tab #{}", i + 1);
+        assert_eq!(landed, order[(i + 1) % order.len()], "after Tab #{}", i + 1);
     }
     close(hwnd);
 }
@@ -633,6 +650,7 @@ fn clipboard_text() -> Option<String> {
 
 #[test]
 fn f2_renames_in_place_and_rejects_bad_names() {
+    let _desktop = desktop();
     let t = TempDir::new("rename");
     std::fs::write(t.0.join("report.txt"), "").unwrap();
     let hwnd = open(&t.0);
@@ -1016,5 +1034,70 @@ fn tabs_keep_their_own_folders() {
     assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 1 && rows(list) == root_rows), "{:?}", rows(list));
     ctrl_key(list, VK_W, false); // the last tab stays
     assert_eq!(tab_labels(hwnd).len(), 1);
+    close(hwnd);
+}
+
+// ---- dark mode ----
+
+/// Brightness (0-255) of the window's pixel at client point (x, y), rendered off-screen.
+fn pixel_luma(hwnd: HWND, x: i32, y: i32) -> u32 {
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+    unsafe {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        GetClientRect(hwnd, &mut r).unwrap();
+        let screen = GetDC(None);
+        let dc = CreateCompatibleDC(Some(screen));
+        let bmp = CreateCompatibleBitmap(screen, r.right, r.bottom);
+        let old = SelectObject(dc, HGDIOBJ(bmp.0));
+        // PW_CLIENTONLY | PW_RENDERFULLCONTENT
+        let _ = PrintWindow(hwnd, dc, PRINT_WINDOW_FLAGS(1 | 2));
+        let c = GetPixel(dc, x, y).0;
+        SelectObject(dc, old);
+        let _ = DeleteObject(HGDIOBJ(bmp.0));
+        let _ = DeleteDC(dc);
+        ReleaseDC(None, screen);
+        ((c & 0xFF) * 299 + ((c >> 8) & 0xFF) * 587 + ((c >> 16) & 0xFF) * 114) / 1000
+    }
+}
+
+#[test]
+fn dark_theme_colours_the_window_and_is_remembered() {
+    let _desktop = desktop();
+    use file_explorer_pro::settings::Settings;
+    use file_explorer_pro::theme::ThemeChoice;
+    use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmGetWindowAttribute};
+    let t = TempDir::new("dark");
+    std::fs::write(t.0.join("x.txt"), "").unwrap();
+    ui::init_process().unwrap();
+    let hwnd =
+        ui::create_main_window(&t.0, &Settings { theme: ThemeChoice::Dark, ..Default::default() }).unwrap();
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["x.txt"]));
+    assert_eq!(unsafe { SendMessageW(list, LVM_GETBKCOLOR, None, None) }.0, 0x00202020);
+    let mut dark = windows::core::BOOL(0);
+    unsafe { DwmGetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &mut dark as *mut _ as *mut _, 4) }
+        .unwrap();
+    assert!(dark.as_bool(), "dark title bar");
+
+    // The status bar and tab strip are painted by us in dark mode.
+    let mut sr = windows::Win32::Foundation::RECT::default();
+    let status = find(hwnd, w!("msctls_statusbar32"));
+    unsafe { GetWindowRect(status, &mut sr) }.unwrap();
+    let mut cr = windows::Win32::Foundation::RECT::default();
+    unsafe { GetClientRect(hwnd, &mut cr) }.unwrap();
+    let status_y = cr.bottom - (sr.bottom - sr.top) / 2;
+    assert!(pixel_luma(hwnd, cr.right - 80, status_y) < 80, "status bar not dark");
+
+    close(hwnd);
+    assert_eq!(ui::take_final_settings().unwrap().theme, ThemeChoice::Dark);
+
+    let hwnd =
+        ui::create_main_window(&t.0, &Settings { theme: ThemeChoice::Light, ..Default::default() }).unwrap();
+    let list = list_of(hwnd);
+    assert_eq!(unsafe { SendMessageW(list, LVM_GETBKCOLOR, None, None) }.0, 0x00FFFFFF);
     close(hwnd);
 }

@@ -14,6 +14,7 @@ pub mod shell;
 pub mod shellmenu;
 pub mod sort;
 pub mod tabs;
+pub mod theme;
 pub mod ui;
 pub mod watch;
 pub mod watchdog;

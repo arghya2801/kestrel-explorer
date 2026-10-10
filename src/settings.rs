@@ -7,6 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::sort::{Sort, SortKey};
+use crate::theme::ThemeChoice;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -18,6 +19,7 @@ pub struct Settings {
     pub show_hidden: bool,
     pub split: Option<i32>,
     pub last_folder: Option<PathBuf>,
+    pub theme: ThemeChoice,
 }
 
 impl Default for Settings {
@@ -30,6 +32,7 @@ impl Default for Settings {
             show_hidden: false,
             split: None,
             last_folder: None,
+            theme: ThemeChoice::System,
         }
     }
 }
@@ -77,6 +80,7 @@ impl Settings {
                 }
                 "show_hidden" => s.show_hidden = flag(value).unwrap_or(false),
                 "split" => s.split = value.parse().ok().filter(|&w: &i32| w > 0),
+                "theme" => s.theme = ThemeChoice::parse(value).unwrap_or(ThemeChoice::System),
                 "last_folder" => s.last_folder = (!value.is_empty()).then(|| PathBuf::from(value)),
                 _ => {}
             }
@@ -100,6 +104,7 @@ impl Settings {
         if let Some(w) = self.split {
             out += &format!("split={w}\n");
         }
+        out += &format!("theme={}\n", self.theme.name());
         if let Some(p) = &self.last_folder {
             out += &format!("last_folder={}\n", p.display());
         }
@@ -127,6 +132,17 @@ impl Settings {
     }
 }
 
+/// Moves (and if needed shrinks) a saved window rect `(x, y, w, h)` so it lies
+/// fully inside a monitor's work area `(left, top, right, bottom)`. Screens
+/// change between runs; a window half off-screen is hard to grab.
+pub fn fit_window(
+    (x, y, w, h): (i32, i32, i32, i32),
+    (l, t, r, b): (i32, i32, i32, i32),
+) -> (i32, i32, i32, i32) {
+    let (w, h) = (w.min(r - l), h.min(b - t));
+    (x.clamp(l, r - w), y.clamp(t, b - h), w, h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +157,7 @@ mod tests {
             show_hidden: true,
             split: Some(260),
             last_folder: Some(PathBuf::from(r"C:\Users\me\Ünï =x")),
+            theme: ThemeChoice::Light,
         };
         assert_eq!(Settings::parse(&s.to_text()), s);
     }
@@ -157,6 +174,24 @@ mod tests {
         assert!(!s.show_hidden);
         assert_eq!(s.split, None);
         assert_eq!(s.last_folder, None);
+    }
+
+    #[test]
+    fn theme_choice_is_remembered() {
+        let s = Settings { theme: ThemeChoice::Dark, ..Default::default() };
+        assert_eq!(Settings::parse(&s.to_text()).theme, ThemeChoice::Dark);
+        assert_eq!(Settings::parse("theme=neon").theme, ThemeChoice::System);
+    }
+
+    #[test]
+    fn restored_windows_are_moved_fully_onto_the_screen() {
+        let work = (0, 0, 1920, 1040);
+        assert_eq!(fit_window((100, 50, 800, 600), work), (100, 50, 800, 600), "already fine");
+        assert_eq!(fit_window((-856, 104, 1100, 700), work), (0, 104, 1100, 700), "off the left edge");
+        assert_eq!(fit_window((1500, 900, 800, 600), work), (1120, 440, 800, 600), "off bottom-right");
+        assert_eq!(fit_window((10, 10, 4000, 3000), work), (0, 0, 1920, 1040), "bigger than the screen");
+        let second = (1920, 0, 3840, 1080); // a monitor to the right
+        assert_eq!(fit_window((1800, 100, 800, 600), second), (1920, 100, 800, 600));
     }
 
     #[test]
