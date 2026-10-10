@@ -68,6 +68,8 @@ pub struct Browser {
     forward: Vec<PathBuf>,
     /// The folder changed again while a load was running.
     dirty: bool,
+    /// Name to select once it appears in this folder (a new or renamed item).
+    select_next: Option<Vec<u16>>,
 }
 
 impl Default for Browser {
@@ -86,6 +88,7 @@ impl Default for Browser {
             back: Vec::new(),
             forward: Vec::new(),
             dirty: false,
+            select_next: None,
         }
     }
 }
@@ -96,6 +99,9 @@ impl Browser {
         self.loading = Some((dir.clone(), nav, self.sort, self.show_hidden));
         self.error = None;
         self.dirty = false;
+        if self.dir() != Some(dir.as_path()) {
+            self.select_next = None;
+        }
         ListJob { generation: self.generation, dir, sort: self.sort, show_hidden: self.show_hidden }
     }
 
@@ -134,6 +140,11 @@ impl Browser {
         }
         let dir = self.dir()?.to_path_buf();
         Some(self.start(dir, Nav::Changed))
+    }
+
+    /// Selects `name` after the refresh that first shows it.
+    pub fn select_after_refresh(&mut self, name: &str) {
+        self.select_next = Some(name.encode_utf16().collect());
     }
 
     /// The refresh owed for changes seen during the last load, if any.
@@ -225,7 +236,11 @@ impl Browser {
         self.order = order;
         self.order_spec = (sort, hidden);
         self.shown_generation = generation;
-        let select = keep.iter().filter_map(|n| self.row_named(n)).collect();
+        let mut select: Vec<usize> = keep.iter().filter_map(|n| self.row_named(n)).collect();
+        if let Some(row) = self.select_next.as_deref().and_then(|n| self.row_named(n)) {
+            select = vec![row];
+            self.select_next = None;
+        }
         Applied::Shown { select, new_folder: !same_dir }
     }
 
@@ -628,6 +643,24 @@ mod tests {
         assert_eq!(up2.dir, Path::new(r"C:\a"));
         assert_eq!(b.on_listed(up2.generation, listed(r"C:\a", &["other"]), &[]), shown(&[], true));
         assert_eq!(b.dir(), Some(Path::new(r"C:\a")));
+    }
+
+    #[test]
+    fn a_new_or_renamed_item_is_selected_once_it_shows_up() {
+        let mut b = Browser::default();
+        visit(&mut b, r"C:", &["x", "y"]);
+        b.select_after_refresh("New folder");
+        // A refresh that started before the folder existed doesn't use up the request.
+        let early = b.on_dir_changed().unwrap();
+        assert_eq!(b.on_listed(early.generation, listed(r"C:", &["x", "y"]), &[0]), shown(&[0], false));
+        let job = b.on_dir_changed().unwrap();
+        let r = b.on_listed(job.generation, listed(r"C:", &["New folder", "x", "y"]), &[1]);
+        assert_eq!(r, shown(&[0], false), "only the new item is selected");
+        let again = b.on_dir_changed().unwrap();
+        assert_eq!(
+            b.on_listed(again.generation, listed(r"C:", &["New folder", "x", "y"]), &[2]),
+            shown(&[2], false)
+        );
     }
 
     #[test]

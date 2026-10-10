@@ -41,6 +41,11 @@ use crate::sort::{Sort, SortKey, sorted_order};
 use crate::watch::Watcher;
 use crate::{crash, format, shell};
 
+mod commands;
+pub use commands::{
+    CMD_COPY, CMD_COPY_PATH, CMD_CUT, CMD_DELETE, CMD_DELETE_PERMANENTLY, CMD_NEW_FOLDER, CMD_OPEN,
+    CMD_PASTE, CMD_RENAME, CMD_SELECT_ALL, CMD_SHOW_IN_EXPLORER,
+};
 mod tree;
 
 const CLASS: PCWSTR = w!("FileExplorerPro");
@@ -88,6 +93,13 @@ enum Event {
         id: u64,
         handle: isize,
     },
+    /// The list should catch up with the browser (after a rename box closed).
+    Resync,
+    /// A file operation ended: the item to select, or an error.
+    OpDone {
+        result: std::result::Result<Option<String>, String>,
+        edit: bool,
+    },
 }
 
 struct App {
@@ -116,6 +128,13 @@ struct App {
     device_note: Option<(isize, isize)>,
     /// The sidebar's "This PC" node, whose children are the drives.
     this_pc: usize,
+    /// Name of a just-created item to start renaming once it shows up.
+    edit_pending: Option<String>,
+    /// The item whose name is being edited in place. Kept as a path: rows can
+    /// move under the edit box if the folder changes meanwhile.
+    renaming: Option<PathBuf>,
+    /// The folder changed during the rename; sync the list once the box closes.
+    resync_after_rename: bool,
 }
 
 impl App {
@@ -226,7 +245,10 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
             hwnd,
             WC_LISTVIEWW,
             w!(""),
-            WS_TABSTOP | WINDOW_STYLE(LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS),
+            WS_TABSTOP
+                | WINDOW_STYLE(
+                    LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS | LVS_EDITLABELS,
+                ),
             none,
             0,
         )?;
@@ -303,6 +325,9 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
                 watch_ids: 0,
                 device_note: None,
                 this_pc: 0,
+                edit_pending: None,
+                renaming: None,
+                resync_after_rename: false,
             })
         });
 
@@ -345,7 +370,9 @@ fn on_key(msg: &MSG) -> bool {
     }
     let key = VIRTUAL_KEY(msg.wParam.0 as u16);
     let in_address = msg.hwnd == address;
+    let in_list = msg.hwnd == list;
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+    let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
     if msg.message == WM_SYSKEYDOWN {
         match key {
             VK_LEFT => run(Browser::back),
@@ -358,6 +385,15 @@ fn on_key(msg: &MSG) -> bool {
     }
     match key {
         VK_BACK if !in_address => run(Browser::back),
+        VK_F2 if in_list => _ = commands::run(commands::CMD_RENAME),
+        VK_DELETE if in_list && shift => _ = commands::run(commands::CMD_DELETE_PERMANENTLY),
+        VK_DELETE if in_list => _ = commands::run(commands::CMD_DELETE),
+        VK_C if in_list && ctrl && shift => _ = commands::run(commands::CMD_COPY_PATH),
+        VK_C if in_list && ctrl => _ = commands::run(commands::CMD_COPY),
+        VK_X if in_list && ctrl => _ = commands::run(commands::CMD_CUT),
+        VK_V if in_list && ctrl => _ = commands::run(commands::CMD_PASTE),
+        VK_A if in_list && ctrl => _ = commands::run(commands::CMD_SELECT_ALL),
+        VK_N if !in_address && ctrl && shift => _ = commands::run(commands::CMD_NEW_FOLDER),
         VK_F5 => run(Browser::refresh),
         VK_F4 => focus_address(),
         VK_L if ctrl => focus_address(),
@@ -416,10 +452,19 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 on_notify(&*(lp.0 as *const NMHDR), lp).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
             }
             WM_COMMAND => {
-                match wp.0 & 0xFFFF {
-                    ID_BACK => run(Browser::back),
-                    ID_FORWARD => run(Browser::forward),
-                    ID_UP => run(Browser::up),
+                // Only clicks on our buttons and menu picks. Edit controls (the address
+                // bar, the rename box) also send WM_COMMAND, with ids that can collide.
+                let (id, code, from) = (wp.0 & 0xFFFF, (wp.0 >> 16) & 0xFFFF, lp.0);
+                let from_button = with_app(|a| a.buttons.iter().any(|b| b.0 as isize == from)) == Some(true);
+                let ours = (from == 0 && code == 0) || (from_button && code == BN_CLICKED as usize);
+                if !ours {
+                    return DefWindowProcW(hwnd, msg, wp, lp);
+                }
+                match id {
+                    ID_BACK if from_button => run(Browser::back),
+                    ID_FORWARD if from_button => run(Browser::forward),
+                    ID_UP if from_button => run(Browser::up),
+                    id if from == 0 && commands::run(id) => {}
                     _ => return DefWindowProcW(hwnd, msg, wp, lp),
                 }
                 if let Some(list) = with_app(|a| a.list) {
@@ -510,6 +555,10 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 layout(hwnd);
                 LRESULT(0)
             }
+            WM_CONTEXTMENU if with_app(|a| a.list.0 as usize) == Some(wp.0) => {
+                commands::context_menu(hwnd, lp);
+                LRESULT(0)
+            }
             WM_DEVICECHANGE => {
                 on_device_change(wp.0 as u32, lp);
                 LRESULT(1)
@@ -564,6 +613,8 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
                 }
                 Some(LRESULT(0))
             }
+            LVN_BEGINLABELEDITW => Some(commands::begin_rename(lp)),
+            LVN_ENDLABELEDITW => Some(commands::end_rename(lp)),
             LVN_ITEMACTIVATE => {
                 let row = (*(lp.0 as *const NMITEMACTIVATE)).iItem;
                 let target =
@@ -630,6 +681,7 @@ fn apply(ev: Event) {
                     if new_folder {
                         watch_current();
                     }
+                    commands::after_refresh();
                     if let Some(job) = with_app(|a| a.browser.sort_job()).flatten() {
                         spawn_sort(job);
                     }
@@ -653,6 +705,8 @@ fn apply(ev: Event) {
             }
         }
         Event::WatchReady { id, handle } => on_watch_ready(id, handle),
+        Event::OpDone { result, edit } => commands::on_op_done(result, edit),
+        Event::Resync => refresh(&selected_rows(), false),
         Event::Sorted { generation, sort, show_hidden, order } => {
             let sel = selected_rows();
             if let Some(Applied::Shown { select, .. }) =
@@ -878,7 +932,18 @@ fn selected_rows() -> Vec<usize> {
 
 /// Pushes the browser's contents to the list, selecting `select`.
 fn refresh(select: &[usize], new_folder: bool) {
-    let Some((list, count)) = with_app(|a| (a.list, a.browser.order.len())) else { return };
+    let Some((list, count, renaming)) = with_app(|a| (a.list, a.browser.order.len(), a.renaming.is_some()))
+    else {
+        return;
+    };
+    if renaming {
+        if !new_folder {
+            // Resetting the list now would cancel the user's typing.
+            with_app(|a| a.resync_after_rename = true);
+            return;
+        }
+        unsafe { SendMessageW(list, LVM_CANCELEDITLABEL, None, None) };
+    }
     unsafe {
         let set = |row: isize, state: u32| {
             let item = LVITEMW {

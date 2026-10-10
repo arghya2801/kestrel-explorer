@@ -45,7 +45,7 @@ pub fn decode_hdrop(b: &[u8]) -> Vec<PathBuf> {
     let Some(body) = b.get(offset as usize..) else { return Vec::new() };
     let mut out = Vec::new();
     if wide != 0 {
-        let units: Vec<u16> = body.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = body.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         let mut start = 0;
         for (i, &u) in units.iter().enumerate() {
             if u == 0 {
@@ -162,7 +162,7 @@ pub fn get_files() -> Option<(Vec<PathBuf>, bool)> {
 pub fn get_text() -> Option<String> {
     let _open = open(None).ok()?;
     let bytes = take(CF_UNICODETEXT.0 as u32)?;
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
     let len = units.iter().position(|&u| u == 0).unwrap_or(units.len());
     Some(String::from_utf16_lossy(&units[..len]))
 }

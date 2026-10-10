@@ -114,6 +114,14 @@ fn key(to: HWND, vk: VIRTUAL_KEY) {
     unsafe { PostMessageW(Some(to), WM_KEYDOWN, WPARAM(vk.0 as usize), LPARAM(0)) }.unwrap();
 }
 
+/// Puts `text` in an edit box as if typed (typing also sets the "modified" flag).
+fn type_into(edit: HWND, text: &str) {
+    unsafe {
+        SetWindowTextW(edit, &HSTRING::from(text)).unwrap();
+        SendMessageW(edit, EM_SETMODIFY, Some(WPARAM(1)), None);
+    }
+}
+
 fn alt_key(to: HWND, vk: VIRTUAL_KEY) {
     unsafe { PostMessageW(Some(to), WM_SYSKEYDOWN, WPARAM(vk.0 as usize), LPARAM(1 << 29)) }.unwrap();
 }
@@ -598,4 +606,164 @@ fn drive_changes_rebuild_the_drive_list_safely() {
     assert_eq!(before.len(), after.len());
     assert_ne!(before[0].1, after[0].1, "drive items were rebuilt");
     close(hwnd);
+}
+
+// ---- file operations ----
+
+/// The clipboard is shared by the whole machine: one test at a time, and put back what was there.
+static CLIPBOARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn command(main: HWND, id: usize) {
+    unsafe { SendMessageW(main, WM_COMMAND, Some(WPARAM(id)), Some(LPARAM(0))) };
+}
+
+fn edit_control(list: HWND) -> HWND {
+    HWND(unsafe { SendMessageW(list, LVM_GETEDITCONTROL, None, None) }.0 as _)
+}
+
+fn clipboard_text() -> Option<String> {
+    file_explorer_pro::clip::get_text()
+}
+
+#[test]
+fn f2_renames_in_place_and_rejects_bad_names() {
+    let t = TempDir::new("rename");
+    std::fs::write(t.0.join("report.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["report.txt"]));
+    // The list only commits an in-place rename in a visible window.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    select_row(list, 0);
+    unsafe { SetFocus(Some(list)) }.unwrap();
+
+    key(list, VK_F2);
+    assert!(pump_until(WAIT, || !edit_control(list).is_invalid()), "no rename box");
+    let edit = edit_control(list);
+    let (mut from, mut to) = (0u32, 0u32);
+    unsafe {
+        SendMessageW(
+            edit,
+            EM_GETSEL,
+            Some(WPARAM(&mut from as *mut _ as usize)),
+            Some(LPARAM(&mut to as *mut _ as isize)),
+        )
+    };
+    assert_eq!((from, to), (0, 6), "only \"report\" is selected");
+    type_into(edit, "bad:name.txt");
+    key(edit, VK_RETURN);
+    assert!(
+        pump_until(WAIT, || status_text(hwnd).starts_with("A name can't contain")),
+        "{}",
+        status_text(hwnd)
+    );
+    assert!(t.0.join("report.txt").exists());
+
+    key(list, VK_F2);
+    assert!(pump_until(WAIT, || !edit_control(list).is_invalid()));
+    type_into(edit_control(list), "final.md");
+    key(edit_control(list), VK_RETURN);
+    assert!(pump_until(WAIT, || rows(list) == ["final.md"]), "{:?}", rows(list));
+    assert_eq!(selected(list), ["final.md"]);
+    assert!(t.0.join("final.md").exists() && !t.0.join("report.txt").exists());
+    close(hwnd);
+}
+
+#[test]
+fn new_folder_appears_selected_and_ready_to_rename() {
+    let t = TempDir::new("newdir");
+    std::fs::write(t.0.join("x.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["x.txt"]));
+    command(hwnd, ui::CMD_NEW_FOLDER);
+    assert!(pump_until(WAIT, || rows(list) == ["New folder", "x.txt"]), "{:?}", rows(list));
+    assert!(t.0.join("New folder").is_dir());
+    // The watcher may show the folder a moment before the operation reports back.
+    assert!(pump_until(WAIT, || selected(list) == ["New folder"]), "{:?}", selected(list));
+    assert!(pump_until(WAIT, || !edit_control(list).is_invalid()), "rename box not opened");
+    close(hwnd);
+}
+
+#[test]
+fn copy_and_cut_then_paste_into_another_folder() {
+    let _lock = CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
+    let saved = clipboard_text();
+    let t = TempDir::new("paste");
+    std::fs::create_dir(t.0.join("sub")).unwrap();
+    std::fs::write(t.0.join("a.txt"), "A").unwrap();
+    std::fs::write(t.0.join("b.txt"), "B").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["sub", "a.txt", "b.txt"]));
+
+    select_row(list, 1);
+    command(hwnd, ui::CMD_COPY);
+    activate(hwnd, list, 0);
+    assert!(pump_until(WAIT, || status_text(hwnd) == "0 items"));
+    command(hwnd, ui::CMD_PASTE);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt"]), "{:?} / {}", rows(list), status_text(hwnd));
+    assert!(t.0.join("a.txt").exists(), "copy keeps the original");
+
+    key(list, VK_BACK);
+    assert!(pump_until(WAIT, || rows(list) == ["sub", "a.txt", "b.txt"]));
+    for r in 0..3 {
+        let item = LVITEMW { stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0), ..Default::default() };
+        unsafe {
+            SendMessageW(list, LVM_SETITEMSTATE, Some(WPARAM(r)), Some(LPARAM(&item as *const _ as isize)))
+        };
+    }
+    select_row(list, 2);
+    command(hwnd, ui::CMD_CUT);
+    activate(hwnd, list, 0);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt"]));
+    command(hwnd, ui::CMD_PASTE);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt", "b.txt"]), "{:?}", rows(list));
+    assert!(!t.0.join("b.txt").exists(), "cut moves the original");
+    close(hwnd);
+    if let Some(text) = saved {
+        restore_text(&text);
+    }
+}
+
+#[test]
+fn copy_as_path_puts_quoted_paths_on_the_clipboard() {
+    let _lock = CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
+    let saved = clipboard_text();
+    let t = TempDir::new("path");
+    std::fs::write(t.0.join("one.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["one.txt"]));
+    select_row(list, 0);
+    command(hwnd, ui::CMD_COPY_PATH);
+    assert_eq!(clipboard_text(), Some(format!("\"{}\"", t.0.join("one.txt").display())));
+    close(hwnd);
+    if let Some(text) = saved {
+        restore_text(&text);
+    }
+}
+
+fn restore_text(text: &str) {
+    let owner = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("STATIC"),
+            None,
+            WINDOW_STYLE(0),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            None,
+            None,
+        )
+    }
+    .unwrap();
+    let _ = file_explorer_pro::clip::set_text(owner, text);
+    unsafe { DestroyWindow(owner) }.unwrap();
 }
