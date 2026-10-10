@@ -37,6 +37,8 @@ pub enum Applied {
     Failed,
     /// New contents are in `order`. Select these rows; `new_folder` means reset scroll.
     Shown { select: Vec<usize>, new_folder: bool },
+    /// The open folder no longer exists; list this parent instead.
+    Gone(ListJob),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,6 +47,10 @@ enum Nav {
     Back,
     Forward,
     Refresh,
+    /// Refresh because the folder changed on disk: no "Loading" status.
+    Changed,
+    /// Climbing out of a folder that was deleted while open.
+    Escape,
 }
 
 pub struct Browser {
@@ -60,6 +66,8 @@ pub struct Browser {
     error: Option<String>,
     back: Vec<PathBuf>,
     forward: Vec<PathBuf>,
+    /// The folder changed again while a load was running.
+    dirty: bool,
 }
 
 impl Default for Browser {
@@ -77,6 +85,7 @@ impl Default for Browser {
             error: None,
             back: Vec::new(),
             forward: Vec::new(),
+            dirty: false,
         }
     }
 }
@@ -86,6 +95,7 @@ impl Browser {
         self.generation += 1;
         self.loading = Some((dir.clone(), nav, self.sort, self.show_hidden));
         self.error = None;
+        self.dirty = false;
         ListJob { generation: self.generation, dir, sort: self.sort, show_hidden: self.show_hidden }
     }
 
@@ -113,6 +123,26 @@ impl Browser {
     pub fn refresh(&mut self) -> Option<ListJob> {
         let dir = self.dir()?.to_path_buf();
         Some(self.start(dir, Nav::Refresh))
+    }
+
+    /// The open folder changed on disk. Refreshes now, or once the running load
+    /// finishes, so constant changes can't keep restarting a slow listing.
+    pub fn on_dir_changed(&mut self) -> Option<ListJob> {
+        if self.loading.is_some() {
+            self.dirty = true;
+            return None;
+        }
+        let dir = self.dir()?.to_path_buf();
+        Some(self.start(dir, Nav::Changed))
+    }
+
+    /// The refresh owed for changes seen during the last load, if any.
+    pub fn follow_up(&mut self) -> Option<ListJob> {
+        if !std::mem::take(&mut self.dirty) || self.loading.is_some() {
+            return None;
+        }
+        let dir = self.dir()?.to_path_buf();
+        Some(self.start(dir, Nav::Changed))
     }
 
     pub fn can_back(&self) -> bool {
@@ -153,6 +183,10 @@ impl Browser {
         let Some((dir, nav, sort, hidden)) = self.loading.take() else { return Applied::Stale };
         let (snap, order) = match result {
             Ok(ok) => ok,
+            Err(_) if matches!(nav, Nav::Changed | Nav::Escape) && dir.parent().is_some() => {
+                let parent = dir.parent().unwrap().to_path_buf();
+                return Applied::Gone(self.start(parent, Nav::Escape));
+            }
             Err(e) => {
                 self.error = Some(format!("Can't open {}: {e}", dir.display()));
                 return Applied::Failed;
@@ -172,7 +206,7 @@ impl Browser {
 
         if let Some(prev) = old_dir.filter(|_| !same_dir) {
             match nav {
-                Nav::Go => {
+                Nav::Go | Nav::Escape => {
                     self.back.push(prev);
                     self.forward.clear();
                 }
@@ -184,7 +218,7 @@ impl Browser {
                     self.forward.pop();
                     self.back.push(prev);
                 }
-                Nav::Refresh => {}
+                Nav::Refresh | Nav::Changed => {}
             }
         }
         self.current = Some(Arc::new(snap));
@@ -281,7 +315,9 @@ impl Browser {
     }
 
     pub fn status(&self) -> String {
-        if let Some((dir, ..)) = &self.loading {
+        if let Some((dir, nav, ..)) = &self.loading
+            && *nav != Nav::Changed
+        {
             return format!("Loading {}…  (Esc to stop)", dir.display());
         }
         if let Some(e) = &self.error {
@@ -542,6 +578,56 @@ mod tests {
         let mut b = Browser::default();
         visit(&mut b, r"C:\a", &["x", "y", "z"]);
         assert_eq!(b.status(), "3 items");
+    }
+
+    #[test]
+    fn change_in_the_open_folder_refreshes_quietly() {
+        let mut b = Browser::default();
+        visit(&mut b, r"C:\a", &["x", "y"]);
+        let job = b.on_dir_changed().unwrap();
+        assert_eq!(job.dir, Path::new(r"C:\a"));
+        assert_eq!(b.status(), "2 items", "no Loading flicker");
+        assert_eq!(b.on_listed(job.generation, listed(r"C:\a", &["x", "y", "z"]), &[1]), shown(&[1], false));
+        assert!(!b.can_back());
+    }
+
+    #[test]
+    fn changes_during_a_load_queue_one_follow_up() {
+        let mut b = Browser::default();
+        visit(&mut b, r"C:\a", &["x"]);
+        let first = b.on_dir_changed().unwrap();
+        assert!(b.on_dir_changed().is_none());
+        assert!(b.on_dir_changed().is_none());
+        b.on_listed(first.generation, listed(r"C:\a", &["x", "y"]), &[]);
+        let again = b.follow_up().expect("one more refresh for the changes seen meanwhile");
+        assert!(b.follow_up().is_none());
+        b.on_listed(again.generation, listed(r"C:\a", &["x", "y", "z"]), &[]);
+        assert!(b.follow_up().is_none());
+    }
+
+    #[test]
+    fn navigating_away_drops_a_queued_refresh() {
+        let mut b = Browser::default();
+        visit(&mut b, r"C:\a", &["x"]);
+        b.on_dir_changed();
+        b.on_dir_changed();
+        let job = b.go(r"C:\b".into());
+        b.on_listed(job.generation, listed(r"C:\b", &[]), &[]);
+        assert!(b.follow_up().is_none());
+    }
+
+    #[test]
+    fn vanished_folder_climbs_to_an_existing_parent() {
+        let mut b = Browser::default();
+        visit(&mut b, r"C:\a\b\c", &["x"]);
+        let job = b.on_dir_changed().unwrap();
+        let gone = || Err(io::Error::from(io::ErrorKind::NotFound));
+        let Applied::Gone(up) = b.on_listed(job.generation, gone(), &[]) else { panic!("expected Gone") };
+        assert_eq!(up.dir, Path::new(r"C:\a\b"));
+        let Applied::Gone(up2) = b.on_listed(up.generation, gone(), &[]) else { panic!("expected Gone") };
+        assert_eq!(up2.dir, Path::new(r"C:\a"));
+        assert_eq!(b.on_listed(up2.generation, listed(r"C:\a", &["other"]), &[]), shown(&[], true));
+        assert_eq!(b.dir(), Some(Path::new(r"C:\a")));
     }
 
     #[test]

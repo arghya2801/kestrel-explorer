@@ -8,3 +8,4 @@ pub mod places;
 pub mod shell;
 pub mod sort;
 pub mod ui;
+pub mod watch;

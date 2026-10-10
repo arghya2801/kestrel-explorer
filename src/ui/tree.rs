@@ -25,8 +25,10 @@ enum State {
 pub(super) struct Node {
     /// `None` for group headings ("Quick access", "This PC").
     path: Option<PathBuf>,
+    /// 0 once the item is deleted (a removed drive): late results are ignored.
     item: isize,
     state: State,
+    parent: Option<usize>,
 }
 
 pub(super) unsafe fn create(parent: HWND) -> Result<HWND> {
@@ -41,14 +43,22 @@ pub(super) unsafe fn create(parent: HWND) -> Result<HWND> {
     }
 }
 
-/// Adds the root groups. Call once the app state exists.
-pub(super) fn populate() {
+/// Adds the root groups and returns the "This PC" node. Call once the app state exists.
+pub(super) fn populate() -> usize {
     let quick = insert(None, "Quick access", None, true);
     for (name, path) in places::known_folders() {
         let node = insert(Some(quick), name, Some(path.clone()), true);
         with_app(|a| a.icons.request_node(node, path));
     }
     let pc = insert(None, "This PC", None, true);
+    add_drives(pc);
+    for group in [quick, pc] {
+        expand(group);
+    }
+    pc
+}
+
+fn add_drives(pc: usize) {
     for d in places::drives() {
         let node = insert(Some(pc), &places::drive_name(d.letter, d.kind, None), Some(d.root.clone()), true);
         with_app(|a| a.icons.request_node(node, d.root.clone()));
@@ -64,9 +74,39 @@ pub(super) fn populate() {
             });
         }
     }
-    for group in [quick, pc] {
-        expand(group);
+}
+
+/// Drives came or went: rebuild the drive nodes.
+pub(super) fn refresh_drives() {
+    let Some((tree, pc, gone)) = with_app(|a| {
+        let pc = a.this_pc;
+        let under_pc = |mut n: usize| loop {
+            match a.nodes[n].parent {
+                Some(p) if p == pc => return true,
+                Some(p) => n = p,
+                None => return false,
+            }
+        };
+        let doomed: Vec<usize> =
+            (0..a.nodes.len()).filter(|&n| a.nodes[n].item != 0 && under_pc(n)).collect();
+        let drives: Vec<isize> =
+            doomed.iter().filter(|&&n| a.nodes[n].parent == Some(pc)).map(|&n| a.nodes[n].item).collect();
+        for n in doomed {
+            a.nodes[n].item = 0;
+        }
+        (a.tree, pc, drives)
+    }) else {
+        return;
+    };
+    for item in gone {
+        unsafe { SendMessageW(tree, TVM_DELETEITEM, None, Some(LPARAM(item))) };
     }
+    add_drives(pc);
+}
+
+/// The live tree item of `node`, if it still exists.
+fn item_of(node: usize) -> Option<(HWND, isize)> {
+    with_app(|a| a.nodes.get(node).map(|n| (a.tree, n.item)).filter(|&(_, item)| item != 0)).flatten()
 }
 
 /// Adds a node and returns its index (stored as the item's lParam).
@@ -74,7 +114,8 @@ fn insert(parent: Option<usize>, text: &str, path: Option<PathBuf>, expandable: 
     let loaded = path.is_none();
     let Some((tree, idx, parent_item, folder)) = with_app(|a| {
         let parent_item = parent.map_or(TVI_ROOT.0, |p| a.nodes[p].item);
-        a.nodes.push(Node { path, item: 0, state: if loaded { State::Loaded } else { State::Unloaded } });
+        let state = if loaded { State::Loaded } else { State::Unloaded };
+        a.nodes.push(Node { path, item: 0, state, parent });
         (a.tree, a.nodes.len() - 1, parent_item, a.icons.folder)
     }) else {
         return usize::MAX;
@@ -102,13 +143,13 @@ fn insert(parent: Option<usize>, text: &str, path: Option<PathBuf>, expandable: 
 }
 
 fn expand(node: usize) {
-    if let Some((tree, item)) = with_app(|a| (a.tree, a.nodes[node].item)) {
+    if let Some((tree, item)) = item_of(node) {
         unsafe { SendMessageW(tree, TVM_EXPAND, Some(WPARAM(TVE_EXPAND.0 as usize)), Some(LPARAM(item))) };
     }
 }
 
 fn set_expandable(node: usize, expandable: bool) {
-    let Some((tree, item)) = with_app(|a| (a.tree, a.nodes[node].item)) else { return };
+    let Some((tree, item)) = item_of(node) else { return };
     let tv = TVITEMW {
         mask: TVIF_CHILDREN,
         hItem: HTREEITEM(item),
@@ -157,6 +198,9 @@ fn start_loading(node: usize) {
 }
 
 pub(super) fn on_children(node: usize, result: std::io::Result<Vec<String>>) {
+    if item_of(node).is_none() {
+        return;
+    }
     let Some(path) = with_app(|a| {
         a.nodes[node].state = State::Loaded;
         a.nodes[node].path.clone()
@@ -180,7 +224,7 @@ pub(super) fn on_children(node: usize, result: std::io::Result<Vec<String>>) {
 }
 
 pub(super) fn on_label(node: usize, text: String) {
-    let Some((tree, item)) = with_app(|a| (a.tree, a.nodes[node].item)) else { return };
+    let Some((tree, item)) = item_of(node) else { return };
     let text = HSTRING::from(text);
     let tv = TVITEMW {
         mask: TVIF_TEXT,
@@ -192,7 +236,7 @@ pub(super) fn on_label(node: usize, text: String) {
 }
 
 pub(super) fn on_icon(node: usize, icon: i32) {
-    let Some((tree, item)) = with_app(|a| (a.tree, a.nodes[node].item)) else { return };
+    let Some((tree, item)) = item_of(node) else { return };
     let tv = TVITEMW {
         mask: TVIF_IMAGE | TVIF_SELECTEDIMAGE,
         hItem: HTREEITEM(item),

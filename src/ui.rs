@@ -38,6 +38,7 @@ use crate::events::Events;
 use crate::icons::{self, Done, Icons};
 use crate::listing::{Snapshot, list_dir};
 use crate::sort::{Sort, SortKey, sorted_order};
+use crate::watch::Watcher;
 use crate::{crash, format, shell};
 
 mod tree;
@@ -80,6 +81,13 @@ enum Event {
         text: String,
     },
     Icon(Done),
+    /// The watched folder changed (`id` names the watcher).
+    DirChanged(u64),
+    /// A watcher opened its folder; `handle` is for device-removal notifications.
+    WatchReady {
+        id: u64,
+        handle: isize,
+    },
 }
 
 struct App {
@@ -101,6 +109,13 @@ struct App {
     /// While dragging the splitter: where in the gap it was grabbed.
     drag_offset: Option<i32>,
     icons: Icons,
+    /// Watcher for the folder on screen, with its id; events from older ids are ignored.
+    watcher: Option<(u64, Watcher)>,
+    watch_ids: u64,
+    /// Device notification for the watched folder's handle, and that handle.
+    device_note: Option<(isize, isize)>,
+    /// The sidebar's "This PC" node, whose children are the drives.
+    this_pc: usize,
 }
 
 impl App {
@@ -284,10 +299,15 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
                 split: scale(hwnd, 240),
                 drag_offset: None,
                 icons,
+                watcher: None,
+                watch_ids: 0,
+                device_note: None,
+                this_pc: 0,
             })
         });
 
-        tree::populate();
+        let this_pc = tree::populate();
+        with_app(|a| a.this_pc = this_pc);
         layout(hwnd);
         update_sort_arrows();
         let _ = SetFocus(Some(list));
@@ -490,7 +510,12 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 layout(hwnd);
                 LRESULT(0)
             }
+            WM_DEVICECHANGE => {
+                on_device_change(wp.0 as u32, lp);
+                LRESULT(1)
+            }
             WM_DESTROY => {
+                stop_watching();
                 if let Some(app) = APP.with(|cell| cell.try_borrow_mut().ok().and_then(|mut a| a.take())) {
                     let _ = DeleteObject(HGDIOBJ(app.font.0));
                 }
@@ -602,14 +627,32 @@ fn apply(ev: Event) {
             match applied {
                 Some(Applied::Shown { select, new_folder }) => {
                     refresh(&select, new_folder);
+                    if new_folder {
+                        watch_current();
+                    }
                     if let Some(job) = with_app(|a| a.browser.sort_job()).flatten() {
                         spawn_sort(job);
                     }
                 }
                 Some(Applied::Failed) => update_chrome(),
+                Some(Applied::Gone(job)) => spawn_list(job),
                 _ => {}
             }
+            if let Some(job) = with_app(|a| a.browser.follow_up()).flatten() {
+                spawn_list(job);
+            }
         }
+        Event::DirChanged(id) => {
+            if let Some(job) = with_app(|a| {
+                (a.watcher.as_ref().map(|w| w.0) == Some(id)).then(|| a.browser.on_dir_changed())
+            })
+            .flatten()
+            .flatten()
+            {
+                spawn_list(job);
+            }
+        }
+        Event::WatchReady { id, handle } => on_watch_ready(id, handle),
         Event::Sorted { generation, sort, show_hidden, order } => {
             let sel = selected_rows();
             if let Some(Applied::Shown { select, .. }) =
@@ -673,6 +716,92 @@ fn spawn_list(job: ListJob) {
     }
     with_app(|a| a.lister = worker);
     update_chrome();
+}
+
+/// Starts watching the folder on screen, replacing any previous watcher.
+fn watch_current() {
+    stop_watching();
+    let Some((id, dir, events)) = with_app(|a| {
+        a.watch_ids += 1;
+        Some((a.watch_ids, a.browser.dir()?.to_path_buf(), a.events.clone()))
+    })
+    .flatten() else {
+        return;
+    };
+    let ready = events.clone();
+    let watcher = Watcher::start(
+        dir,
+        move || events.send(Event::DirChanged(id)),
+        move |handle| ready.send(Event::WatchReady { id, handle }),
+    );
+    with_app(|a| a.watcher = Some((id, watcher)));
+}
+
+/// Stops the watcher (it closes the folder on its own thread) and drops its device notification.
+fn stop_watching() {
+    let Some((watcher, note)) = with_app(|a| (a.watcher.take(), a.device_note.take())) else { return };
+    drop(watcher);
+    if let Some((note, _)) = note {
+        unsafe {
+            let _ = UnregisterDeviceNotification(HDEVNOTIFY(note as _));
+        }
+    }
+}
+
+fn on_watch_ready(id: u64, handle: isize) {
+    let Some(hwnd) = with_app(|a| (a.watcher.as_ref().map(|w| w.0) == Some(id)).then_some(a.hwnd)).flatten()
+    else {
+        return;
+    };
+    // Lets us close the folder when someone asks to eject its drive.
+    let filter = DEV_BROADCAST_HANDLE {
+        dbch_size: size_of::<DEV_BROADCAST_HANDLE>() as u32,
+        dbch_devicetype: DBT_DEVTYP_HANDLE.0,
+        dbch_handle: HANDLE(handle as _),
+        ..Default::default()
+    };
+    let note = unsafe {
+        RegisterDeviceNotificationW(
+            HANDLE(hwnd.0),
+            &filter as *const _ as *const _,
+            DEVICE_NOTIFY_WINDOW_HANDLE,
+        )
+    };
+    if let Ok(note) = note {
+        with_app(|a| a.device_note = Some((note.0 as isize, handle)));
+    }
+}
+
+fn on_device_change(event: u32, lp: LPARAM) {
+    if lp.0 == 0 {
+        return;
+    }
+    let hdr = unsafe { &*(lp.0 as *const DEV_BROADCAST_HDR) };
+    if hdr.dbch_devicetype == DBT_DEVTYP_HANDLE {
+        let handle = unsafe { (*(lp.0 as *const DEV_BROADCAST_HANDLE)).dbch_handle.0 as isize };
+        if with_app(|a| a.device_note.map(|n| n.1) == Some(handle)) != Some(true) {
+            return;
+        }
+        match event {
+            DBT_DEVICEQUERYREMOVE => {
+                // The eject goes ahead only if nobody holds a handle on the drive: close ours now.
+                if let Some((_, w)) = with_app(|a| a.watcher.take()).flatten() {
+                    w.stop_and_wait(std::time::Duration::from_millis(500));
+                }
+            }
+            DBT_DEVICEREMOVECOMPLETE => {
+                stop_watching();
+                if let Some(job) = with_app(|a| a.browser.on_dir_changed()).flatten() {
+                    spawn_list(job);
+                }
+            }
+            _ => {}
+        }
+    } else if hdr.dbch_devicetype == DBT_DEVTYP_VOLUME
+        && (event == DBT_DEVICEARRIVAL || event == DBT_DEVICEREMOVECOMPLETE)
+    {
+        tree::refresh_drives();
+    }
 }
 
 fn cancel_loading() {

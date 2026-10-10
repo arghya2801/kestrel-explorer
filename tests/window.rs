@@ -254,8 +254,11 @@ fn escape_abandons_a_hanging_network_folder() {
     let edit = find(hwnd, w!("Edit"));
     assert!(pump_until(WAIT, || rows(list) == ["still here.txt"]));
 
-    // Nothing answers at this address, so listing it blocks for a long time.
-    unsafe { SetWindowTextW(edit, w!(r"\\10.255.255.1\nothing")) }.unwrap();
+    // Nothing answers at this address, so listing it blocks for a long time. Windows
+    // remembers failed hosts and then fails fast, so use a new address each run.
+    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+    let dead = format!(r"\\10.255.{}.{}\nothing", n % 250 + 1, (n / 250) % 250 + 1);
+    unsafe { SetWindowTextW(edit, &HSTRING::from(dead)) }.unwrap();
     key(edit, VK_RETURN);
     assert!(pump_until(WAIT, || status_text(hwnd).starts_with("Loading")), "{}", status_text(hwnd));
 
@@ -493,5 +496,106 @@ fn rows_get_type_names_and_icons() {
         "{:?}",
         (0..3).map(|r| item_image(list, r)).collect::<Vec<_>>()
     );
+    close(hwnd);
+}
+
+// ---- live updates ----
+
+fn select_row(list: HWND, row: usize) {
+    let item = LVITEMW {
+        state: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0),
+        stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0),
+        ..Default::default()
+    };
+    unsafe {
+        SendMessageW(list, LVM_SETITEMSTATE, Some(WPARAM(row)), Some(LPARAM(&item as *const _ as isize)))
+    };
+}
+
+#[test]
+fn changes_on_disk_show_up_and_keep_the_selection() {
+    let t = TempDir::new("live");
+    for n in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(t.0.join(n), "").unwrap();
+    }
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt", "b.txt", "c.txt"]));
+    pump_until(Duration::from_millis(300), || false); // let the watcher open the folder
+    select_row(list, 2);
+
+    std::fs::write(t.0.join("0new.txt"), "").unwrap();
+    assert!(pump_until(WAIT, || rows(list) == ["0new.txt", "a.txt", "b.txt", "c.txt"]), "{:?}", rows(list));
+    assert_eq!(selected(list), ["c.txt"]);
+
+    std::fs::remove_file(t.0.join("a.txt")).unwrap();
+    std::fs::rename(t.0.join("b.txt"), t.0.join("z.txt")).unwrap();
+    assert!(pump_until(WAIT, || rows(list) == ["0new.txt", "c.txt", "z.txt"]), "{:?}", rows(list));
+    assert_eq!(selected(list), ["c.txt"]);
+    assert_eq!(status_text(hwnd), "3 items");
+    close(hwnd);
+}
+
+#[test]
+fn a_burst_of_new_files_all_arrives() {
+    let t = TempDir::new("burst");
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || status_text(hwnd) == "0 items"));
+    pump_until(Duration::from_millis(300), || false);
+    let dir = t.0.clone();
+    let writer = std::thread::spawn(move || {
+        for i in 0..1000 {
+            std::fs::write(dir.join(format!("f{i:04}")), "").unwrap();
+        }
+    });
+    assert!(pump_until(Duration::from_secs(10), || item_count(list) == 1000), "{}", item_count(list));
+    writer.join().unwrap();
+    close(hwnd);
+}
+
+#[test]
+fn deleting_the_open_folder_moves_to_its_parent() {
+    let t = TempDir::new("vanish");
+    let doomed = t.0.join("doomed").join("deeper");
+    std::fs::create_dir_all(&doomed).unwrap();
+    std::fs::write(t.0.join("keep.txt"), "").unwrap();
+    let hwnd = open(&doomed);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || status_text(hwnd) == "0 items"));
+    pump_until(Duration::from_millis(300), || false);
+
+    std::fs::remove_dir_all(t.0.join("doomed")).expect("watching must not block deletion");
+    assert!(pump_until(WAIT, || rows(list) == ["keep.txt"]), "{:?} / {}", rows(list), status_text(hwnd));
+    close(hwnd);
+}
+
+#[test]
+fn drive_changes_rebuild_the_drive_list_safely() {
+    let t = TempDir::new("drives");
+    let hwnd = open(&t.0);
+    let tree = tree_of(hwnd);
+    let pc = tv_children(tree, 0).into_iter().find(|(t, _)| t == "This PC").unwrap().1;
+    let before = tv_children(tree, pc);
+    // Start loading C:'s children, then pull the drive list out from under it.
+    let c = system_drive_node(tree);
+    unsafe { SendMessageW(tree, TVM_EXPAND, Some(WPARAM(TVE_EXPAND.0 as usize)), Some(LPARAM(c))) };
+    let vol = DEV_BROADCAST_VOLUME {
+        dbcv_size: size_of::<DEV_BROADCAST_VOLUME>() as u32,
+        dbcv_devicetype: DBT_DEVTYP_VOLUME.0,
+        ..Default::default()
+    };
+    unsafe {
+        SendMessageW(
+            hwnd,
+            WM_DEVICECHANGE,
+            Some(WPARAM(DBT_DEVICEARRIVAL as usize)),
+            Some(LPARAM(&vol as *const _ as isize)),
+        )
+    };
+    pump_until(Duration::from_millis(500), || false); // the old C: node's children arrive late and are dropped
+    let after = tv_children(tree, pc);
+    assert_eq!(before.len(), after.len());
+    assert_ne!(before[0].1, after[0].1, "drive items were rebuilt");
     close(hwnd);
 }
