@@ -14,7 +14,8 @@ use std::thread::JoinHandle;
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, HBRUSH, HFONT, HGDIOBJ, InvalidateRect, ScreenToClient,
+    COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, HBRUSH, HFONT, HGDIOBJ, InvalidateRect,
+    MONITOR_DEFAULTTONULL, MonitorFromRect, ScreenToClient,
 };
 use windows::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX, SetErrorMode,
@@ -37,6 +38,7 @@ use crate::browser::{Applied, Browser, ListJob, SortJob, parse_location};
 use crate::events::Events;
 use crate::icons::{self, Done, Icons};
 use crate::listing::{Snapshot, list_dir};
+use crate::settings::Settings;
 use crate::sort::{Sort, SortKey, sorted_order};
 use crate::watch::Watcher;
 use crate::{crash, format, shell};
@@ -146,6 +148,35 @@ impl App {
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    /// View state captured as the window closes, for saving.
+    static FINAL_SETTINGS: RefCell<Option<Settings>> = const { RefCell::new(None) };
+}
+
+/// File operations still running. The process must not exit under them:
+/// a copy cut off halfway leaves a broken file.
+static RUNNING_OPS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn running_operations() -> usize {
+    RUNNING_OPS.load(Ordering::SeqCst)
+}
+
+/// Counts one running operation for as long as it lives.
+pub(crate) struct OpGuard;
+impl OpGuard {
+    pub(crate) fn new() -> OpGuard {
+        RUNNING_OPS.fetch_add(1, Ordering::SeqCst);
+        OpGuard
+    }
+}
+impl Drop for OpGuard {
+    fn drop(&mut self) {
+        RUNNING_OPS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The settings captured when the main window closed on this thread.
+pub fn take_final_settings() -> Option<Settings> {
+    FINAL_SETTINGS.with(|s| s.borrow_mut().take())
 }
 
 /// Runs `f` on the app state; `None` if there is none yet or it is already borrowed.
@@ -202,7 +233,7 @@ unsafe fn child(
     }
 }
 
-pub fn create_main_window(start: &Path) -> Result<HWND> {
+pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
     unsafe {
         let hinstance = GetModuleHandleW(None)?.into();
         let wc = WNDCLASSEXW {
@@ -215,15 +246,23 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
             ..Default::default()
         };
         RegisterClassExW(&wc); // fails harmlessly if already registered
+        // A saved position on a monitor that's no longer there would open the window off-screen.
+        let (x, y, w, h) = settings
+            .window
+            .filter(|&(x, y, w, h)| {
+                let r = RECT { left: x, top: y, right: x + w, bottom: y + h };
+                !MonitorFromRect(&r, MONITOR_DEFAULTTONULL).is_invalid()
+            })
+            .unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT, 1100, 700));
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             CLASS,
             w!("File Explorer Pro"),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            1100,
-            700,
+            x,
+            y,
+            w,
+            h,
             None,
             None,
             Some(hinstance),
@@ -264,7 +303,7 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
             let col = LVCOLUMNW {
                 mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
                 fmt: if *key == SortKey::Size { LVCFMT_RIGHT } else { LVCFMT_LEFT },
-                cx: scale(hwnd, *width),
+                cx: settings.columns.get(i).copied().unwrap_or_else(|| scale(hwnd, *width)),
                 pszText: PWSTR(title.0 as *mut _),
                 ..Default::default()
             };
@@ -312,13 +351,17 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
                 buttons,
                 status,
                 font,
-                browser: Browser::default(),
+                browser: {
+                    let mut b = Browser::default();
+                    (b.sort, b.show_hidden) = (settings.sort, settings.show_hidden);
+                    b
+                },
                 events,
                 lister: None,
                 live_listers: Arc::new(AtomicUsize::new(0)),
                 tree,
                 nodes: Vec::new(),
-                split: scale(hwnd, 240),
+                split: settings.split.unwrap_or_else(|| scale(hwnd, 240)),
                 drag_offset: None,
                 icons,
                 watcher: None,
@@ -563,7 +606,12 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 on_device_change(wp.0 as u32, lp);
                 LRESULT(1)
             }
+            WM_PAINT => {
+                log_first_paint();
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
             WM_DESTROY => {
+                capture_settings(hwnd);
                 stop_watching();
                 if let Some(app) = APP.with(|cell| cell.try_borrow_mut().ok().and_then(|mut a| a.take())) {
                     let _ = DeleteObject(HGDIOBJ(app.font.0));
@@ -686,6 +734,13 @@ fn apply(ev: Event) {
                         spawn_sort(job);
                     }
                 }
+                // The very first folder couldn't be opened (gone since last run?): show the user folder.
+                Some(Applied::Failed) if with_app(|a| a.browser.dir().is_none()) == Some(true) => {
+                    update_chrome();
+                    if let Some(home) = std::env::var_os("USERPROFILE") {
+                        go(PathBuf::from(home));
+                    }
+                }
                 Some(Applied::Failed) => update_chrome(),
                 Some(Applied::Gone(job)) => spawn_list(job),
                 _ => {}
@@ -770,6 +825,56 @@ fn spawn_list(job: ListJob) {
     }
     with_app(|a| a.lister = worker);
     update_chrome();
+}
+
+/// Records the view state for saving once the window is gone.
+fn capture_settings(hwnd: HWND) {
+    let Some((list, mut s)) = with_app(|a| {
+        let s = Settings {
+            sort: a.browser.sort,
+            show_hidden: a.browser.show_hidden,
+            split: Some(a.split),
+            last_folder: a.browser.dir().map(Path::to_path_buf),
+            ..Default::default()
+        };
+        (a.list, s)
+    }) else {
+        return;
+    };
+    unsafe {
+        let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+        if GetWindowPlacement(hwnd, &mut wp).is_ok() {
+            let r = wp.rcNormalPosition;
+            s.window = Some((r.left, r.top, r.right - r.left, r.bottom - r.top));
+            s.maximized = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
+        }
+        s.columns = (0..COLUMNS.len())
+            .map(|i| SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(i)), None).0 as i32)
+            .collect();
+    }
+    FINAL_SETTINGS.with(|f| *f.borrow_mut() = Some(s));
+}
+
+/// Logs how long after process start the window first painted.
+fn log_first_paint() {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let ticks = |f: FILETIME| (f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64;
+    let (mut created, mut x1, mut x2, mut x3) = Default::default();
+    unsafe {
+        if GetProcessTimes(GetCurrentProcess(), &mut created, &mut x1, &mut x2, &mut x3).is_ok() {
+            let now = GetSystemTimeAsFileTime();
+            crash::log(&format!(
+                "first paint {} ms after process start",
+                (ticks(now) - ticks(created)) / 10_000
+            ));
+        }
+    }
 }
 
 /// Starts watching the folder on screen, replacing any previous watcher.

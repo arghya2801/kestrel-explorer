@@ -141,7 +141,7 @@ fn activate(main: HWND, list: HWND, row: i32) {
 
 fn open(dir: &Path) -> HWND {
     ui::init_process().unwrap();
-    ui::create_main_window(dir).unwrap()
+    ui::create_main_window(dir, &file_explorer_pro::settings::Settings::default()).unwrap()
 }
 
 fn close(hwnd: HWND) {
@@ -766,4 +766,56 @@ fn restore_text(text: &str) {
     .unwrap();
     let _ = file_explorer_pro::clip::set_text(owner, text);
     unsafe { DestroyWindow(owner) }.unwrap();
+}
+
+// ---- settings and startup ----
+
+#[test]
+fn settings_shape_the_window_and_are_captured_on_close() {
+    use file_explorer_pro::settings::Settings;
+    use file_explorer_pro::sort::{Sort, SortKey};
+    let t = TempDir::new("settings");
+    std::fs::write(t.0.join("big.txt"), "x".repeat(5000)).unwrap();
+    std::fs::write(t.0.join("small.txt"), "x").unwrap();
+    let hidden = t.0.join("hidden.txt");
+    std::fs::write(&hidden, "").unwrap();
+    unsafe { SetFileAttributesW(&HSTRING::from(hidden.as_os_str()), FILE_ATTRIBUTE_HIDDEN) }.unwrap();
+    let s = Settings {
+        columns: vec![210, 111, 112, 113],
+        sort: Sort { key: SortKey::Size, descending: true },
+        show_hidden: true,
+        split: Some(300),
+        ..Default::default()
+    };
+    ui::init_process().unwrap();
+    let hwnd = ui::create_main_window(&t.0, &s).unwrap();
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["big.txt", "small.txt", "hidden.txt"]), "{:?}", rows(list));
+    let width = |c: usize| unsafe { SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(c)), None) }.0;
+    assert_eq!(width(0), 210);
+    let mut r = windows::Win32::Foundation::RECT::default();
+    unsafe { GetWindowRect(tree_of(hwnd), &mut r) }.unwrap();
+    assert_eq!(r.right - r.left, 300);
+
+    close(hwnd);
+    let saved = ui::take_final_settings().expect("captured on close");
+    assert_eq!((saved.sort, saved.show_hidden, saved.split), (s.sort, true, Some(300)));
+    assert_eq!(saved.columns, s.columns);
+    assert_eq!(saved.last_folder.as_deref(), Some(t.0.as_path()));
+    assert!(saved.window.is_some_and(|(_, _, w, h)| w > 0 && h > 0));
+}
+
+#[test]
+fn a_start_folder_that_is_gone_falls_back_to_the_user_folder() {
+    let t = TempDir::new("gone");
+    let hwnd = open(&t.0.join("deleted since last time"));
+    let edit = find(hwnd, w!("Edit"));
+    let home = std::env::var("USERPROFILE").unwrap();
+    let text = || {
+        let mut buf = [0u16; 512];
+        let n = unsafe { GetWindowTextW(edit, &mut buf) };
+        String::from_utf16_lossy(&buf[..n as usize])
+    };
+    assert!(pump_until(WAIT, || text().eq_ignore_ascii_case(&home)), "{} / {}", text(), status_text(hwnd));
+    close(hwnd);
 }

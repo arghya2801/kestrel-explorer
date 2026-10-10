@@ -1,0 +1,177 @@
+//! Remembered window and view state, as `key=value` lines in
+//! `%LOCALAPPDATA%\FileExplorerPro\settings.txt`. Saved by writing a temp file
+//! and renaming it over the old one, so a crash mid-save leaves the old file.
+//! Anything unreadable falls back to its default.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use crate::sort::{Sort, SortKey};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Settings {
+    /// Restored (not maximized) bounds: x, y, width, height.
+    pub window: Option<(i32, i32, i32, i32)>,
+    pub maximized: bool,
+    pub columns: Vec<i32>,
+    pub sort: Sort,
+    pub show_hidden: bool,
+    pub split: Option<i32>,
+    pub last_folder: Option<PathBuf>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            window: None,
+            maximized: false,
+            columns: Vec::new(),
+            sort: Sort { key: SortKey::Name, descending: false },
+            show_hidden: false,
+            split: None,
+            last_folder: None,
+        }
+    }
+}
+
+const KEYS: [(SortKey, &str); 4] = [
+    (SortKey::Name, "Name"),
+    (SortKey::Size, "Size"),
+    (SortKey::Modified, "Modified"),
+    (SortKey::Type, "Type"),
+];
+
+fn ints(v: &str) -> Option<Vec<i32>> {
+    v.split(',').map(|n| n.trim().parse().ok()).collect()
+}
+
+fn flag(v: &str) -> Option<bool> {
+    match v {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+impl Settings {
+    pub fn parse(text: &str) -> Settings {
+        let mut s = Settings::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.trim_start_matches('\u{feff}').split_once('=') else { continue };
+            let value = value.trim_end_matches('\r');
+            match key {
+                "window" => {
+                    s.window = ints(value)
+                        .filter(|v| v.len() == 4 && v[2] > 0 && v[3] > 0)
+                        .map(|v| (v[0], v[1], v[2], v[3]))
+                }
+                "maximized" => s.maximized = flag(value).unwrap_or(false),
+                "columns" => s.columns = ints(value).filter(|v| v.iter().all(|&w| w > 0)).unwrap_or_default(),
+                "sort" => {
+                    if let Some((k, d)) = value.split_once(',')
+                        && let (Some(&(key, _)), Some(descending)) =
+                            (KEYS.iter().find(|(_, n)| *n == k), flag(d))
+                    {
+                        s.sort = Sort { key, descending };
+                    }
+                }
+                "show_hidden" => s.show_hidden = flag(value).unwrap_or(false),
+                "split" => s.split = value.parse().ok().filter(|&w: &i32| w > 0),
+                "last_folder" => s.last_folder = (!value.is_empty()).then(|| PathBuf::from(value)),
+                _ => {}
+            }
+        }
+        s
+    }
+
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        if let Some((x, y, w, h)) = self.window {
+            out += &format!("window={x},{y},{w},{h}\n");
+        }
+        out += &format!("maximized={}\n", self.maximized);
+        if !self.columns.is_empty() {
+            let cols: Vec<String> = self.columns.iter().map(i32::to_string).collect();
+            out += &format!("columns={}\n", cols.join(","));
+        }
+        let key = KEYS.iter().find(|(k, _)| *k == self.sort.key).map_or("Name", |k| k.1);
+        out += &format!("sort={key},{}\n", self.sort.descending);
+        out += &format!("show_hidden={}\n", self.show_hidden);
+        if let Some(w) = self.split {
+            out += &format!("split={w}\n");
+        }
+        if let Some(p) = &self.last_folder {
+            out += &format!("last_folder={}\n", p.display());
+        }
+        out
+    }
+
+    pub fn file() -> PathBuf {
+        crate::crash::data_dir().join("settings.txt")
+    }
+
+    pub fn load_from(path: &Path) -> Settings {
+        std::fs::read_to_string(path).map(|t| Settings::parse(&t)).unwrap_or_default()
+    }
+
+    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("tmp");
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(self.to_text().as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path) // replaces the old file in one step
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trips_through_text() {
+        let s = Settings {
+            window: Some((10, -20, 1200, 800)),
+            maximized: true,
+            columns: vec![300, 150, 140, 90],
+            sort: Sort { key: SortKey::Size, descending: true },
+            show_hidden: true,
+            split: Some(260),
+            last_folder: Some(PathBuf::from(r"C:\Users\me\Ünï =x")),
+        };
+        assert_eq!(Settings::parse(&s.to_text()), s);
+    }
+
+    #[test]
+    fn garbage_falls_back_per_key() {
+        let text = "window=1,2,nope,4\nmaximized=yes\ncolumns=10,abc\nsort=Bogus,true\nshow_hidden=1\n\
+                    split=-5\nlast_folder=\nunknown=whatever\nno equals sign\n\u{feff}";
+        let s = Settings::parse(text);
+        assert_eq!(s.window, None);
+        assert!(!s.maximized);
+        assert!(s.columns.is_empty());
+        assert_eq!(s.sort, Settings::default().sort);
+        assert!(!s.show_hidden);
+        assert_eq!(s.split, None);
+        assert_eq!(s.last_folder, None);
+    }
+
+    #[test]
+    fn save_replaces_the_file_whole() {
+        let dir = std::env::temp_dir().join(format!("fep-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("settings.txt");
+        let mut s = Settings { show_hidden: true, ..Default::default() };
+        s.save_to(&file).unwrap();
+        assert_eq!(Settings::load_from(&file), s);
+        s.split = Some(300);
+        s.save_to(&file).unwrap();
+        assert_eq!(Settings::load_from(&file), s);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temp file left behind");
+        assert_eq!(Settings::load_from(&dir.join("missing.txt")), Settings::default());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

@@ -161,7 +161,9 @@ fn paste() {
         return;
     };
     // Reading the clipboard can wait on the app that copied: never on the UI thread.
+    let running = super::OpGuard::new();
     spawn("paste", move || {
+        let _running = running;
         let ev = match crash::guard(clip::get_files).flatten() {
             None => Event::Message("Nothing to paste.".into()),
             Some((paths, cut)) => {
@@ -215,7 +217,9 @@ fn show_in_explorer() {
 /// Runs `op` on its own thread; `edit` starts renaming the item it creates.
 fn start_op(op: Op, edit: bool) {
     let Some((events, hwnd)) = with_app(|a| (a.events.clone(), a.hwnd.0 as isize)) else { return };
+    let running = super::OpGuard::new();
     spawn("op", move || {
+        let _running = running;
         let result = crash::guard(|| ops::run(&op, Mode::Interactive(hwnd)))
             .unwrap_or_else(|| Err("Internal error during a file operation.".into()));
         events.send(Event::OpDone { result, edit });
