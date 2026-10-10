@@ -121,6 +121,11 @@ impl Default for Browser {
 }
 
 impl Browser {
+    /// A browser whose generation numbers start at `base` (see `tabs::generation_base`).
+    pub fn with_generation_base(base: u64) -> Browser {
+        Browser { generation: base, shown_generation: base, ..Browser::default() }
+    }
+
     fn start(&mut self, at: Location, nav: Nav) -> ListJob {
         self.generation += 1;
         self.error = None;
@@ -805,6 +810,14 @@ mod tests {
         let mut b = Browser::default();
         visit(&mut b, r"C:\a", &["x"]);
         assert!(b.search("   ").is_none());
+    }
+
+    #[test]
+    fn each_tab_numbers_its_navigations_from_its_own_base() {
+        let mut b = Browser::with_generation_base(crate::tabs::generation_base(3));
+        let job = b.go(PathBuf::from(r"C:\x"));
+        assert_eq!(crate::tabs::tab_of_generation(job.generation), 3);
+        assert_eq!(b.on_listed(job.generation, listed(r"C:\x", &[]), &[]), shown(&[], true));
     }
 
     #[test]

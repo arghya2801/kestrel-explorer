@@ -942,3 +942,79 @@ fn typing_in_the_filter_narrows_and_enter_searches_subfolders() {
     assert!(pump_until(WAIT, || rows(list) == ["deep", "apple.txt", "banana.txt"]), "{:?}", rows(list));
     close(hwnd);
 }
+
+// ---- tabs ----
+
+/// Sends `vk` with Ctrl held, the way GetKeyState will see it.
+fn ctrl_key(to: HWND, vk: VIRTUAL_KEY, shift: bool) {
+    unsafe {
+        let mut keys = [0u8; 256];
+        GetKeyboardState(&mut keys).unwrap();
+        keys[VK_CONTROL.0 as usize] = 0x80;
+        if shift {
+            keys[VK_SHIFT.0 as usize] = 0x80;
+        }
+        SetKeyboardState(&keys).unwrap();
+        key(to, vk);
+        pump_until(Duration::from_millis(50), || false);
+        keys[VK_CONTROL.0 as usize] = 0;
+        keys[VK_SHIFT.0 as usize] = 0;
+        SetKeyboardState(&keys).unwrap();
+    }
+}
+
+fn tab_labels(main: HWND) -> Vec<String> {
+    let strip = find(main, w!("SysTabControl32"));
+    let n = unsafe { SendMessageW(strip, TCM_GETITEMCOUNT, None, None) }.0 as usize;
+    (0..n)
+        .map(|i| {
+            let mut buf = [0u16; 260];
+            let mut item = TCITEMW {
+                mask: TCIF_TEXT,
+                pszText: PWSTR(buf.as_mut_ptr()),
+                cchTextMax: buf.len() as i32,
+                ..Default::default()
+            };
+            unsafe {
+                SendMessageW(strip, TCM_GETITEMW, Some(WPARAM(i)), Some(LPARAM(&mut item as *mut _ as isize)))
+            };
+            let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
+            String::from_utf16_lossy(&buf[..len])
+        })
+        .collect()
+}
+
+#[test]
+fn tabs_keep_their_own_folders() {
+    let t = TempDir::new("tabs");
+    std::fs::create_dir(t.0.join("sub")).unwrap();
+    std::fs::write(t.0.join("sub").join("inner.txt"), "").unwrap();
+    std::fs::write(t.0.join("a.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    let root_rows = ["sub", "a.txt"];
+    assert!(pump_until(WAIT, || rows(list) == root_rows));
+    let root_name = t.0.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(tab_labels(hwnd), std::slice::from_ref(&root_name));
+
+    ctrl_key(list, VK_T, false);
+    assert!(
+        pump_until(WAIT, || tab_labels(hwnd).len() == 2 && rows(list) == root_rows),
+        "{:?}",
+        tab_labels(hwnd)
+    );
+    activate(hwnd, list, 0);
+    assert!(pump_until(WAIT, || rows(list) == ["inner.txt"]), "{:?}", rows(list));
+    assert_eq!(tab_labels(hwnd), [root_name.clone(), "sub".to_string()]);
+
+    ctrl_key(list, VK_TAB, false);
+    assert!(pump_until(WAIT, || rows(list) == root_rows), "{:?}", rows(list));
+    ctrl_key(list, VK_TAB, true);
+    assert!(pump_until(WAIT, || rows(list) == ["inner.txt"]), "{:?}", rows(list));
+
+    ctrl_key(list, VK_W, false);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 1 && rows(list) == root_rows), "{:?}", rows(list));
+    ctrl_key(list, VK_W, false); // the last tab stays
+    assert_eq!(tab_labels(hwnd).len(), 1);
+    close(hwnd);
+}

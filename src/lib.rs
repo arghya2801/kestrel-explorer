@@ -13,6 +13,7 @@ pub mod settings;
 pub mod shell;
 pub mod shellmenu;
 pub mod sort;
+pub mod tabs;
 pub mod ui;
 pub mod watch;
 pub mod watchdog;

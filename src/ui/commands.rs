@@ -30,6 +30,7 @@ pub const CMD_COPY_PATH: usize = 108;
 pub const CMD_SHOW_IN_EXPLORER: usize = 109;
 pub const CMD_SELECT_ALL: usize = 110;
 pub const CMD_MORE_OPTIONS: usize = 111;
+pub const CMD_OPEN_NEW_TAB: usize = 112;
 
 /// Runs a menu command. Returns false for ids that aren't ours.
 pub(super) fn run(cmd: usize) -> bool {
@@ -50,6 +51,11 @@ pub(super) fn run(cmd: usize) -> bool {
         CMD_SHOW_IN_EXPLORER => show_in_explorer(),
         CMD_SELECT_ALL => select_all(),
         CMD_MORE_OPTIONS => more_options(None),
+        CMD_OPEN_NEW_TAB => {
+            if let Some((dir, true)) = selected_paths().into_iter().next() {
+                super::tabbar::new_tab(Some(dir));
+            }
+        }
         _ => return false,
     }
     true
@@ -111,6 +117,8 @@ pub(super) fn context_menu(hwnd: HWND, lp: LPARAM) {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         };
         add(CMD_OPEN, w!("&Open\tEnter"), has_selection);
+        let folder_selected = selected_paths().first().is_some_and(|p| p.1);
+        add(CMD_OPEN_NEW_TAB, w!("Open in new &tab"), folder_selected);
         line();
         add(CMD_CUT, w!("Cu&t\tCtrl+X"), has_selection);
         add(CMD_COPY, w!("&Copy\tCtrl+C"), has_selection);

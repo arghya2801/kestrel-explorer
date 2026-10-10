@@ -41,14 +41,16 @@ use crate::listing::{Snapshot, list_dir};
 use crate::search;
 use crate::settings::Settings;
 use crate::sort::{Sort, SortKey, filter_order, sorted_order};
+use crate::tabs::Tabs;
 use crate::watch::Watcher;
 use crate::{crash, format, shell};
 
 mod commands;
 mod drag;
+mod tabbar;
 pub use commands::{
     CMD_COPY, CMD_COPY_PATH, CMD_CUT, CMD_DELETE, CMD_DELETE_PERMANENTLY, CMD_MORE_OPTIONS, CMD_NEW_FOLDER,
-    CMD_OPEN, CMD_PASTE, CMD_RENAME, CMD_SELECT_ALL, CMD_SHOW_IN_EXPLORER,
+    CMD_OPEN, CMD_OPEN_NEW_TAB, CMD_PASTE, CMD_RENAME, CMD_SELECT_ALL, CMD_SHOW_IN_EXPLORER,
 };
 mod tree;
 
@@ -125,6 +127,9 @@ struct App {
     lister: Option<JoinHandle<()>>,
     /// Tells a running search to stop.
     lister_cancel: Arc<std::sync::atomic::AtomicBool>,
+    tabs: Tabs<tabbar::TabSlot>,
+    tab_strip: HWND,
+    next_tab_id: u64,
     live_listers: Arc<AtomicUsize>,
     tree: HWND,
     nodes: Vec<tree::Node>,
@@ -153,9 +158,9 @@ struct App {
 }
 
 impl App {
-    fn controls(&self) -> [HWND; 8] {
+    fn controls(&self) -> [HWND; 9] {
         let [b0, b1, b2] = self.buttons;
-        [self.list, self.status, self.address, self.filter, self.tree, b0, b1, b2]
+        [self.list, self.status, self.address, self.filter, self.tree, self.tab_strip, b0, b1, b2]
     }
 }
 
@@ -218,7 +223,11 @@ pub fn init_process() -> Result<()> {
         OleInitialize(None)?;
         let icc = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_TREEVIEW_CLASSES,
+            dwICC: ICC_STANDARD_CLASSES
+                | ICC_LISTVIEW_CLASSES
+                | ICC_BAR_CLASSES
+                | ICC_TREEVIEW_CLASSES
+                | ICC_TAB_CLASSES,
         };
         let _ = InitCommonControlsEx(&icc);
     }
@@ -346,9 +355,10 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         }
         let status = child(hwnd, STATUSCLASSNAMEW, w!(""), WINDOW_STYLE(SBARS_SIZEGRIP), none, 0)?;
         let tree = tree::create(hwnd)?;
+        let tab_strip = tabbar::create(hwnd)?;
 
         let font = message_font(hwnd);
-        set_font(&[list, status, address, filter, tree, buttons[0], buttons[1], buttons[2]], font);
+        set_font(&[list, status, address, filter, tree, tab_strip, buttons[0], buttons[1], buttons[2]], font);
 
         let target = hwnd.0 as isize;
         let events = Arc::new(Events::new(move || {
@@ -380,6 +390,9 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 events,
                 lister: None,
                 lister_cancel: Arc::default(),
+                tabs: Tabs::new(tabbar::TabSlot::active(0)),
+                tab_strip,
+                next_tab_id: 1,
                 filter,
                 live_listers: Arc::new(AtomicUsize::new(0)),
                 tree,
@@ -517,6 +530,9 @@ fn on_key(msg: &MSG) -> bool {
             }
         }
         VK_ESCAPE => cancel_loading(),
+        VK_T if ctrl => tabbar::new_tab(None),
+        VK_W if ctrl => tabbar::close_active(),
+        VK_TAB if ctrl => tabbar::cycle(shift_held()),
         VK_TAB => unsafe {
             // Focus order: address bar, sidebar, list.
             let order = [address, filter, tree, list];
@@ -694,7 +710,10 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 
 /// `None` = not handled, let DefWindowProc run.
 unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
-    let (list, tree) = with_app(|a| (a.list, a.tree))?;
+    let (list, tree, strip) = with_app(|a| (a.list, a.tree, a.tab_strip))?;
+    if hdr.hwndFrom == strip {
+        return tabbar::on_notify(hdr);
+    }
     if hdr.hwndFrom == tree {
         return unsafe { tree::on_notify(hdr, lp) };
     }
@@ -790,6 +809,9 @@ fn write(item: &mut LVITEMW, text: &[u16]) {
 
 fn apply(ev: Event) {
     match ev {
+        Event::Listed { generation, result } if tabbar::is_background(generation) => {
+            tabbar::route_listed(generation, result)
+        }
         Event::Listed { generation, result } => {
             let sel = selected_rows();
             let applied = with_app(|a| {
@@ -1252,6 +1274,7 @@ fn update_chrome() {
         let _ = SetWindowTextW(hwnd, &HSTRING::from(format!("{title} - File Explorer Pro")));
     }
     show_location();
+    tabbar::update_label();
     if let Some(text) = with_app(|a| a.browser.status()) {
         set_status(&text);
     }
@@ -1315,8 +1338,8 @@ fn scale(hwnd: HWND, px: i32) -> i32 {
 }
 
 fn layout(hwnd: HWND) {
-    let Some((list, status, address, buttons, tree, split, filter)) =
-        with_app(|a| (a.list, a.status, a.address, a.buttons, a.tree, a.split, a.filter))
+    let Some((list, status, address, buttons, tree, split, filter, strip)) =
+        with_app(|a| (a.list, a.status, a.address, a.buttons, a.tree, a.split, a.filter, a.tab_strip))
     else {
         return;
     };
@@ -1333,7 +1356,8 @@ fn layout(hwnd: HWND) {
         let fw = scale(hwnd, 240).min((client.right / 3).max(0));
         let _ = MoveWindow(address, ax, pad, (client.right - ax - fw - 2 * pad).max(0), bar, true);
         let _ = MoveWindow(filter, client.right - fw - pad, pad, fw, bar, true);
-        let top = bar + 2 * pad;
+        let _ = MoveWindow(strip, 0, bar + 2 * pad, client.right, tab_height(hwnd), true);
+        let top = content_top(hwnd);
         let h = (client.bottom - (sr.bottom - sr.top) - top).max(0);
         let split = tree::clamp_split(split, client.right, GetDpiForWindow(hwnd));
         let gap = splitter_width(hwnd);
@@ -1351,8 +1375,20 @@ fn over_splitter(hwnd: HWND, lp: LPARAM) -> bool {
     let x = (lp.0 & 0xFFFF) as i16 as i32;
     let y = ((lp.0 >> 16) & 0xFFFF) as i16 as i32;
     let Some(split) = with_app(|a| a.split) else { return false };
-    let top = scale(hwnd, 28) + 2 * scale(hwnd, 4);
-    y >= top && x >= split && x < split + splitter_width(hwnd)
+    y >= content_top(hwnd) && x >= split && x < split + splitter_width(hwnd)
+}
+
+fn tab_height(hwnd: HWND) -> i32 {
+    scale(hwnd, 26)
+}
+
+/// Where the sidebar and list start: below the toolbar and the tab strip.
+fn content_top(hwnd: HWND) -> i32 {
+    scale(hwnd, 28) + 2 * scale(hwnd, 4) + tab_height(hwnd)
+}
+
+fn shift_held() -> bool {
+    unsafe { GetKeyState(VK_SHIFT.0 as i32) < 0 }
 }
 
 fn message_font(hwnd: HWND) -> HFONT {
