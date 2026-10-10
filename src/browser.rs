@@ -5,6 +5,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+
 use crate::listing::Snapshot;
 use crate::sort::{Sort, SortKey};
 
@@ -100,6 +102,17 @@ impl Browser {
     /// Sort to apply when a column header is clicked: same column flips direction.
     pub fn sort_for_column(&self, key: SortKey) -> Sort {
         Sort { key, descending: key == self.sort.key && !self.sort.descending }
+    }
+
+    /// First row at or after `start` (wrapping) whose name starts with `prefix`, ignoring case.
+    pub fn find_prefix(&self, start: usize, prefix: &[u16]) -> Option<usize> {
+        let s = self.snapshot()?;
+        let n = self.order.len();
+        (0..n).map(|k| (start + k) % n).find(|&row| {
+            let name = s.name(self.order[row] as usize);
+            name.len() >= prefix.len()
+                && unsafe { CompareStringOrdinal(&name[..prefix.len()], prefix, true) } == CSTR_EQUAL
+        })
     }
 
     pub fn snapshot(&self) -> Option<&Snapshot> {
@@ -211,6 +224,19 @@ mod tests {
         assert_eq!(b.sort, Sort { key: SortKey::Name, descending: false });
         assert_eq!(b.sort_for_column(SortKey::Name), Sort { key: SortKey::Name, descending: true });
         assert_eq!(b.sort_for_column(SortKey::Size), Sort { key: SortKey::Size, descending: false });
+    }
+
+    #[test]
+    fn type_to_find_matches_prefix_ignoring_case_and_wraps() {
+        let mut b = Browser::default();
+        let g = b.navigate(r"C:".into());
+        b.on_listed(g, listed(r"C:", &["apple", "Banana", "blue", "cherry"]));
+        let w = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(b.find_prefix(0, &w("b")), Some(1));
+        assert_eq!(b.find_prefix(2, &w("b")), Some(2));
+        assert_eq!(b.find_prefix(3, &w("b")), Some(1));
+        assert_eq!(b.find_prefix(0, &w("BL")), Some(2));
+        assert_eq!(b.find_prefix(0, &w("z")), None);
     }
 
     #[test]

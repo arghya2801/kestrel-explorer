@@ -3,7 +3,7 @@
 //! burst of events can't flood the 10,000-message thread queue).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 pub struct Events<T> {
     queue: Mutex<Vec<T>>,
@@ -34,6 +34,7 @@ impl<T> Events<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
     fn counting() -> (Arc<AtomicUsize>, Events<u32>) {
