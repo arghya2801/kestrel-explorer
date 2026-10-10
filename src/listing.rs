@@ -31,6 +31,23 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    pub fn new(dir: PathBuf) -> Self {
+        Snapshot {
+            dir,
+            entries: Vec::new(),
+            names: Vec::new(),
+        }
+    }
+    pub fn add(&mut self, name: &[u16], attrs: u32, size: u64, modified: u64) {
+        self.entries.push(Entry {
+            name_start: self.names.len() as u32,
+            name_len: name.len() as u32,
+            attrs,
+            size,
+            modified,
+        });
+        self.names.extend_from_slice(name);
+    }
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -80,11 +97,7 @@ pub fn list_dir(dir: &Path) -> io::Result<Snapshot> {
     let mut pattern = verbatim(&dir.join("*"));
     pattern.push(0);
 
-    let mut snap = Snapshot {
-        dir,
-        entries: Vec::new(),
-        names: Vec::new(),
-    };
+    let mut snap = Snapshot::new(dir);
     let mut data = WIN32_FIND_DATAW::default();
     let handle = unsafe {
         FindFirstFileExW(
@@ -135,14 +148,12 @@ fn push(snap: &mut Snapshot, d: &WIN32_FIND_DATAW) {
     if name == [b'.' as u16] || name == [b'.' as u16, b'.' as u16] {
         return;
     }
-    snap.entries.push(Entry {
-        name_start: snap.names.len() as u32,
-        name_len: len as u32,
-        attrs: d.dwFileAttributes,
-        size: (d.nFileSizeHigh as u64) << 32 | d.nFileSizeLow as u64,
-        modified: (d.ftLastWriteTime.dwHighDateTime as u64) << 32 | d.ftLastWriteTime.dwLowDateTime as u64,
-    });
-    snap.names.extend_from_slice(name);
+    snap.add(
+        name,
+        d.dwFileAttributes,
+        (d.nFileSizeHigh as u64) << 32 | d.nFileSizeLow as u64,
+        (d.ftLastWriteTime.dwHighDateTime as u64) << 32 | d.ftLastWriteTime.dwLowDateTime as u64,
+    );
 }
 
 #[cfg(test)]
