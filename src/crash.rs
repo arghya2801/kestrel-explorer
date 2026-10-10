@@ -40,10 +40,13 @@ pub fn log(msg: &str) {
 
 /// Installs the panic hook and the native crash handler. Call once at startup.
 pub fn install() {
-    panic::set_hook(Box::new(|info| {
+    // Chain to the previous hook so panics still reach stderr (and test output).
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();
         let bt = std::backtrace::Backtrace::force_capture();
         log(&format!("panic on thread {:?}: {info}\n{bt}", thread.name().unwrap_or("?")));
+        previous(info);
     }));
     unsafe { SetUnhandledExceptionFilter(Some(on_native_crash)) };
 }

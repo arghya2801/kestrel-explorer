@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use file_explorer_pro::ui;
+use file_explorer_pro::{places, ui};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, SetFileAttributesW};
 use windows::Win32::UI::Controls::*;
@@ -313,5 +313,137 @@ fn shortcut_to_a_folder_opens_inside_the_app() {
     assert!(pump_until(WAIT, || rows(list) == ["target", "go.lnk"]), "{:?}", rows(list));
     activate(hwnd, list, 1);
     assert!(pump_until(WAIT, || rows(list) == ["inside.txt"]), "{:?}", rows(list));
+    close(hwnd);
+}
+
+// ---- sidebar ----
+
+fn tree_of(main: HWND) -> HWND {
+    find(main, w!("SysTreeView32"))
+}
+
+fn tv_next(tree: HWND, flag: u32, item: isize) -> isize {
+    unsafe { SendMessageW(tree, TVM_GETNEXTITEM, Some(WPARAM(flag as usize)), Some(LPARAM(item))) }.0
+}
+
+fn tv_item(tree: HWND, item: isize) -> (String, isize) {
+    let mut buf = [0u16; 260];
+    let mut tv = TVITEMW {
+        mask: TVIF_TEXT | TVIF_PARAM,
+        hItem: HTREEITEM(item),
+        pszText: PWSTR(buf.as_mut_ptr()),
+        cchTextMax: buf.len() as i32,
+        ..Default::default()
+    };
+    unsafe { SendMessageW(tree, TVM_GETITEMW, None, Some(LPARAM(&mut tv as *mut _ as isize))) };
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+    (String::from_utf16_lossy(&buf[..n]), tv.lParam.0)
+}
+
+/// Child items of `parent` (0 = roots) as (text, handle).
+fn tv_children(tree: HWND, parent: isize) -> Vec<(String, isize)> {
+    let mut out = Vec::new();
+    let mut it = if parent == 0 { tv_next(tree, TVGN_ROOT, 0) } else { tv_next(tree, TVGN_CHILD, parent) };
+    while it != 0 {
+        out.push((tv_item(tree, it).0, it));
+        it = tv_next(tree, TVGN_NEXT, it);
+    }
+    out
+}
+
+fn system_drive_node(tree: HWND) -> isize {
+    let pc = tv_children(tree, 0).into_iter().find(|(t, _)| t == "This PC").expect("This PC").1;
+    let sys = format!("({})", std::env::var("SystemDrive").unwrap());
+    tv_children(tree, pc).into_iter().find(|(t, _)| t.ends_with(&sys)).expect("system drive").1
+}
+
+#[test]
+fn sidebar_lists_quick_access_and_drives_with_labels() {
+    let t = TempDir::new("side");
+    let hwnd = open(&t.0);
+    let tree = tree_of(hwnd);
+    let roots: Vec<String> = tv_children(tree, 0).into_iter().map(|r| r.0).collect();
+    assert_eq!(roots, ["Quick access", "This PC"]);
+    let quick = tv_children(tree, 0)[0].1;
+    assert_eq!(tv_children(tree, quick)[0].0, "Desktop");
+    let c = system_drive_node(tree);
+    // The generic name is replaced by the volume label once the label thread answers.
+    let sys = std::env::var("SystemDrive").unwrap();
+    let label = places::volume_label(Path::new(&format!("{sys}\\"))).unwrap();
+    let letter = sys.chars().next().unwrap();
+    let expected = places::drive_name(letter, places::DriveKind::Fixed, Some(&label));
+    assert!(pump_until(WAIT, || tv_item(tree, c).0 == expected), "{:?} != {expected}", tv_item(tree, c).0);
+    close(hwnd);
+}
+
+#[test]
+fn expanding_a_drive_loads_folders_and_clicking_one_shows_it() {
+    let t = TempDir::new("expand");
+    let hwnd = open(&t.0);
+    let tree = tree_of(hwnd);
+    let list = list_of(hwnd);
+    let c = system_drive_node(tree);
+    assert!(tv_children(tree, c).is_empty(), "loaded before expanding");
+
+    unsafe { SendMessageW(tree, TVM_EXPAND, Some(WPARAM(TVE_EXPAND.0 as usize)), Some(LPARAM(c))) };
+    let windows = || tv_children(tree, c).into_iter().find(|(t, _)| t.eq_ignore_ascii_case("Windows"));
+    assert!(pump_until(WAIT, || windows().is_some()), "{:?}", tv_children(tree, c));
+
+    let (_, item) = windows().unwrap();
+    let (_, node) = tv_item(tree, item);
+    let mut nm = NMTREEVIEWW { hdr: hdr(tree, TVN_SELCHANGEDW), action: TVC_BYMOUSE, ..Default::default() };
+    nm.itemNew.hItem = HTREEITEM(item);
+    nm.itemNew.lParam = LPARAM(node);
+    notify(hwnd, nm);
+    assert!(pump_until(WAIT, || rows(list).iter().any(|r| r.eq_ignore_ascii_case("System32"))));
+    close(hwnd);
+}
+
+#[test]
+fn dragging_the_splitter_resizes_the_sidebar() {
+    let t = TempDir::new("split");
+    let hwnd = open(&t.0);
+    let tree = tree_of(hwnd);
+    let width = || {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        unsafe { GetWindowRect(tree, &mut r) }.unwrap();
+        r.right - r.left
+    };
+    let start = width();
+    let mut tr = windows::Win32::Foundation::RECT::default();
+    unsafe { GetWindowRect(tree, &mut tr) }.unwrap();
+    let mut pt = windows::Win32::Foundation::POINT { x: tr.right + 1, y: tr.top + 50 };
+    unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt) }.unwrap();
+    let at = |x: i32, y: i32| LPARAM(((y as isize) << 16) | (x as isize & 0xFFFF));
+    unsafe {
+        SendMessageW(hwnd, WM_LBUTTONDOWN, Some(WPARAM(1)), Some(at(pt.x, pt.y)));
+        SendMessageW(hwnd, WM_MOUSEMOVE, Some(WPARAM(1)), Some(at(pt.x + 100, pt.y)));
+        SendMessageW(hwnd, WM_LBUTTONUP, Some(WPARAM(0)), Some(at(pt.x + 100, pt.y)));
+    }
+    assert_eq!(width(), start + 100);
+    unsafe {
+        SendMessageW(hwnd, WM_LBUTTONDOWN, Some(WPARAM(1)), Some(at(pt.x + 100, pt.y)));
+        SendMessageW(hwnd, WM_MOUSEMOVE, Some(WPARAM(1)), Some(at(0, pt.y)));
+        SendMessageW(hwnd, WM_LBUTTONUP, Some(WPARAM(0)), Some(at(0, pt.y)));
+    }
+    assert!(width() > 50, "sidebar collapsed to {}", width());
+    close(hwnd);
+}
+
+#[test]
+fn tab_cycles_address_sidebar_list() {
+    let t = TempDir::new("tab");
+    let hwnd = open(&t.0);
+    let (edit, tree, list) = (find(hwnd, w!("Edit")), tree_of(hwnd), list_of(hwnd));
+    unsafe { SetFocus(Some(edit)) }.unwrap();
+    key(edit, VK_TAB);
+    pump_until(Duration::from_millis(100), || false);
+    assert_eq!(unsafe { GetFocus() }, tree);
+    key(tree, VK_TAB);
+    pump_until(Duration::from_millis(100), || false);
+    assert_eq!(unsafe { GetFocus() }, list);
+    key(list, VK_TAB);
+    pump_until(Duration::from_millis(100), || false);
+    assert_eq!(unsafe { GetFocus() }, edit);
     close(hwnd);
 }

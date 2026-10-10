@@ -11,9 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, HBRUSH, HFONT, HGDIOBJ, InvalidateRect,
+    COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, HBRUSH, HFONT, HGDIOBJ, InvalidateRect, ScreenToClient,
 };
 use windows::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX, SetErrorMode,
@@ -37,6 +37,8 @@ use crate::events::Events;
 use crate::listing::{Snapshot, list_dir};
 use crate::sort::{Sort, SortKey, sorted_order};
 use crate::{crash, format, shell};
+
+mod tree;
 
 const CLASS: PCWSTR = w!("FileExplorerPro");
 const WM_APP_EVENTS: u32 = WM_APP + 1;
@@ -66,6 +68,14 @@ enum Event {
     Navigate(PathBuf),
     /// One-off status bar message.
     Message(String),
+    TreeChildren {
+        node: usize,
+        result: io::Result<Vec<String>>,
+    },
+    DriveLabel {
+        node: usize,
+        text: String,
+    },
 }
 
 struct App {
@@ -80,6 +90,19 @@ struct App {
     /// Thread listing the folder being loaded, so Esc can cancel its blocking I/O.
     lister: Option<JoinHandle<()>>,
     live_listers: Arc<AtomicUsize>,
+    tree: HWND,
+    nodes: Vec<tree::Node>,
+    /// Sidebar width in pixels.
+    split: i32,
+    /// While dragging the splitter: where in the gap it was grabbed.
+    drag_offset: Option<i32>,
+}
+
+impl App {
+    fn controls(&self) -> [HWND; 7] {
+        let [b0, b1, b2] = self.buttons;
+        [self.list, self.status, self.address, self.tree, b0, b1, b2]
+    }
 }
 
 thread_local! {
@@ -107,7 +130,7 @@ pub fn init_process() -> Result<()> {
         OleInitialize(None)?;
         let icc = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES,
+            dwICC: ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES | ICC_TREEVIEW_CLASSES,
         };
         let _ = InitCommonControlsEx(&icc);
     }
@@ -206,9 +229,10 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
             SendMessageW(list, LVM_INSERTCOLUMNW, Some(WPARAM(i)), Some(LPARAM(&col as *const _ as isize)));
         }
         let status = child(hwnd, STATUSCLASSNAMEW, w!(""), WINDOW_STYLE(SBARS_SIZEGRIP), none, 0)?;
+        let tree = tree::create(hwnd)?;
 
         let font = message_font(hwnd);
-        set_font(&[list, status, address, buttons[0], buttons[1], buttons[2]], font);
+        set_font(&[list, status, address, tree, buttons[0], buttons[1], buttons[2]], font);
 
         let target = hwnd.0 as isize;
         let events = Arc::new(Events::new(move || {
@@ -226,9 +250,14 @@ pub fn create_main_window(start: &Path) -> Result<HWND> {
                 events,
                 lister: None,
                 live_listers: Arc::new(AtomicUsize::new(0)),
+                tree,
+                nodes: Vec::new(),
+                split: scale(hwnd, 240),
+                drag_offset: None,
             })
         });
 
+        tree::populate();
         layout(hwnd);
         update_sort_arrows();
         let _ = SetFocus(Some(list));
@@ -260,8 +289,8 @@ pub fn translate(msg: &MSG) -> bool {
 }
 
 fn on_key(msg: &MSG) -> bool {
-    let Some((list, address)) = with_app(|a| (a.list, a.address)) else { return false };
-    if msg.hwnd != list && msg.hwnd != address {
+    let Some((list, address, tree)) = with_app(|a| (a.list, a.address, a.tree)) else { return false };
+    if ![list, address, tree].contains(&msg.hwnd) {
         return false;
     }
     let key = VIRTUAL_KEY(msg.wParam.0 as u16);
@@ -308,7 +337,12 @@ fn on_key(msg: &MSG) -> bool {
         }
         VK_ESCAPE => cancel_loading(),
         VK_TAB => unsafe {
-            let _ = SetFocus(Some(if in_address { list } else { address }));
+            // Focus order: address bar, sidebar, list.
+            let order = [address, tree, list];
+            let at = order.iter().position(|&h| h == msg.hwnd).unwrap_or(0);
+            let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
+            let next = if shift { (at + 2) % 3 } else { (at + 1) % 3 };
+            let _ = SetFocus(Some(order[next]));
         },
         _ => return false,
     }
@@ -357,6 +391,45 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 layout(hwnd);
                 LRESULT(0)
             }
+            // The only bare client area below the toolbar is the splitter gap.
+            WM_LBUTTONDOWN => {
+                if over_splitter(hwnd, lp) {
+                    let x = (lp.0 & 0xFFFF) as i16 as i32;
+                    with_app(|a| a.drag_offset = Some(x - a.split));
+                    SetCapture(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE => {
+                if let Some(offset) = with_app(|a| a.drag_offset).flatten() {
+                    let mut client = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut client);
+                    let x = (lp.0 & 0xFFFF) as i16 as i32;
+                    let dpi = GetDpiForWindow(hwnd);
+                    with_app(|a| a.split = tree::clamp_split(x - offset, client.right, dpi));
+                    layout(hwnd);
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                let _ = ReleaseCapture();
+                LRESULT(0)
+            }
+            WM_CAPTURECHANGED => {
+                with_app(|a| a.drag_offset = None);
+                LRESULT(0)
+            }
+            WM_SETCURSOR if wp.0 == hwnd.0 as usize => {
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let _ = ScreenToClient(hwnd, &mut pt);
+                let at = LPARAM(((pt.y as isize & 0xFFFF) << 16) | (pt.x as isize & 0xFFFF));
+                if over_splitter(hwnd, at) {
+                    SetCursor(LoadCursorW(None, IDC_SIZEWE).ok());
+                    return LRESULT(1);
+                }
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
             WM_SETFOCUS => {
                 if let Some(list) = with_app(|a| a.list) {
                     let _ = SetFocus(Some(list));
@@ -375,9 +448,11 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
                 let font = message_font(hwnd);
+                let new_dpi = (wp.0 & 0xFFFF) as i32;
                 if let Some((old, controls)) = with_app(|a| {
-                    let c = [a.list, a.status, a.address, a.buttons[0], a.buttons[1], a.buttons[2]];
-                    (std::mem::replace(&mut a.font, font), c)
+                    let old_dpi = GetDpiForWindow(hwnd) as i32;
+                    a.split = a.split * new_dpi / old_dpi.max(1);
+                    (std::mem::replace(&mut a.font, font), a.controls())
                 }) {
                     set_font(&controls, font);
                     let _ = DeleteObject(HGDIOBJ(old.0));
@@ -399,7 +474,10 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 
 /// `None` = not handled, let DefWindowProc run.
 unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
-    let list = with_app(|a| a.list)?;
+    let (list, tree) = with_app(|a| (a.list, a.tree))?;
+    if hdr.hwndFrom == tree {
+        return unsafe { tree::on_notify(hdr, lp) };
+    }
     if hdr.hwndFrom != list {
         return None;
     }
@@ -505,6 +583,8 @@ fn apply(ev: Event) {
         }
         Event::Navigate(dir) => go(dir),
         Event::Message(text) => set_status(&text),
+        Event::TreeChildren { node, result } => tree::on_children(node, result),
+        Event::DriveLabel { node, text } => tree::on_label(node, text),
     }
 }
 
@@ -736,7 +816,8 @@ fn scale(hwnd: HWND, px: i32) -> i32 {
 }
 
 fn layout(hwnd: HWND) {
-    let Some((list, status, address, buttons)) = with_app(|a| (a.list, a.status, a.address, a.buttons))
+    let Some((list, status, address, buttons, tree, split)) =
+        with_app(|a| (a.list, a.status, a.address, a.buttons, a.tree, a.split))
     else {
         return;
     };
@@ -752,9 +833,25 @@ fn layout(hwnd: HWND) {
         let ax = pad + 3 * (bw + pad);
         let _ = MoveWindow(address, ax, pad, (client.right - ax - pad).max(0), bar, true);
         let top = bar + 2 * pad;
-        let h = client.bottom - (sr.bottom - sr.top) - top;
-        let _ = MoveWindow(list, 0, top, client.right, h.max(0), true);
+        let h = (client.bottom - (sr.bottom - sr.top) - top).max(0);
+        let split = tree::clamp_split(split, client.right, GetDpiForWindow(hwnd));
+        let gap = splitter_width(hwnd);
+        let _ = MoveWindow(tree, 0, top, split, h, true);
+        let _ = MoveWindow(list, split + gap, top, (client.right - split - gap).max(0), h, true);
     }
+}
+
+fn splitter_width(hwnd: HWND) -> i32 {
+    scale(hwnd, 5)
+}
+
+/// Is the client point in `lp` on the gap between sidebar and list?
+fn over_splitter(hwnd: HWND, lp: LPARAM) -> bool {
+    let x = (lp.0 & 0xFFFF) as i16 as i32;
+    let y = ((lp.0 >> 16) & 0xFFFF) as i16 as i32;
+    let Some(split) = with_app(|a| a.split) else { return false };
+    let top = scale(hwnd, 28) + 2 * scale(hwnd, 4);
+    y >= top && x >= split && x < split + splitter_width(hwnd)
 }
 
 fn message_font(hwnd: HWND) -> HFONT {
