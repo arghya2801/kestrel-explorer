@@ -10,6 +10,7 @@ pub mod ops;
 pub mod places;
 pub mod settings;
 pub mod shell;
+pub mod shellmenu;
 pub mod sort;
 pub mod ui;
 pub mod watch;

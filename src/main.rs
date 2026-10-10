@@ -4,11 +4,17 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use file_explorer_pro::settings::Settings;
-use file_explorer_pro::{crash, ui, watchdog};
+use file_explorer_pro::{crash, shellmenu, ui, watchdog};
 use windows::Win32::Graphics::Gdi::{RDW_ALLCHILDREN, RDW_UPDATENOW, RedrawWindow};
 use windows::Win32::UI::WindowsAndMessaging::{SW_SHOW, SW_SHOWMAXIMIZED, ShowWindow};
 
 fn main() {
+    // Started as the helper that shows Windows' full right-click menu?
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == shellmenu::MENU_FLAG || a == shellmenu::LIST_FLAG) {
+        crash::install();
+        std::process::exit(shellmenu::run_helper(&args));
+    }
     ui::startup_mark("main");
     let settings = Settings::load_from(&Settings::file());
     // A folder given on the command line wins; then where the user left off; then their home.

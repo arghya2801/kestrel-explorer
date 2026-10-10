@@ -10,7 +10,7 @@ use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
 use windows::Win32::System::Ole::CF_HDROP;
 use windows::Win32::UI::Controls::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
@@ -29,6 +29,7 @@ pub const CMD_NEW_FOLDER: usize = 107;
 pub const CMD_COPY_PATH: usize = 108;
 pub const CMD_SHOW_IN_EXPLORER: usize = 109;
 pub const CMD_SELECT_ALL: usize = 110;
+pub const CMD_MORE_OPTIONS: usize = 111;
 
 /// Runs a menu command. Returns false for ids that aren't ours.
 pub(super) fn run(cmd: usize) -> bool {
@@ -48,6 +49,7 @@ pub(super) fn run(cmd: usize) -> bool {
         CMD_COPY_PATH => copy_paths(),
         CMD_SHOW_IN_EXPLORER => show_in_explorer(),
         CMD_SELECT_ALL => select_all(),
+        CMD_MORE_OPTIONS => more_options(None),
         _ => return false,
     }
     true
@@ -69,6 +71,11 @@ fn list() -> Option<HWND> {
 /// Shows the right-click menu for the list at `lp` (screen coordinates, or -1 from the keyboard).
 pub(super) fn context_menu(hwnd: HWND, lp: LPARAM) {
     let Some(list) = list() else { return };
+    // Shift+right-click: straight to Windows' full menu, as in Explorer.
+    if lp.0 != -1 && unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0 {
+        let at = ((lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
+        return more_options(Some(at));
+    }
     let has_selection = !selected_rows().is_empty();
     // Only asks whether files are there; doesn't make the copying app render anything.
     let can_paste = unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_ok();
@@ -115,11 +122,32 @@ pub(super) fn context_menu(hwnd: HWND, lp: LPARAM) {
         line();
         add(CMD_COPY_PATH, w!("Copy &as path\tCtrl+Shift+C"), has_selection);
         add(CMD_SHOW_IN_EXPLORER, w!("Show in &Explorer"), true);
+        add(CMD_MORE_OPTIONS, w!("&More options\tShift+right-click"), true);
         let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, None, hwnd, None).0;
         let _ = DestroyMenu(menu);
         if cmd > 0 {
             run(cmd as usize);
         }
+    }
+}
+
+/// Windows' full menu for the selection (or the open folder), in a helper
+/// process so its add-ons can't crash or hang this window.
+fn more_options(at: Option<(i32, i32)>) {
+    let mut paths: Vec<PathBuf> = selected_paths().into_iter().map(|p| p.0).collect();
+    if paths.is_empty() {
+        paths.extend(current_dir());
+    }
+    if paths.is_empty() {
+        return;
+    }
+    let (x, y) = at.unwrap_or_else(|| {
+        let mut pt = POINT::default();
+        let _ = unsafe { GetCursorPos(&mut pt) };
+        (pt.x, pt.y)
+    });
+    if let Err(e) = crate::shellmenu::launch(x, y, &paths) {
+        set_status(&format!("Couldn't show the full menu: {e}"));
     }
 }
 

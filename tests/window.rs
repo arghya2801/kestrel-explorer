@@ -893,3 +893,18 @@ fn dropping_files_copies_onto_folders_and_moves_into_the_open_folder() {
     unsafe { target.DragLeave() }.unwrap();
     close(hwnd);
 }
+
+// ---- full shell menu ----
+
+#[test]
+fn the_shell_menu_helper_runs_in_its_own_process() {
+    let t = TempDir::new("shellmenu");
+    std::fs::write(t.0.join("x.txt"), "").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_file-explorer-pro"))
+        .args([file_explorer_pro::shellmenu::LIST_FLAG.as_ref(), t.0.join("x.txt").as_os_str()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let items = String::from_utf8_lossy(&out.stdout);
+    assert!(items.lines().count() >= 3, "{items}");
+}
