@@ -1,6 +1,6 @@
-# Roadmap
+# Kestrel roadmap
 
-v1 goal: a small, fast Windows file explorer that never crashes and never shows "Not Responding".
+v1 goal: Kestrel, a small, fast Windows file explorer that never crashes and never shows "Not Responding".
 Each stage ends with something runnable, its tests green, and a commit per step.
 
 Rules that hold for every stage:

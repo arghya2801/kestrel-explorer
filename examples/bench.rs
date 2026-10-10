@@ -1,8 +1,8 @@
 //! cargo run --release --example bench -- <dir> [runs]
 use std::time::Instant;
 
-use file_explorer_pro::listing::list_dir;
-use file_explorer_pro::sort::{Sort, SortKey, sorted_order};
+use kestrel::listing::list_dir;
+use kestrel::sort::{Sort, SortKey, sorted_order};
 
 fn main() {
     let dir = std::env::args().nth(1).expect("usage: bench <dir> [runs]");

@@ -176,15 +176,15 @@ fn show(x: i32, y: i32, paths: &[PathBuf]) -> Result<()> {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(host_proc),
             hInstance: hinstance,
-            lpszClassName: w!("FileExplorerProMenuHost"),
+            lpszClassName: w!("KestrelMenuHost"),
             ..Default::default()
         };
         RegisterClassExW(&wc);
         // Invisible owner for the menu and for dialogs the chosen command opens.
         let host = CreateWindowExW(
             WS_EX_TOOLWINDOW,
-            w!("FileExplorerProMenuHost"),
-            w!("File Explorer Pro"),
+            w!("KestrelMenuHost"),
+            w!("Kestrel"),
             WS_POPUP,
             x,
             y,

@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use file_explorer_pro::{places, ui};
+use kestrel::{places, ui};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, SetFileAttributesW};
 use windows::Win32::UI::Controls::*;
@@ -149,7 +149,7 @@ fn activate(main: HWND, list: HWND, row: i32) {
 
 fn open(dir: &Path) -> HWND {
     ui::init_process().unwrap();
-    let hwnd = ui::create_main_window(dir, &file_explorer_pro::settings::Settings::default()).unwrap();
+    let hwnd = ui::create_main_window(dir, &kestrel::settings::Settings::default()).unwrap();
     // The sidebar fills in right after startup.
     let tree = tree_of(hwnd);
     assert!(pump_until(WAIT, || tv_next(tree, TVGN_ROOT, 0) != 0), "sidebar never filled");
@@ -645,7 +645,7 @@ fn edit_control(list: HWND) -> HWND {
 }
 
 fn clipboard_text() -> Option<String> {
-    file_explorer_pro::clip::get_text()
+    kestrel::clip::get_text()
 }
 
 #[test]
@@ -788,7 +788,7 @@ fn restore_text(text: &str) {
         )
     }
     .unwrap();
-    let _ = file_explorer_pro::clip::set_text(owner, text);
+    let _ = kestrel::clip::set_text(owner, text);
     unsafe { DestroyWindow(owner) }.unwrap();
 }
 
@@ -796,8 +796,8 @@ fn restore_text(text: &str) {
 
 #[test]
 fn settings_shape_the_window_and_are_captured_on_close() {
-    use file_explorer_pro::settings::Settings;
-    use file_explorer_pro::sort::{Sort, SortKey};
+    use kestrel::settings::Settings;
+    use kestrel::sort::{Sort, SortKey};
     let t = TempDir::new("settings");
     std::fs::write(t.0.join("big.txt"), "x".repeat(5000)).unwrap();
     std::fs::write(t.0.join("small.txt"), "x").unwrap();
@@ -848,7 +848,7 @@ fn a_start_folder_that_is_gone_falls_back_to_the_user_folder() {
 
 #[test]
 fn dropping_files_copies_onto_folders_and_moves_into_the_open_folder() {
-    use file_explorer_pro::dnd;
+    use kestrel::dnd;
     use windows::Win32::Foundation::{POINT, POINTL};
     use windows::Win32::System::Ole::DROPEFFECT;
     use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
@@ -920,8 +920,8 @@ fn dropping_files_copies_onto_folders_and_moves_into_the_open_folder() {
 fn the_shell_menu_helper_runs_in_its_own_process() {
     let t = TempDir::new("shellmenu");
     std::fs::write(t.0.join("x.txt"), "").unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_file-explorer-pro"))
-        .args([file_explorer_pro::shellmenu::LIST_FLAG.as_ref(), t.0.join("x.txt").as_os_str()])
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kestrel"))
+        .args([kestrel::shellmenu::LIST_FLAG.as_ref(), t.0.join("x.txt").as_os_str()])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -1064,8 +1064,8 @@ fn pixel_luma(hwnd: HWND, x: i32, y: i32) -> u32 {
 #[test]
 fn dark_theme_colours_the_window_and_is_remembered() {
     let _desktop = desktop();
-    use file_explorer_pro::settings::Settings;
-    use file_explorer_pro::theme::ThemeChoice;
+    use kestrel::settings::Settings;
+    use kestrel::theme::ThemeChoice;
     use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmGetWindowAttribute};
     let t = TempDir::new("dark");
     std::fs::write(t.0.join("x.txt"), "").unwrap();
@@ -1132,7 +1132,7 @@ fn preview_pane_shows_text_and_says_when_it_cannot() {
     }
     let list = list_of(hwnd);
     assert!(pump_until(WAIT, || rows(list) == ["data.fepbin", "notes.txt"]), "{:?}", rows(list));
-    let pane = find(hwnd, w!("FileExplorerProPreview"));
+    let pane = find(hwnd, w!("KestrelPreview"));
     assert!(!unsafe { IsWindowVisible(pane) }.as_bool());
 
     alt_key(list, VK_P);
@@ -1166,7 +1166,7 @@ fn preview_pane_shows_text_and_says_when_it_cannot() {
 
 // ---- side-by-side windows ----
 
-/// Top-level File Explorer Pro windows whose title starts with `prefix`, other than `except`.
+/// Top-level Kestrel windows whose title starts with `prefix`, other than `except`.
 fn windows_titled(prefix: &str, except: HWND) -> Vec<HWND> {
     struct S {
         prefix: String,
@@ -1178,7 +1178,7 @@ fn windows_titled(prefix: &str, except: HWND) -> Vec<HWND> {
         let mut buf = [0u16; 512];
         let n = unsafe { GetWindowTextW(h, &mut buf) };
         let title = String::from_utf16_lossy(&buf[..n as usize]);
-        if h != s.except && title.starts_with(&s.prefix) && title.ends_with("File Explorer Pro") {
+        if h != s.except && title.starts_with(&s.prefix) && title.ends_with("Kestrel") {
             s.found.push(h);
         }
         true.into()

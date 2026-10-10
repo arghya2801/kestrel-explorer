@@ -58,7 +58,7 @@ pub use commands::{
 };
 mod tree;
 
-const CLASS: PCWSTR = w!("FileExplorerPro");
+const CLASS: PCWSTR = w!("Kestrel");
 const WM_APP_EVENTS: u32 = WM_APP + 1;
 const WM_APP_LATE_INIT: u32 = WM_APP + 2;
 const ID_BACK: usize = 1;
@@ -307,7 +307,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             CLASS,
-            w!("File Explorer Pro"),
+            w!("Kestrel"),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             x,
             y,
@@ -1402,7 +1402,7 @@ fn update_chrome() {
         for (button, on) in buttons.iter().zip(enabled) {
             let _ = EnableWindow(*button, on);
         }
-        let _ = SetWindowTextW(hwnd, &HSTRING::from(format!("{title} - File Explorer Pro")));
+        let _ = SetWindowTextW(hwnd, &HSTRING::from(format!("{title} - Kestrel")));
     }
     show_location();
     tabbar::update_label();

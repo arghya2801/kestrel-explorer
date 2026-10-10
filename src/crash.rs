@@ -1,6 +1,6 @@
 //! Crash safety: panics at callback boundaries become `None` instead of
 //! aborting, panics are logged with a backtrace, and native crashes write a
-//! minidump to `%LOCALAPPDATA%\FileExplorerPro\crashes`.
+//! minidump to `%LOCALAPPDATA%\Kestrel\crashes`.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -24,7 +24,7 @@ pub fn guard<T>(f: impl FnOnce() -> T) -> Option<T> {
 
 pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("FileExplorerPro")
+    base.join("Kestrel")
 }
 
 /// Appends one line to the log file. Never fails loudly: logging must not crash the app.

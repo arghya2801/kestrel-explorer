@@ -24,7 +24,7 @@ use windows::core::{GUID, HSTRING, Interface, PCWSTR, w};
 use super::{Event, child, spawn, with_app};
 use crate::preview::{handler_for, is_text, read_text};
 
-const CLASS: PCWSTR = w!("FileExplorerProPreview");
+const CLASS: PCWSTR = w!("KestrelPreview");
 const TIMER: usize = 7;
 /// Wait this long after the selection settles before previewing.
 const DEBOUNCE_MS: u32 = 150;

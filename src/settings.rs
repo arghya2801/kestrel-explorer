@@ -1,5 +1,5 @@
 //! Remembered window and view state, as `key=value` lines in
-//! `%LOCALAPPDATA%\FileExplorerPro\settings.txt`. Saved by writing a temp file
+//! `%LOCALAPPDATA%\Kestrel\settings.txt`. Saved by writing a temp file
 //! and renaming it over the old one, so a crash mid-save leaves the old file.
 //! Anything unreadable falls back to its default.
 
@@ -119,6 +119,20 @@ impl Settings {
         crate::crash::data_dir().join("settings.txt")
     }
 
+    /// Settings saved before the app was renamed (from "File Explorer Pro").
+    pub fn old_file() -> Option<PathBuf> {
+        let base = std::env::var_os("LOCALAPPDATA")?;
+        Some(PathBuf::from(base).join("FileExplorerPro").join("settings.txt"))
+    }
+
+    /// Copies `old` to `new` once: only if `new` doesn't exist yet. Returns true if it copied.
+    pub fn migrate(old: &Path, new: &Path) -> bool {
+        if new.exists() || !old.exists() {
+            return false;
+        }
+        new.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::copy(old, new).is_ok()
+    }
+
     pub fn load_from(path: &Path) -> Settings {
         std::fs::read_to_string(path).map(|t| Settings::parse(&t)).unwrap_or_default()
     }
@@ -197,6 +211,22 @@ mod tests {
         assert_eq!(fit_window((10, 10, 4000, 3000), work), (0, 0, 1920, 1040), "bigger than the screen");
         let second = (1920, 0, 3840, 1080); // a monitor to the right
         assert_eq!(fit_window((1800, 100, 800, 600), second), (1920, 100, 800, 600));
+    }
+
+    #[test]
+    fn old_settings_are_copied_once() {
+        let dir = std::env::temp_dir().join(format!("fep-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (old, new) = (dir.join("old").join("settings.txt"), dir.join("new").join("settings.txt"));
+        assert!(!Settings::migrate(&old, &new), "nothing to copy");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "show_hidden=true\n").unwrap();
+        assert!(Settings::migrate(&old, &new));
+        assert!(Settings::load_from(&new).show_hidden);
+        std::fs::write(&old, "show_hidden=false\n").unwrap();
+        assert!(!Settings::migrate(&old, &new), "never overwrites");
+        assert!(Settings::load_from(&new).show_hidden);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
