@@ -15,7 +15,8 @@ use std::thread::JoinHandle;
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, CreateFontIndirectW, DeleteObject, GetMonitorInfoW, HBRUSH, HDC, HFONT, HGDIOBJ,
-    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, ScreenToClient,
+    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, MonitorFromWindow,
+    ScreenToClient,
 };
 use windows::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX, SetErrorMode,
@@ -560,6 +561,7 @@ fn on_key(msg: &MSG) -> bool {
         }
         VK_ESCAPE => cancel_loading(),
         VK_T if ctrl => tabbar::new_tab(None),
+        VK_N if ctrl && !shift => open_side_by_side(with_app(|a| a.hwnd).unwrap_or_default()),
         VK_W if ctrl => tabbar::close_active(),
         VK_TAB if ctrl => tabbar::cycle(shift_held()),
         VK_TAB => unsafe {
@@ -1039,6 +1041,13 @@ fn late_init() {
 
 /// Records the view state for saving once the window is gone.
 fn capture_settings(hwnd: HWND) {
+    if let Some(s) = current_settings(hwnd) {
+        FINAL_SETTINGS.with(|f| *f.borrow_mut() = Some(s));
+    }
+}
+
+/// The window's view state as settings.
+fn current_settings(hwnd: HWND) -> Option<Settings> {
     let Some((list, mut s)) = with_app(|a| {
         let s = Settings {
             sort: a.browser.sort,
@@ -1051,7 +1060,7 @@ fn capture_settings(hwnd: HWND) {
         };
         (a.list, s)
     }) else {
-        return;
+        return None;
     };
     unsafe {
         let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
@@ -1064,7 +1073,57 @@ fn capture_settings(hwnd: HWND) {
             .map(|i| SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(i)), None).0 as i32)
             .collect();
     }
-    FINAL_SETTINGS.with(|f| *f.borrow_mut() = Some(s));
+    Some(s)
+}
+
+/// Windows opened with Ctrl+N, each on its own UI thread with its own state.
+static OTHER_WINDOWS: std::sync::Mutex<Vec<JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+
+/// Waits until every window opened with Ctrl+N has been closed.
+pub fn wait_for_other_windows() {
+    loop {
+        let next = OTHER_WINDOWS.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        match next {
+            Some(h) => {
+                let _ = h.join();
+            }
+            None => return,
+        }
+    }
+}
+
+/// Ctrl+N: a second window on the same folder, the two tiled side by side.
+fn open_side_by_side(hwnd: HWND) {
+    let Some(mut s) = current_settings(hwnd) else { return };
+    let start = s.last_folder.clone().unwrap_or_else(|| PathBuf::from(r"C:\"));
+    unsafe {
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
+            let w = info.rcWork;
+            let half = (w.right - w.left) / 2;
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = SetWindowPos(hwnd, None, w.left, w.top, half, w.bottom - w.top, SWP_NOZORDER);
+            s.window = Some((w.left + half, w.top, w.right - w.left - half, w.bottom - w.top));
+            s.maximized = false;
+        }
+    }
+    let spawned = std::thread::Builder::new().name("window".into()).spawn(move || {
+        crash::guard(|| {
+            if init_process().is_err() {
+                return;
+            }
+            if let Ok(w) = create_main_window(&start, &s) {
+                unsafe {
+                    let _ = ShowWindow(w, SW_SHOW);
+                }
+                run_message_loop();
+            }
+        });
+    });
+    match spawned {
+        Ok(h) => OTHER_WINDOWS.lock().unwrap_or_else(|e| e.into_inner()).push(h),
+        Err(e) => set_status(&format!("Couldn't open a new window: {e}")),
+    }
 }
 
 /// Logs how long after process start the window first painted.

@@ -1163,3 +1163,54 @@ fn preview_pane_shows_text_and_says_when_it_cannot() {
     assert!(pump_until(WAIT, || !unsafe { IsWindowVisible(pane) }.as_bool()));
     close(hwnd);
 }
+
+// ---- side-by-side windows ----
+
+/// Top-level File Explorer Pro windows whose title starts with `prefix`, other than `except`.
+fn windows_titled(prefix: &str, except: HWND) -> Vec<HWND> {
+    struct S {
+        prefix: String,
+        except: HWND,
+        found: Vec<HWND>,
+    }
+    extern "system" fn each(h: HWND, lp: LPARAM) -> windows::core::BOOL {
+        let s = unsafe { &mut *(lp.0 as *mut S) };
+        let mut buf = [0u16; 512];
+        let n = unsafe { GetWindowTextW(h, &mut buf) };
+        let title = String::from_utf16_lossy(&buf[..n as usize]);
+        if h != s.except && title.starts_with(&s.prefix) && title.ends_with("File Explorer Pro") {
+            s.found.push(h);
+        }
+        true.into()
+    }
+    let mut s = S { prefix: prefix.to_string(), except, found: Vec::new() };
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut s as *mut S as isize));
+    }
+    s.found
+}
+
+#[test]
+fn ctrl_n_opens_a_second_window_side_by_side() {
+    let _desktop = desktop();
+    let t = TempDir::new("twin");
+    std::fs::write(t.0.join("x.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["x.txt"]));
+    ctrl_key(list, VK_N, false);
+    let prefix = t.0.display().to_string();
+    assert!(pump_until(WAIT, || windows_titled(&prefix, hwnd).len() == 1), "no second window");
+    let twin = windows_titled(&prefix, hwnd)[0];
+    let (mut a, mut b) =
+        (windows::Win32::Foundation::RECT::default(), windows::Win32::Foundation::RECT::default());
+    unsafe {
+        GetWindowRect(hwnd, &mut a).unwrap();
+        GetWindowRect(twin, &mut b).unwrap();
+    }
+    assert!(a.right <= b.left + 20, "side by side: {a:?} {b:?}");
+    unsafe { PostMessageW(Some(twin), WM_CLOSE, WPARAM(0), LPARAM(0)) }.unwrap();
+    ui::wait_for_other_windows(); // returns once the second window's thread has ended
+    assert!(windows_titled(&prefix, hwnd).is_empty());
+    close(hwnd);
+}

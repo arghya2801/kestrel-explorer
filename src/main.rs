@@ -56,7 +56,9 @@ fn main() {
     {
         crash::log(&format!("settings not saved: {e}"));
     }
-    // The window is gone, but copies and moves keep going until done.
+    // Other windows (Ctrl+N) keep the app open until they're closed too.
+    ui::wait_for_other_windows();
+    // The windows are gone, but copies and moves keep going until done.
     while ui::running_operations() > 0 {
         std::thread::sleep(Duration::from_millis(100));
     }
