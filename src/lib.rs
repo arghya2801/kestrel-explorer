@@ -6,6 +6,7 @@ pub mod events;
 pub mod format;
 pub mod icons;
 pub mod listing;
+pub mod network;
 pub mod ops;
 pub mod places;
 pub mod preview;

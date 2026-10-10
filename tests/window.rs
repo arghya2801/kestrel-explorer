@@ -1214,3 +1214,40 @@ fn ctrl_n_opens_a_second_window_side_by_side() {
     assert!(windows_titled(&prefix, hwnd).is_empty());
     close(hwnd);
 }
+
+// ---- network ----
+
+#[test]
+fn a_computer_lists_its_shares_and_up_returns_to_them() {
+    let t = TempDir::new("net");
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    let edit = find(hwnd, w!("Edit"));
+    unsafe { SetWindowTextW(edit, w!(r"\\localhost")) }.unwrap();
+    key(edit, VK_RETURN);
+    assert!(
+        pump_until(WAIT, || status_text(hwnd).ends_with("items") && window_text_of(edit) == r"\\localhost"),
+        "{} / {}",
+        status_text(hwnd),
+        window_text_of(edit)
+    );
+    // Only admin shares (C$, ...) exist here: they show with hidden items.
+    ctrl_key(list, VK_H, false);
+    assert!(pump_until(WAIT, || rows(list).iter().any(|r| r.eq_ignore_ascii_case("C$"))), "{:?}", rows(list));
+    let c = rows(list).iter().position(|r| r.eq_ignore_ascii_case("C$")).unwrap();
+    activate(hwnd, list, c as i32);
+    assert!(
+        pump_until(WAIT, || rows(list).iter().any(|r| r.eq_ignore_ascii_case("Windows"))),
+        "{:?}",
+        rows(list)
+    );
+    alt_key(list, VK_UP);
+    assert!(pump_until(WAIT, || window_text_of(edit) == r"\\localhost"), "{}", window_text_of(edit));
+    close(hwnd);
+}
+
+fn window_text_of(h: HWND) -> String {
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetWindowTextW(h, &mut buf) };
+    String::from_utf16_lossy(&buf[..n as usize])
+}

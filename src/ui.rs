@@ -38,7 +38,7 @@ use windows::core::{HSTRING, PCWSTR, PWSTR, Result, w};
 use crate::browser::{Applied, Browser, ListJob, SortJob, parse_location};
 use crate::events::Events;
 use crate::icons::{self, Done, Icons};
-use crate::listing::{Snapshot, list_dir};
+use crate::listing::Snapshot;
 use crate::search;
 use crate::settings::Settings;
 use crate::sort::{Sort, SortKey, filter_order, sorted_order};
@@ -991,7 +991,7 @@ fn spawn_list(job: ListJob) {
                     };
                     search::search(&dir, q, show_hidden, &|| cancel.load(Ordering::SeqCst), &mut progress)
                 }
-                None => list_dir(&dir),
+                None => crate::network::list_location(&dir),
             };
             snap.map(|s| {
                 let order = filter_order(&s, &sorted_order(&s, sort, show_hidden), &filter);
@@ -1048,7 +1048,7 @@ fn capture_settings(hwnd: HWND) {
 
 /// The window's view state as settings.
 fn current_settings(hwnd: HWND) -> Option<Settings> {
-    let Some((list, mut s)) = with_app(|a| {
+    let (list, mut s) = with_app(|a| {
         let s = Settings {
             sort: a.browser.sort,
             show_hidden: a.browser.show_hidden,
@@ -1059,9 +1059,7 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
             ..Default::default()
         };
         (a.list, s)
-    }) else {
-        return None;
-    };
+    })?;
     unsafe {
         let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
         if GetWindowPlacement(hwnd, &mut wp).is_ok() {

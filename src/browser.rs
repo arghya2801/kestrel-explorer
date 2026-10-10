@@ -199,7 +199,8 @@ impl Browser {
     /// Up one folder; from search results, up to the folder that was searched.
     pub fn up(&mut self) -> Option<ListJob> {
         let dir = self.dir()?;
-        let target = if self.shown_query.is_some() { dir.to_path_buf() } else { dir.parent()?.to_path_buf() };
+        let target =
+            if self.shown_query.is_some() { dir.to_path_buf() } else { crate::network::up_from(dir)? };
         Some(self.go(target))
     }
 
@@ -244,7 +245,7 @@ impl Browser {
         !self.forward.is_empty()
     }
     pub fn can_up(&self) -> bool {
-        self.dir().and_then(Path::parent).is_some()
+        self.dir().and_then(crate::network::up_from).is_some()
     }
     /// Generation of the folder on screen.
     pub fn shown_generation(&self) -> u64 {
@@ -451,6 +452,10 @@ pub fn parse_location(input: &str, current: Option<&Path>) -> Option<PathBuf> {
     }
     let s = expand_env(s);
     let b = s.as_bytes();
+    // A computer on the network: `\\srv` lists its shares.
+    if crate::network::server_of(Path::new(&s)).is_some() {
+        return Some(PathBuf::from(s.trim_end_matches('\\')));
+    }
     // "C:" alone means the drive root, not the drive's current directory.
     if b.len() == 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
         return Some(PathBuf::from(format!("{s}\\")));
@@ -818,6 +823,23 @@ mod tests {
         let job = b.go(PathBuf::from(r"C:\x"));
         assert_eq!(crate::tabs::tab_of_generation(job.generation), 3);
         assert_eq!(b.on_listed(job.generation, listed(r"C:\x", &[]), &[]), shown(&[], true));
+    }
+
+    #[test]
+    fn up_from_a_network_share_goes_to_its_computer() {
+        let mut b = Browser::default();
+        visit(&mut b, r"\\srv\share", &["x"]);
+        assert!(b.can_up());
+        assert_eq!(b.up().unwrap().dir, PathBuf::from(r"\\srv"));
+        let mut b = Browser::default();
+        visit(&mut b, r"\\srv", &["share"]);
+        assert!(!b.can_up(), "a computer is the top");
+    }
+
+    #[test]
+    fn a_computer_name_is_a_location() {
+        assert_eq!(parse_location(r"\\srv", Some(Path::new(r"C:\a"))), Some(PathBuf::from(r"\\srv")));
+        assert_eq!(parse_location(r"  \\srv\  ", None), Some(PathBuf::from(r"\\srv")));
     }
 
     #[test]
