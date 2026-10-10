@@ -71,7 +71,7 @@ pub(super) fn populate() {
 fn insert(parent: Option<usize>, text: &str, path: Option<PathBuf>, expandable: bool) -> usize {
     let loaded = path.is_none();
     let Some((tree, idx, parent_item)) = with_app(|a| {
-        let parent_item = parent.map_or(TVI_ROOT.0 as isize, |p| a.nodes[p].item);
+        let parent_item = parent.map_or(TVI_ROOT.0, |p| a.nodes[p].item);
         a.nodes.push(Node { path, item: 0, state: if loaded { State::Loaded } else { State::Unloaded } });
         (a.tree, a.nodes.len() - 1, parent_item)
     }) else {

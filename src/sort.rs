@@ -12,6 +12,8 @@ pub enum SortKey {
     Name,
     Size,
     Modified,
+    /// By extension, which stands in for Explorer's type names without asking the shell.
+    Type,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +42,12 @@ fn push_sort_key(name: &[u16], buf: &mut Vec<u16>, out: &mut Vec<u8>) {
     out.extend_from_slice(raw);
 }
 
+/// Extension after the last dot, ASCII-lowercased; empty if none.
+fn lower_ext(name: &[u16]) -> impl Iterator<Item = u16> + '_ {
+    let start = name.iter().rposition(|&c| c == b'.' as u16).map_or(name.len(), |i| i + 1);
+    name[start..].iter().map(|&c| if (b'A' as u16..=b'Z' as u16).contains(&c) { c + 32 } else { c })
+}
+
 /// Visible entries in display order. Ties on size/date fall back to name, ascending.
 pub fn sorted_order(s: &Snapshot, sort: Sort, show_hidden: bool) -> Vec<u32> {
     let mut v: Vec<u32> = (0..s.len() as u32).filter(|&i| show_hidden || !s.is_hidden(i as usize)).collect();
@@ -60,6 +68,7 @@ pub fn sorted_order(s: &Snapshot, sort: Sort, show_hidden: bool) -> Vec<u32> {
             SortKey::Name => key(a).cmp(key(b)),
             SortKey::Size => s.entries[a].size.cmp(&s.entries[b].size),
             SortKey::Modified => s.entries[a].modified.cmp(&s.entries[b].modified),
+            SortKey::Type => lower_ext(s.name(a)).cmp(lower_ext(s.name(b))),
         };
         let primary = if sort.descending { primary.reverse() } else { primary };
         s.is_dir(b).cmp(&s.is_dir(a)).then(primary).then_with(|| key(a).cmp(key(b)))
@@ -119,6 +128,19 @@ mod tests {
         let (a, b) = (format!("{base}{}b", "x".repeat(54)), format!("{base}{}a", "x".repeat(54)));
         let s = snap(&[(&a, 0, 0, 0), (&b, 0, 0, 0)]);
         assert_eq!(sorted(&s, SortKey::Name, false, true), [b, a]);
+    }
+
+    #[test]
+    fn type_sorts_by_extension_then_name() {
+        let s = snap(&[
+            ("b.TXT", 0, 0, 0),
+            ("a.zip", 0, 0, 0),
+            ("c.txt", 0, 0, 0),
+            ("noext", 0, 0, 0),
+            ("d", DIR, 0, 0),
+        ]);
+        assert_eq!(sorted(&s, SortKey::Type, false, true), ["d", "noext", "b.TXT", "c.txt", "a.zip"]);
+        assert_eq!(sorted(&s, SortKey::Type, true, true), ["d", "a.zip", "b.TXT", "c.txt", "noext"]);
     }
 
     #[test]

@@ -2,6 +2,7 @@ pub mod browser;
 pub mod crash;
 pub mod events;
 pub mod format;
+pub mod icons;
 pub mod listing;
 pub mod places;
 pub mod shell;

@@ -16,9 +16,9 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, Interface, PCWSTR, w};
 
 /// COM for the current worker thread, released on drop.
-struct Com;
+pub(crate) struct Com;
 impl Com {
-    fn init() -> Self {
+    pub(crate) fn init() -> Self {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
         }
