@@ -224,6 +224,42 @@ mod tests {
     }
 
     #[test]
+    fn junctions_that_deny_listing_report_permission_denied() {
+        // Compatibility junction present on every Windows install, set to deny listing.
+        let err = list_dir(Path::new(r"C:\Documents and Settings")).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn names_windows_normally_refuses_still_list() {
+        let t = TempDir::new();
+        // Only reachable through \?\ paths, but they do exist on real disks.
+        for name in ["con", "trailing.", "space "] {
+            let mut p = verbatim(&t.0.join(name));
+            p.push(0);
+            let h = unsafe {
+                windows::Win32::Storage::FileSystem::CreateFileW(
+                    PCWSTR(p.as_ptr()),
+                    0x4000_0000, // GENERIC_WRITE
+                    windows::Win32::Storage::FileSystem::FILE_SHARE_MODE(0),
+                    None,
+                    windows::Win32::Storage::FileSystem::CREATE_NEW,
+                    windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+                    None,
+                )
+            }
+            .unwrap();
+            unsafe { windows::Win32::Foundation::CloseHandle(h) }.unwrap();
+        }
+        assert_eq!(names(&list_dir(&t.0).unwrap()), ["con", "space ", "trailing."]);
+        for name in ["con", "trailing.", "space "] {
+            let mut p = verbatim(&t.0.join(name));
+            p.push(0);
+            unsafe { windows::Win32::Storage::FileSystem::DeleteFileW(PCWSTR(p.as_ptr())) }.unwrap();
+        }
+    }
+
+    #[test]
     fn lists_paths_longer_than_max_path() {
         let t = TempDir::new();
         let deep = t.0.join("d".repeat(120)).join("e".repeat(120)).join("f".repeat(120));
