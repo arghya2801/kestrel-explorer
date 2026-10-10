@@ -8,6 +8,7 @@ pub mod icons;
 pub mod listing;
 pub mod ops;
 pub mod places;
+pub mod preview;
 pub mod search;
 pub mod settings;
 pub mod shell;

@@ -49,6 +49,7 @@ use crate::{crash, format, shell};
 mod commands;
 mod dark;
 mod drag;
+mod preview;
 mod tabbar;
 pub use commands::{
     CMD_COPY, CMD_COPY_PATH, CMD_CUT, CMD_DELETE, CMD_DELETE_PERMANENTLY, CMD_MORE_OPTIONS, CMD_NEW_FOLDER,
@@ -87,6 +88,11 @@ enum Event {
     Navigate(PathBuf),
     /// One-off status bar message.
     Message(String),
+    /// A preview finished loading.
+    Preview {
+        token: u64,
+        shown: preview::Shown,
+    },
     /// A search is running; this many matches so far.
     SearchProgress(usize),
     TreeChildren {
@@ -135,6 +141,7 @@ struct App {
     theme: ThemeChoice,
     palette: Palette,
     brushes: Option<dark::Brushes>,
+    preview: preview::Pane,
     live_listers: Arc<AtomicUsize>,
     tree: HWND,
     nodes: Vec<tree::Node>,
@@ -369,9 +376,11 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let status = child(hwnd, STATUSCLASSNAMEW, w!(""), WINDOW_STYLE(SBARS_SIZEGRIP), none, 0)?;
         let tree = tree::create(hwnd)?;
         let tab_strip = tabbar::create(hwnd)?;
+        let preview_pane = preview::create(hwnd)?;
 
         let font = message_font(hwnd);
         set_font(&[list, status, address, filter, tree, tab_strip, buttons[0], buttons[1], buttons[2]], font);
+        set_font(&preview::controls(&preview_pane), font);
 
         let target = hwnd.0 as isize;
         let events = Arc::new(Events::new(move || {
@@ -409,6 +418,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 theme: settings.theme,
                 palette: Palette::new(false),
                 brushes: None,
+                preview: preview_pane,
                 filter,
                 live_listers: Arc::new(AtomicUsize::new(0)),
                 tree,
@@ -438,6 +448,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         SendMessageW(list, LVM_SETCALLBACKMASK, Some(WPARAM(LVIS_DROPHILITED.0 as usize)), None);
         layout(hwnd);
         update_sort_arrows();
+        preview::restore(hwnd, settings.preview);
         let _ = SetFocus(Some(list));
         go(start.to_path_buf());
         // Icons and the sidebar wait until the window has painted once.
@@ -487,6 +498,7 @@ fn on_key(msg: &MSG) -> bool {
             VK_RIGHT => run(Browser::forward),
             VK_UP => run(Browser::up),
             VK_D => focus_address(),
+            VK_P => preview::toggle(with_app(|a| a.hwnd).unwrap_or_default()),
             _ => return false,
         }
         return true;
@@ -722,11 +734,13 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 on_device_change(wp.0 as u32, lp);
                 LRESULT(1)
             }
+            WM_TIMER if preview::on_timer(hwnd, wp.0) => LRESULT(0),
             WM_PAINT => {
                 log_first_paint();
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_DESTROY => {
+                preview::shutdown();
                 if let Some(list) = with_app(|a| a.list) {
                     let _ = windows::Win32::System::Ole::RevokeDragDrop(list);
                 }
@@ -780,6 +794,12 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
                         spawn_sort(job);
                     }
                     update_sort_arrows();
+                }
+                Some(LRESULT(0))
+            }
+            LVN_ITEMCHANGED | LVN_ODSTATECHANGED => {
+                if let Some(main) = with_app(|a| a.hwnd) {
+                    preview::selection_changed(main);
                 }
                 Some(LRESULT(0))
             }
@@ -905,6 +925,7 @@ fn apply(ev: Event) {
         }
         Event::Navigate(dir) => go(dir),
         Event::Message(text) => set_status(&text),
+        Event::Preview { token, shown } => preview::finish(token, shown),
         Event::SearchProgress(found) => {
             if with_app(|a| a.browser.is_loading()) == Some(true) {
                 set_status(&format!("Searching… {found} found so far  (Esc to stop)"));
@@ -1023,6 +1044,7 @@ fn capture_settings(hwnd: HWND) {
             sort: a.browser.sort,
             show_hidden: a.browser.show_hidden,
             split: Some(a.split),
+            preview: preview::is_visible_in(a),
             last_folder: a.browser.dir().map(Path::to_path_buf),
             theme: a.theme,
             ..Default::default()
@@ -1217,6 +1239,22 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Option<JoinHandle<()>
     }
 }
 
+/// The focused row's item, else the first selected one.
+fn focused_path() -> Option<(PathBuf, bool)> {
+    let list = with_app(|a| a.list)?;
+    let focused = unsafe {
+        SendMessageW(
+            list,
+            LVM_GETNEXTITEM,
+            Some(WPARAM(usize::MAX)),
+            Some(LPARAM((LVNI_FOCUSED | LVNI_SELECTED) as isize)),
+        )
+    }
+    .0;
+    let row = usize::try_from(focused).ok().or_else(|| selected_rows().first().copied())?;
+    with_app(|a| a.browser.path_at(row)).flatten()
+}
+
 fn selected_rows() -> Vec<usize> {
     let Some(list) = with_app(|a| a.list) else { return Vec::new() };
     let mut rows = Vec::new();
@@ -1398,7 +1436,17 @@ fn layout(hwnd: HWND) {
         let split = tree::clamp_split(split, client.right, GetDpiForWindow(hwnd));
         let gap = splitter_width(hwnd);
         let _ = MoveWindow(tree, 0, top, split, h, true);
-        let _ = MoveWindow(list, split + gap, top, (client.right - split - gap).max(0), h, true);
+        let rest = (client.right - split - gap).max(0);
+        // Preview pane, when shown: a third of the space right of the sidebar.
+        let preview_w =
+            if preview::is_visible() { (rest / 3).max(scale(hwnd, 200)).min(rest / 2) } else { 0 };
+        let _ = MoveWindow(list, split + gap, top, rest - preview_w, h, true);
+        if let Some(pane) = with_app(|a| a.preview.hwnd) {
+            let _ = MoveWindow(pane, client.right - preview_w, top, preview_w, h, true);
+        }
+    }
+    if preview::is_visible() {
+        preview::resize();
     }
 }
 

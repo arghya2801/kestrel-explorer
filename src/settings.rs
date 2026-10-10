@@ -18,6 +18,7 @@ pub struct Settings {
     pub sort: Sort,
     pub show_hidden: bool,
     pub split: Option<i32>,
+    pub preview: bool,
     pub last_folder: Option<PathBuf>,
     pub theme: ThemeChoice,
 }
@@ -31,6 +32,7 @@ impl Default for Settings {
             sort: Sort { key: SortKey::Name, descending: false },
             show_hidden: false,
             split: None,
+            preview: false,
             last_folder: None,
             theme: ThemeChoice::System,
         }
@@ -79,6 +81,7 @@ impl Settings {
                     }
                 }
                 "show_hidden" => s.show_hidden = flag(value).unwrap_or(false),
+                "preview" => s.preview = flag(value).unwrap_or(false),
                 "split" => s.split = value.parse().ok().filter(|&w: &i32| w > 0),
                 "theme" => s.theme = ThemeChoice::parse(value).unwrap_or(ThemeChoice::System),
                 "last_folder" => s.last_folder = (!value.is_empty()).then(|| PathBuf::from(value)),
@@ -101,6 +104,7 @@ impl Settings {
         let key = KEYS.iter().find(|(k, _)| *k == self.sort.key).map_or("Name", |k| k.1);
         out += &format!("sort={key},{}\n", self.sort.descending);
         out += &format!("show_hidden={}\n", self.show_hidden);
+        out += &format!("preview={}\n", self.preview);
         if let Some(w) = self.split {
             out += &format!("split={w}\n");
         }
@@ -156,6 +160,7 @@ mod tests {
             sort: Sort { key: SortKey::Size, descending: true },
             show_hidden: true,
             split: Some(260),
+            preview: true,
             last_folder: Some(PathBuf::from(r"C:\Users\me\Ünï =x")),
             theme: ThemeChoice::Light,
         };

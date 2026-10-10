@@ -1101,3 +1101,65 @@ fn dark_theme_colours_the_window_and_is_remembered() {
     assert_eq!(unsafe { SendMessageW(list, LVM_GETBKCOLOR, None, None) }.0, 0x00FFFFFF);
     close(hwnd);
 }
+
+// ---- preview pane ----
+
+fn visible_text_in(pane: HWND) -> String {
+    let mut child = unsafe { FindWindowExW(Some(pane), None, None, None) }.unwrap_or_default();
+    while !child.is_invalid() {
+        if unsafe { IsWindowVisible(child) }.as_bool() {
+            let mut buf = vec![0u16; 4096];
+            let n = unsafe { GetWindowTextW(child, &mut buf) };
+            let text = String::from_utf16_lossy(&buf[..n as usize]);
+            if !text.is_empty() {
+                return text;
+            }
+        }
+        child = unsafe { FindWindowExW(Some(pane), Some(child), None, None) }.unwrap_or_default();
+    }
+    String::new()
+}
+
+#[test]
+fn preview_pane_shows_text_and_says_when_it_cannot() {
+    let _desktop = desktop();
+    let t = TempDir::new("preview");
+    std::fs::write(t.0.join("notes.txt"), "hello preview\nline two").unwrap();
+    std::fs::write(t.0.join("data.fepbin"), [0x4D, 0x5A, 0, 0, 1, 2]).unwrap();
+    let hwnd = open(&t.0);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["data.fepbin", "notes.txt"]), "{:?}", rows(list));
+    let pane = find(hwnd, w!("FileExplorerProPreview"));
+    assert!(!unsafe { IsWindowVisible(pane) }.as_bool());
+
+    alt_key(list, VK_P);
+    assert!(pump_until(WAIT, || unsafe { IsWindowVisible(pane) }.as_bool()), "Alt+P shows the pane");
+
+    select_row(list, 1);
+    assert!(
+        pump_until(WAIT, || visible_text_in(pane) == "hello preview\r\nline two"),
+        "{:?}",
+        visible_text_in(pane)
+    );
+
+    let none = LVITEMW {
+        stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0),
+        ..Default::default()
+    };
+    unsafe {
+        SendMessageW(list, LVM_SETITEMSTATE, Some(WPARAM(1)), Some(LPARAM(&none as *const _ as isize)))
+    };
+    select_row(list, 0);
+    assert!(
+        pump_until(WAIT, || visible_text_in(pane) == "No preview available."),
+        "{:?}",
+        visible_text_in(pane)
+    );
+
+    alt_key(list, VK_P);
+    assert!(pump_until(WAIT, || !unsafe { IsWindowVisible(pane) }.as_bool()));
+    close(hwnd);
+}
