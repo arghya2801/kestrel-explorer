@@ -19,6 +19,15 @@ logs in `%LOCALAPPDATA%\Kestrel` (old settings are copied over once). The repo f
 - Editing gotcha: inline shell heredocs and `python -c` mangle backslashes (`\\` becomes `\`,
   `\a` becomes a bell character). Write scripts to a file, or use an editor tool.
 
+## Startup regressed (fix first)
+
+First paint went from 54-70 ms (v1.0) to 141-196 ms after the post-v1 features
+(measured 2026-10-10, release build, warm). Roughly 25-40 ms more passes before `main` runs,
+which points at more DLLs loaded at launch (dwmapi, netapi32, ...; try delay-loading them),
+and creating the controls takes ~30 ms more (tab strip, filter box, preview pane, dark theme;
+try creating the preview pane on first use and applying dark mode after first paint).
+The log line "startup (ms after process start)" shows each stage.
+
 ## Not verified since v1.0 (do these first)
 
 1. Re-run the stress test with the new features: `cargo run --release --example stress -- 600`.
@@ -47,7 +56,7 @@ logs in `%LOCALAPPDATA%\Kestrel` (old settings are copied over once). The repo f
   alongside). Not reproduced in six later runs. The hang watchdog writes a minidump to
   `%LOCALAPPDATA%\Kestrel\crashes` if it recurs; read its UI-thread stack.
 - Test flakiness that comes from the machine, not the app:
-  - Clipboard tests fail with "clipboard is busy" while a clipboard manager (Ditto is installed)
+  - Clipboard tests fail with "clipboard is busy" while a clipboard manager (e.g. Ditto)
     holds the clipboard open.
   - Focus-dependent window tests take a shared lock and retry, but heavy desktop activity can still
     take focus away.
