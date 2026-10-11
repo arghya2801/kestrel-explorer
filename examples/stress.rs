@@ -2,7 +2,7 @@
 //!
 //! Real window on a temp folder tree. One thread keeps creating, renaming and
 //! deleting files; the UI thread does a random action every 50 ms (navigate,
-//! back/forward, refresh, re-sort, expand sidebar folders). Prints handle and
+//! back/forward, refresh, sorting, sidebar, search, tabs, panes, preview, grid, settings and windows). Prints handle and
 //! GDI/USER object counts over time and the longest the UI thread was busy.
 
 use std::path::PathBuf;
@@ -69,6 +69,109 @@ fn counts() -> (u32, u32, u32) {
     }
 }
 
+fn command(hwnd: HWND, id: usize) {
+    unsafe {
+        SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(id)), Some(LPARAM(0)));
+    }
+}
+fn press(hwnd: HWND, key: VIRTUAL_KEY, ctrl: bool, shift: bool) {
+    unsafe {
+        let mut original = [0u8; 256];
+        GetKeyboardState(&mut original).unwrap();
+        let mut keys = original;
+        keys[VK_CONTROL.0 as usize] = if ctrl { 0x80 } else { 0 };
+        keys[VK_SHIFT.0 as usize] = if shift { 0x80 } else { 0 };
+        SetKeyboardState(&keys).unwrap();
+        let msg = MSG { hwnd, message: WM_KEYDOWN, wParam: WPARAM(key.0 as usize), ..Default::default() };
+        if !ui::translate(&msg) {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        SetKeyboardState(&original).unwrap();
+    }
+}
+fn own_windows() -> Vec<HWND> {
+    unsafe extern "system" fn each(hwnd: HWND, param: LPARAM) -> windows::core::BOOL {
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == std::process::id() && class_of(hwnd).starts_with("Kestrel") {
+                (*(param.0 as *mut Vec<HWND>)).push(hwnd);
+            }
+        }
+        true.into()
+    }
+    let mut windows = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut windows as *mut _ as isize));
+    }
+    windows
+}
+fn pump_for(duration: Duration) {
+    let until = Instant::now() + duration;
+    let mut message = MSG::default();
+    while Instant::now() < until {
+        let batch = Instant::now();
+        unsafe {
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                if !ui::translate(&message) {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                if batch.elapsed() > Duration::from_millis(16) {
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+fn normalize(hwnd: HWND, edit: HWND, strip: HWND, root: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        for window in own_windows().into_iter().filter(|w| *w != hwnd) {
+            unsafe {
+                let _ = PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+        pump_for(Duration::from_millis(20));
+        if ui::other_window_count() == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "secondary window did not close");
+    }
+    ui::wait_for_other_windows();
+    while unsafe { SendMessageW(strip, TCM_GETITEMCOUNT, None, None).0 } > 1 {
+        press(ui::active_list().unwrap(), VK_W, true, false);
+    }
+    let mut visible = 0;
+    let mut after = None;
+    while let Ok(list) = unsafe { FindWindowExW(Some(hwnd), after, w!("SysListView32"), None) } {
+        if unsafe { IsWindowVisible(list) }.as_bool() {
+            visible += 1;
+        }
+        after = Some(list);
+    }
+    if visible < 2 {
+        command(hwnd, ui::toolbar::SPLIT);
+    }
+    for _ in 0..2 {
+        command(hwnd, ui::toolbar::GRID);
+        command(hwnd, ui::toolbar::DETAILS);
+        unsafe {
+            let _ = SetWindowTextW(edit, &HSTRING::from(root.as_os_str()));
+        }
+        press(edit, VK_RETURN, false, false);
+        press(ui::active_list().unwrap(), VK_F6, false, false);
+    }
+    if let Ok(pane) = unsafe { FindWindowExW(Some(hwnd), None, w!("KestrelPreview"), None) }
+        && unsafe { IsWindowVisible(pane) }.as_bool()
+    {
+        command(hwnd, ui::toolbar::PREVIEW);
+    }
+    pump_for(Duration::from_secs(2));
+}
+
 fn main() {
     let seconds: u64 = std::env::args().nth(1).map_or(120, |s| s.parse().unwrap());
     let root = std::env::temp_dir().join(format!("fep-stress-{}", std::process::id()));
@@ -86,7 +189,8 @@ fn main() {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
     let find = |class| unsafe { FindWindowExW(Some(hwnd), None, class, None) }.unwrap();
-    let (list, edit, tree) = (find(w!("SysListView32")), find(w!("Edit")), find(w!("SysTreeView32")));
+    let (edit, tree, strip) = (find(w!("Edit")), find(w!("SysTreeView32")), find(w!("SysTabControl32")));
+    let filter = unsafe { FindWindowExW(Some(hwnd), Some(edit), w!("Edit"), None) }.unwrap();
 
     let stop = Arc::new(AtomicBool::new(false));
     let churn = {
@@ -123,6 +227,7 @@ fn main() {
     let mut actions = 0u64;
     let mut msg = MSG::default();
     while start.elapsed() < Duration::from_secs(seconds) {
+        let batch = Instant::now();
         unsafe {
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 let t = (Instant::now(), thread_cpu());
@@ -131,6 +236,10 @@ fn main() {
                     DispatchMessageW(&msg);
                 }
                 slow(t, &format!("message {:#06x} to {}", msg.message, class_of(msg.hwnd)));
+                // Inputs must keep arriving even when workers continuously post results.
+                if batch.elapsed() > Duration::from_millis(16) {
+                    break;
+                }
             }
         }
         // Time between loop turns = longest stretch the UI thread spent on one batch of messages.
@@ -144,7 +253,8 @@ fn main() {
             next_action = now + Duration::from_millis(50);
             actions += 1;
             let t = (Instant::now(), thread_cpu());
-            let action = rng.next(6);
+            let list = ui::active_list().unwrap();
+            let action = rng.next(16);
             match action {
                 0 | 1 => {
                     let target =
@@ -152,7 +262,7 @@ fn main() {
                     unsafe {
                         let _ = SetWindowTextW(edit, &HSTRING::from(target.as_os_str()));
                     }
-                    post(edit, WM_KEYDOWN, VK_RETURN.0 as usize, 0);
+                    press(edit, VK_RETURN, false, false);
                 }
                 2 => post(list, WM_SYSKEYDOWN, [VK_LEFT, VK_RIGHT][rng.next(2) as usize].0 as usize, 1 << 29),
                 3 => post(list, WM_KEYDOWN, VK_F5.0 as usize, 0),
@@ -171,6 +281,69 @@ fn main() {
                         )
                     };
                 }
+
+                6 => {
+                    unsafe {
+                        let _ = SetWindowTextW(
+                            filter,
+                            &HSTRING::from(["file1", "churn", ""][rng.next(3) as usize]),
+                        );
+                    }
+                    if rng.next(4) == 0 {
+                        press(filter, VK_RETURN, false, false);
+                    }
+                }
+                7 => {
+                    let count = unsafe { SendMessageW(strip, TCM_GETITEMCOUNT, None, None).0 };
+                    press(list, if count < 4 && rng.next(2) == 0 { VK_T } else { VK_W }, true, false);
+                }
+                8 => press(list, VK_TAB, true, rng.next(2) == 0),
+                9 => command(hwnd, ui::toolbar::SPLIT),
+                10 => press(list, VK_F6, false, false),
+                11 => {
+                    command(hwnd, ui::toolbar::PREVIEW);
+                    let count = unsafe { SendMessageW(list, LVM_GETITEMCOUNT, None, None).0 };
+                    if count > 0 {
+                        let item = LVITEMW {
+                            state: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0),
+                            stateMask: LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0),
+                            ..Default::default()
+                        };
+                        unsafe {
+                            SendMessageW(
+                                list,
+                                LVM_SETITEMSTATE,
+                                Some(WPARAM(rng.next(count as u64) as usize)),
+                                Some(LPARAM(&item as *const _ as isize)),
+                            );
+                        }
+                    }
+                }
+                12 => command(hwnd, if rng.next(2) == 0 { ui::toolbar::GRID } else { ui::toolbar::DETAILS }),
+                13 => {
+                    command(hwnd, ui::toolbar::SETTINGS);
+                    if let Some(dialog) =
+                        own_windows().into_iter().find(|h| class_of(*h) == "KestrelSettings")
+                    {
+                        unsafe {
+                            if let Ok(theme) = GetDlgItem(Some(dialog), 10) {
+                                SendMessageW(theme, CB_SETCURSEL, Some(WPARAM(rng.next(3) as usize)), None);
+                            }
+                        }
+                        command(dialog, 3);
+                        command(dialog, IDCANCEL.0 as usize);
+                    }
+                }
+                14 => {
+                    let secondary =
+                        own_windows().into_iter().find(|h| *h != hwnd && class_of(*h) == "Kestrel");
+                    if let Some(window) = secondary {
+                        post(window, WM_CLOSE, 0, 0);
+                    } else {
+                        press(list, VK_N, true, false);
+                    }
+                }
+                15 => command(hwnd, ui::toolbar::HIDDEN),
                 _ => {
                     // Expand a random visible sidebar node.
                     let item = unsafe {
@@ -204,13 +377,17 @@ fn main() {
                 }
             }
             slow(t, &format!("action {action}"));
+            worst_gap = worst_gap.max(t.0.elapsed());
         }
         if now >= next_report {
             next_report = now + Duration::from_secs(10);
-            let c = counts();
-            if start.elapsed() > Duration::from_secs(5) && baseline.is_none() {
-                baseline = Some(c);
+            if start.elapsed() > Duration::from_secs((seconds / 4).clamp(5, 60)) && baseline.is_none() {
+                normalize(hwnd, edit, strip, &root);
+                baseline = Some(counts());
+                last = Instant::now();
+                println!("Normalized baseline: {:?}", baseline.unwrap());
             }
+            let c = counts();
             println!(
                 "{:>4}s  handles {:>5}  gdi {:>4}  user {:>4}  actions {actions}",
                 start.elapsed().as_secs(),
@@ -224,6 +401,7 @@ fn main() {
 
     stop.store(true, Ordering::Relaxed);
     let churned = churn.join().unwrap();
+    normalize(hwnd, edit, strip, &root);
     let end = counts();
     unsafe { DestroyWindow(hwnd) }.unwrap();
     let b = baseline.unwrap_or(end);
@@ -235,5 +413,8 @@ fn main() {
         end.1 as i64 - b.1 as i64,
         end.2 as i64 - b.2 as i64
     );
+    while ui::running_operations() > 0 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -28,10 +28,10 @@ These results describe that review, not a guarantee for later changes.
 ## 1. Restore and verify the performance baseline
 
 - [ ] Measure warm and cold release startup on the same machine and record each existing startup stage.
-- [ ] Investigate the recorded first-paint regression from 54-70 ms to 141-196 ms.
-- [ ] Create hidden preview controls on first use if measurements show a worthwhile improvement.
-- [ ] Measure the cost of applying dark mode before first paint; preserve readable controls and avoid a visible theme flash.
-- [ ] Investigate DLL loading only after measurements identify its contribution. Do not add delay-loading machinery without evidence.
+- [x] Investigate the recorded first-paint regression from 54-70 ms to 141-196 ms.
+- [x] Create hidden preview controls on first use if measurements show a worthwhile improvement.
+- [x] Measure the cost of applying dark mode before first paint; preserve readable controls and avoid a visible theme flash.
+- [x] Investigate DLL loading only after measurements identify its contribution. Do not add delay-loading machinery without evidence.
 - [x] Run the existing 600-second release stress test, recording handle, GDI, USER counts, and worst stall.
 - [ ] Keep the historical 5.4-second stall open until there is evidence explaining it. Inspect the watchdog dump if it recurs.
 - [x] Separate environment-dependent test prerequisites from application failures. The localhost-share test currently assumes C$ is available.
@@ -137,7 +137,7 @@ src/settings.rs, src/main.rs, navigation/settings tests, tests/window.rs.
 
 - [x] Measure selection restoration in 100k+ item folders and replace avoidable per-row work while preserving selection and focus.
 - [x] Replace the silent 5,000-child sidebar cap with incremental loading or a visible Load more action.
-- [ ] Measure icon lag while scrolling executable-heavy folders; discard requests for rows no longer needed if lag is confirmed.
+- [x] Measure icon lag while scrolling executable-heavy folders; discard requests for rows no longer needed if lag is confirmed.
 - [x] Add large-icon/thumbnail grid view as an explicit later feature, selectable through View and Settings.
 - [x] Request thumbnails only for needed rows, load them off the UI thread, bound retained image resources, and discard stale results.
 
@@ -163,7 +163,7 @@ Use existing workers and Windows integrations rather than adding a dependency fo
 
 - [ ] Run formatting, Clippy across all targets, unit tests, and window tests appropriate to the change.
 - [ ] Report environment-dependent exclusions explicitly; do not report a partially run suite as fully green.
-- [ ] Expand the stress harness to include filter/search, tab switches, split-pane navigation, preview toggles,
+- [x] Expand the stress harness to include filter/search, tab switches, split-pane navigation, preview toggles,
       settings/theme changes, and secondary-window creation/closure.
 - [ ] Run the expanded 600-second release stress test and record resource counts and worst stall.
 - [ ] Check startup, executable size, and memory after UI additions. Compare measurements taken under similar conditions.
@@ -222,3 +222,17 @@ Terminal paths are passed as the working directory, never interpolated into shel
 history stays in memory and retains recent completions plus running jobs; Windows owns progress and
 cancellation. Pins/breadcrumbs, operation status, saved locations, and the shortcut guide have window
 or logic regression tests. Dialogs own their DPI-scaled fonts.
+
+2026-10-11: startup profiling isolated 18–23 ms of drag-target initialization. Its creation and
+registration now follow first paint. Preview control creation measured 2–4 ms and theme application
+0–1 ms; both were retained. No DLL delay-loading mechanism was justified. Warm startup samples
+after the change ranged 92–141 ms (further quiet samples pending), versus 114–126 ms in the immediate
+pre-change instrumented run. First-paint working set was about 15.6 MiB; exe 1,082,880 bytes.
+No controlled cold-cache run has been done.
+
+The executable-icon probe measured 7.52 seconds for a newly visible icon behind 250 queued requests.
+Viewport cancellation reduced that to 11.56 ms. A worker regression covers canceled requests.
+The expanded 30-second stress smoke test completed 373 actions / 10,870 file changes; normalized
+resource growth was handles -1, GDI -1, USER -1. Largest logged action was 614 ms. The harness now
+limits each message-drain batch so incoming test actions cannot starve behind worker messages.
+The historical 5.4-second finding remains open; this harness issue does not establish its cause.

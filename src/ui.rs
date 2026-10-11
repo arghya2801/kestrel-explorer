@@ -407,13 +407,18 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let events = Arc::new(Events::new(move || {
             PostMessageW(Some(HWND(target as _)), WM_APP_EVENTS, WPARAM(0), LPARAM(0)).is_ok()
         }));
+        startup_mark("address controls");
         let view = panes::create(hwnd, settings, 0, events.clone(), font)?;
+        startup_mark("list control");
         let list = view.list;
         let status = child(hwnd, STATUSCLASSNAMEW, w!(""), WINDOW_STYLE(SBARS_SIZEGRIP), none, 0)?;
         let tree = tree::create(hwnd)?;
         let tab_strip = tabbar::create(hwnd)?;
+        startup_mark("sidebar controls");
         let preview_pane = preview::create(hwnd)?;
+        startup_mark("preview controls");
         let toolbar_buttons = toolbar::create(hwnd)?;
+        startup_mark("toolbar controls");
 
         set_font(&[list, status, address, filter, tree, tab_strip, buttons[0], buttons[1], buttons[2]], font);
         set_font(&preview::controls(&preview_pane), font);
@@ -482,7 +487,9 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         }
         crate::session::register(hwnd.0 as isize, settings.clone());
         // Icons and the sidebar wait until the window has painted once.
+        startup_mark("before theme");
         dark::apply(hwnd, Palette::new(settings.theme.is_dark(system_prefers_dark())));
+        startup_mark("after theme");
         let _ = PostMessageW(Some(hwnd), WM_APP_LATE_INIT, WPARAM(0), LPARAM(0));
         Ok(hwnd)
     }
@@ -750,6 +757,12 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
+            WM_GETMINMAXINFO => {
+                let info = &mut *(lp.0 as *mut MINMAXINFO);
+                info.ptMinTrackSize.x = scale(hwnd, 360);
+                info.ptMinTrackSize.y = scale(hwnd, 240);
+                LRESULT(0)
+            }
             WM_SIZE => {
                 layout(hwnd);
                 LRESULT(0)
@@ -874,7 +887,12 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
     let view = with_app(|a| a.views().find(|v| v.list == hdr.hwndFrom).map(|v| v.id)).flatten()?;
     if hdr.code == LVN_ODCACHEHINT {
         let hint = unsafe { &*(lp.0 as *const NMLVCACHEHINT) };
-        with_view(view, |v| v.grid.hint(hint.iFrom.max(0) as usize, hint.iTo.max(0) as usize));
+        with_view(view, |v| {
+            let from = hint.iFrom.max(0) as usize;
+            let to = hint.iTo.max(0) as usize;
+            v.grid.hint(from, to);
+            v.icons.hint(v.browser.order.get(from..(to + 1).min(v.browser.order.len())).unwrap_or_default());
+        });
         return Some(LRESULT(0));
     }
     if hdr.code == LVN_GETDISPINFOW {
@@ -1186,6 +1204,7 @@ fn late_init() {
     let Some((lists, tree)) = with_app(|a| (a.views().map(|v| v.list).collect::<Vec<_>>(), a.tree)) else {
         return;
     };
+    panes::enable_drop();
     let (image_list, folder_icon) = icons::system_image_list().unwrap_or_default();
     startup_mark("image list");
     if !image_list.is_invalid() {
@@ -1271,6 +1290,10 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
 /// Windows opened with Ctrl+N, each on its own UI thread with its own state.
 static OTHER_WINDOWS: std::sync::Mutex<Vec<JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
 
+pub fn other_window_count() -> usize {
+    OTHER_WINDOWS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|w| !w.is_finished()).count()
+}
+
 /// Waits until every window opened with Ctrl+N has been closed.
 pub fn wait_for_other_windows() {
     loop {
@@ -1319,25 +1342,34 @@ pub fn open_restored_window(s: Settings) {
         });
     });
     match spawned {
-        Ok(h) => OTHER_WINDOWS.lock().unwrap_or_else(|e| e.into_inner()).push(h),
+        Ok(h) => {
+            let mut windows = OTHER_WINDOWS.lock().unwrap_or_else(|e| e.into_inner());
+            windows.retain(|w| !w.is_finished());
+            windows.push(h);
+        }
         Err(e) => set_status(&format!("Couldn't open a new window: {e}")),
     }
 }
 
 /// Logs how long after process start the window first painted.
 fn log_first_paint() {
-    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !DONE.swap(true, Ordering::SeqCst) {
-        startup_mark("first paint");
+    if !STARTUP_DONE.swap(true, Ordering::SeqCst) {
+        record_startup("first paint");
         let marks = STARTUP_MARKS.lock().map(|m| m.join(", ")).unwrap_or_default();
         crash::log(&format!("startup (ms after process start): {marks}"));
     }
 }
 
+static STARTUP_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static STARTUP_MARKS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// Notes how long after process creation `what` happened; logged at first paint.
 pub fn startup_mark(what: &str) {
+    if !STARTUP_DONE.load(Ordering::Relaxed) {
+        record_startup(what);
+    }
+}
+fn record_startup(what: &str) {
     use windows::Win32::Foundation::FILETIME;
     use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};

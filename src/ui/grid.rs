@@ -214,6 +214,9 @@ pub(super) fn set(enabled: bool) {
             SendMessageW(list, LVM_SETIMAGELIST, Some(WPARAM(LVSIL_NORMAL as usize)), Some(LPARAM(images.0)));
         }
         let style = GetWindowLongPtrW(list, GWL_STYLE) as u32;
+        if style & LVS_TYPEMASK == if enabled { LVS_ICON } else { LVS_REPORT } {
+            return;
+        }
         SetWindowLongPtrW(
             list,
             GWL_STYLE,

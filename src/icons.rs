@@ -5,9 +5,9 @@
 use std::collections::{HashMap, HashSet};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use windows::Win32::Storage::FileSystem::{
@@ -42,6 +42,7 @@ pub enum Job {
 pub enum Done {
     Ext { ext: String, icon: i32, type_name: String },
     File { generation: u64, entry: u32, icon: i32 },
+    Skipped { generation: u64, entry: u32 },
     Node { node: usize, icon: i32 },
 }
 
@@ -65,6 +66,7 @@ pub struct Icons {
     pending_files: HashSet<u32>,
     /// Generation the per-file caches belong to; the worker skips older jobs.
     pub latest: Arc<AtomicU64>,
+    pub needed: Arc<Mutex<Option<HashSet<u32>>>>,
 }
 
 impl Icons {
@@ -77,6 +79,7 @@ impl Icons {
             files: HashMap::new(),
             pending_files: HashSet::new(),
             latest: Arc::new(AtomicU64::new(0)),
+            needed: Arc::default(),
         }
     }
 
@@ -120,6 +123,10 @@ impl Icons {
         self.ext.get(ext)
     }
 
+    pub fn hint(&self, entries: &[u32]) {
+        *self.needed.lock().unwrap_or_else(|e| e.into_inner()) = Some(entries.iter().copied().collect());
+    }
+
     pub fn request_node(&self, node: usize, path: PathBuf) {
         let _ = self.tx.send(Job::Node { node, path });
     }
@@ -132,10 +139,14 @@ impl Icons {
                 true
             }
             Done::File { generation, entry, icon } if generation == self.latest.load(Ordering::SeqCst) => {
+                self.pending_files.remove(&entry);
                 self.files.insert(entry, icon);
                 true
             }
-            Done::File { .. } | Done::Node { .. } => false,
+            Done::Skipped { generation, entry } if generation == self.latest.load(Ordering::SeqCst) => {
+                self.pending_files.remove(&entry)
+            }
+            Done::File { .. } | Done::Skipped { .. } | Done::Node { .. } => false,
         }
     }
 }
@@ -183,10 +194,10 @@ pub fn system_image_list() -> Option<(HIMAGELIST, i32)> {
 }
 
 /// Runs jobs until every sender is gone. Per-file jobs for an older folder are skipped.
-// ponytail: FIFO; if scrolling a huge folder of .exe files lags, drop jobs for rows no longer visible.
 pub fn spawn_worker(
     rx: Receiver<Job>,
     latest: Arc<AtomicU64>,
+    needed: Arc<Mutex<Option<HashSet<u32>>>>,
     send: impl Fn(Done) + Send + 'static,
 ) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new().name("icons".into()).spawn(move || {
@@ -198,6 +209,15 @@ pub fn spawn_worker(
                     Some(Done::Ext { ext, icon, type_name })
                 }
                 Job::File { generation, .. } if generation != latest.load(Ordering::SeqCst) => None,
+                Job::File { generation, entry, .. }
+                    if needed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                        .is_some_and(|set| !set.contains(&entry)) =>
+                {
+                    Some(Done::Skipped { generation, entry })
+                }
                 Job::File { generation, entry, path } => {
                     file_icon(&path).map(|icon| Done::File { generation, entry, icon })
                 }
@@ -300,7 +320,7 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let _com = shell_ready();
         let latest = Arc::new(AtomicU64::new(3));
-        let worker = spawn_worker(rx, latest, move |d| done_tx.send(d).unwrap()).unwrap();
+        let worker = spawn_worker(rx, latest, Arc::default(), move |d| done_tx.send(d).unwrap()).unwrap();
         tx.send(Job::File { generation: 2, entry: 0, path: r"C:\Windows\notepad.exe".into() }).unwrap();
         tx.send(Job::Ext(".txt".into())).unwrap();
         drop(tx);
@@ -308,5 +328,29 @@ mod tests {
         let done: Vec<Done> = done_rx.try_iter().collect();
         assert_eq!(done.len(), 1, "{done:?}");
         assert!(matches!(&done[0], Done::Ext { ext, .. } if ext == ".txt"));
+    }
+
+    #[test]
+    fn worker_skips_offscreen_files_and_they_can_be_requested_again() {
+        let (tx, rx) = mpsc::channel();
+        let mut icons = Icons::new(tx, 1);
+        let (done_tx, done_rx) = mpsc::channel();
+        icons.icon(1, 7, &w("missing.exe"), false, Path::new(r"C:\"));
+        icons.hint(&[8]);
+        let worker = spawn_worker(rx, icons.latest.clone(), icons.needed.clone(), move |d| {
+            done_tx.send(d).unwrap();
+        })
+        .unwrap();
+        let skipped = loop {
+            let done = done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if matches!(done, Done::Skipped { .. }) {
+                break done;
+            }
+        };
+        assert_eq!(skipped, Done::Skipped { generation: 1, entry: 7 });
+        assert!(icons.on_done(skipped));
+        assert!(!icons.pending_files.contains(&7));
+        drop(icons);
+        worker.join().unwrap();
     }
 }

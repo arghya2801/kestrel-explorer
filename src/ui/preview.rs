@@ -80,7 +80,11 @@ pub(super) unsafe fn create(parent: HWND) -> windows::core::Result<Pane> {
             child(hwnd, w!("STATIC"), w!(""), WINDOW_STYLE(SS_CENTER.0 | SS_CENTERIMAGE.0), none, 0)?;
         let host = child(hwnd, w!("STATIC"), w!(""), WS_CLIPCHILDREN, none, 0)?;
         let pane = Pane { hwnd, text, image, message, host, token: 0, worker: None, bitmap: None };
-        show_only(&pane, pane.message, Some("Select a file to preview."));
+        show_only(
+            [pane.text, pane.image, pane.message, pane.host],
+            pane.message,
+            Some("Select a file to preview."),
+        );
         Ok(pane)
     }
 }
@@ -89,14 +93,21 @@ pub(super) fn controls(p: &Pane) -> [HWND; 2] {
     [p.text, p.message]
 }
 
-fn show_only(p: &Pane, which: HWND, message: Option<&str>) {
+fn show_only(controls: [HWND; 4], which: HWND, message: Option<&str>) {
     unsafe {
-        for c in [p.text, p.image, p.message, p.host] {
+        for c in controls {
             let _ = ShowWindow(c, if c == which { SW_SHOW } else { SW_HIDE });
         }
         if let Some(m) = message {
-            let _ = SetWindowTextW(p.message, &HSTRING::from(m));
+            let _ = SetWindowTextW(controls[2], &HSTRING::from(m));
         }
+    }
+}
+
+fn display(which: HWND, message: Option<&str>) {
+    if let Some(controls) = with_app(|a| [a.preview.text, a.preview.image, a.preview.message, a.preview.host])
+    {
+        show_only(controls, which, message);
     }
 }
 
@@ -221,9 +232,13 @@ fn show(target: Option<(PathBuf, bool)>) {
         let _ = GetClientRect(host, &mut rect);
     }
     if handler.is_some() {
-        with_app(|a| show_only(&a.preview, a.preview.host, None));
+        if let Some(host) = with_app(|a| a.preview.host) {
+            display(host, None);
+        }
     } else {
-        with_app(|a| show_only(&a.preview, a.preview.message, Some("Loading preview…")));
+        if let Some(message) = with_app(|a| a.preview.message) {
+            display(message, Some("Loading preview…"));
+        }
     }
     ensure_worker();
     send(Cmd::Show { token, path, handler, host: host.0 as isize, rect });
@@ -244,7 +259,7 @@ pub(super) fn finish(token: u64, shown: Shown) {
             unsafe {
                 let _ = SetWindowTextW(text, &HSTRING::from(t));
             }
-            with_app(|a| show_only(&a.preview, text, None));
+            display(text, None);
         }
         Shown::Handler => {}
         Shown::Image(b) => {
@@ -258,10 +273,10 @@ pub(super) fn finish(token: u64, shown: Shown) {
                 }
             }
             drop(previous);
-            with_app(|a| show_only(&a.preview, image, None));
+            display(image, None);
         }
         Shown::Nothing(m) => {
-            with_app(|a| show_only(&a.preview, message, Some(m)));
+            display(message, Some(m));
         }
     }
 }
@@ -396,7 +411,9 @@ extern "system" fn pane_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
 pub(super) fn invalidate() {
     with_app(|a| a.preview.token += 1);
     send(Cmd::Clear);
-    with_app(|a| show_only(&a.preview, a.preview.message, Some("Select a file to preview.")));
+    if let Some(message) = with_app(|a| a.preview.message) {
+        display(message, Some("Select a file to preview."));
+    }
     if let Some(hwnd) = with_app(|a| a.hwnd) {
         selection_changed(hwnd);
     }

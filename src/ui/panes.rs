@@ -38,13 +38,16 @@ pub(super) struct FolderView {
     pub resync_after_rename: bool,
     pub drop_row: Option<usize>,
     pub drop_target: Option<IDropTarget>,
+    pub drop_registered: bool,
 }
 
 impl Drop for FolderView {
     fn drop(&mut self) {
         self.lister_cancel.store(true, Ordering::SeqCst);
         unsafe {
-            let _ = RevokeDragDrop(self.list);
+            if self.drop_registered {
+                let _ = RevokeDragDrop(self.list);
+            }
             if let Some((note, _)) = self.device_note.take() {
                 let _ = UnregisterDeviceNotification(HDEVNOTIFY(note as _));
             }
@@ -81,6 +84,7 @@ pub(super) unsafe fn create(
             WINDOW_EX_STYLE(0),
             0,
         )?;
+        super::startup_mark("list native");
         let ex = LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER;
         SendMessageW(
             list,
@@ -106,6 +110,7 @@ pub(super) unsafe fn create(
             }
         };
         super::set_font(&[list, label], font);
+        super::startup_mark("list columns");
         let mut grid = super::grid::Grid::new(settings.grid, id, events.clone());
         if grid.enabled {
             grid.ensure();
@@ -120,7 +125,7 @@ pub(super) unsafe fn create(
         }
         let (tx, rx) = mpsc::channel();
         let mut icons = Icons::new(tx, 0);
-        if let Err(e) = icons::spawn_worker(rx, icons.latest.clone(), move |done| {
+        if let Err(e) = icons::spawn_worker(rx, icons.latest.clone(), icons.needed.clone(), move |done| {
             events.send(Event::Icon { view: id, done })
         }) {
             crate::crash::log(&format!("icons disabled: {e}"));
@@ -130,10 +135,21 @@ pub(super) unsafe fn create(
             icons.folder = folder;
             SendMessageW(list, LVM_SETIMAGELIST, Some(WPARAM(LVSIL_SMALL as usize)), Some(LPARAM(image.0)));
         }
-        let target = drag::DropTarget::create(list);
-        if let Err(e) = RegisterDragDrop(list, &target) {
-            crate::crash::log(&format!("drag and drop disabled: {e}"));
-        }
+        super::startup_mark("before drop target");
+        let target =
+            (with_app(|a| !a.nodes.is_empty()) == Some(true)).then(|| drag::DropTarget::create(list));
+        let drop_registered = if let Some(target) = &target {
+            match RegisterDragDrop(list, target) {
+                Ok(()) => true,
+                Err(e) => {
+                    crate::crash::log(&format!("drag and drop disabled: {e}"));
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        super::startup_mark("after drop target");
         SendMessageW(list, LVM_SETCALLBACKMASK, Some(WPARAM(LVIS_DROPHILITED.0 as usize)), None);
         let mut browser = Browser::with_generation_base(crate::tabs::generation_base(id));
         (browser.sort, browser.show_hidden) = (settings.sort, settings.show_hidden);
@@ -154,7 +170,8 @@ pub(super) unsafe fn create(
             renaming: None,
             resync_after_rename: false,
             drop_row: None,
-            drop_target: Some(target),
+            drop_target: target,
+            drop_registered,
         })
     }
 }
@@ -290,4 +307,28 @@ pub(super) fn layout_labels(hwnd: HWND) {
         }
     }
     update_labels();
+}
+
+pub(super) fn enable_drop() {
+    let views = with_app(|a| {
+        a.views()
+            .filter(|v| !v.drop_registered)
+            .map(|v| (v.id, v.list, v.drop_target.clone()))
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    for (id, list, target) in views {
+        let target = target.unwrap_or_else(|| drag::DropTarget::create(list));
+        let registered = match unsafe { RegisterDragDrop(list, &target) } {
+            Ok(()) => true,
+            Err(e) => {
+                crate::crash::log(&format!("drag and drop disabled: {e}"));
+                false
+            }
+        };
+        super::with_view(id, |v| {
+            v.drop_registered = registered;
+            v.drop_target = Some(target);
+        });
+    }
 }

@@ -1713,3 +1713,186 @@ fn operation_status_shows_destination_and_completion() {
     command(dialog, IDCANCEL.0 as usize);
     close(hwnd);
 }
+
+#[test]
+#[ignore = "diagnostic: copies 250 executables and measures shell icon queue latency"]
+fn executable_icons_catch_up_after_scrolling() {
+    let t = TempDir::new("icon-scroll");
+    let source = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("notepad.exe");
+    for i in 0..250 {
+        std::fs::copy(&source, t.0.join(format!("app-{i:03}.exe"))).unwrap();
+    }
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list).len() == 250));
+    let _com = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+        )
+    };
+    let expected = kestrel::icons::file_icon(&t.0.join("app-249.exe")).unwrap();
+    let started = std::time::Instant::now();
+    for row in 0..250 {
+        item_image(list, row);
+    }
+    let hint = NMLVCACHEHINT { hdr: hdr(list, LVN_ODCACHEHINT), iFrom: 249, iTo: 249 };
+    notify(hwnd, hint);
+    assert!(pump_until(Duration::from_secs(20), || item_image(list, 249) == expected));
+    eprintln!("250 executable requests; last visible icon ready after {:?}", started.elapsed());
+    close(hwnd);
+}
+
+#[test]
+fn narrow_window_keeps_toolbar_buttons_inside_the_client_area() {
+    let _desktop = desktop();
+    let t = TempDir::new("narrow");
+    let hwnd = open(&t.0);
+    unsafe {
+        SetWindowPos(hwnd, None, 20, 20, 380, 420, SWP_NOZORDER | SWP_NOACTIVATE).unwrap();
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    command(hwnd, ui::toolbar::SPLIT);
+    command(hwnd, ui::toolbar::PREVIEW);
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    unsafe {
+        GetClientRect(hwnd, &mut rect).unwrap();
+    }
+    let mut edge = windows::Win32::Foundation::POINT { x: rect.right, y: 0 };
+    unsafe {
+        windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut edge).unwrap();
+    }
+    let mut after = None;
+    while let Ok(button) = unsafe { FindWindowExW(Some(hwnd), after, w!("Button"), None) } {
+        if unsafe { IsWindowVisible(button) }.as_bool() {
+            let mut bounds = windows::Win32::Foundation::RECT::default();
+            unsafe {
+                GetWindowRect(button, &mut bounds).unwrap();
+            }
+            assert!(bounds.right <= edge.x, "{} extends outside the window", window_text_of(button));
+        }
+        after = Some(button);
+    }
+    close(hwnd);
+}
+
+#[test]
+fn closing_a_window_does_not_interrupt_its_copy() {
+    use windows::Win32::System::Ole::DROPEFFECT;
+    use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+    let t = TempDir::new("close-copy");
+    let source = TempDir::new("close-copy-source");
+    let bytes = vec![123u8; 8 * 1024 * 1024];
+    std::fs::write(source.0.join("payload.bin"), &bytes).unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || status_text(hwnd) == "0 items"));
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    unsafe {
+        GetWindowRect(list, &mut rect).unwrap();
+    }
+    let point = windows::Win32::Foundation::POINTL { x: rect.left + 30, y: rect.top + 70 };
+    let target = ui::drop_target().unwrap();
+    let data = kestrel::dnd::data_object(&[source.0.join("payload.bin")]).unwrap();
+    let mut effect = DROPEFFECT(kestrel::dnd::COPY);
+    let keys = MODIFIERKEYS_FLAGS(kestrel::dnd::MK_CONTROL);
+    unsafe {
+        target.DragEnter(&data, keys, point, &mut effect).unwrap();
+        target.Drop(&data, keys, point, &mut effect).unwrap();
+    }
+    close(hwnd);
+    assert!(pump_until(Duration::from_secs(15), || ui::running_operations() == 0));
+    assert_eq!(std::fs::read(t.0.join("payload.bin")).unwrap(), bytes);
+    assert!(source.0.join("payload.bin").exists());
+}
+
+#[test]
+#[ignore = "diagnostic: writes visual review bitmaps under target/ui-review"]
+fn render_review_windows() {
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+    fn capture(hwnd: HWND, path: &Path) {
+        unsafe {
+            let mut rect = windows::Win32::Foundation::RECT::default();
+            GetClientRect(hwnd, &mut rect).unwrap();
+            let (width, height) = (rect.right, rect.bottom);
+            let screen = GetDC(None);
+            let dc = CreateCompatibleDC(Some(screen));
+            let bitmap = CreateCompatibleBitmap(screen, width, height);
+            let previous = SelectObject(dc, HGDIOBJ(bitmap.0));
+            assert!(PrintWindow(hwnd, dc, PRINT_WINDOW_FLAGS(3)).as_bool());
+            SelectObject(dc, previous);
+            let mut info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut pixels = vec![0u8; width as usize * height as usize * 4];
+            assert_eq!(
+                GetDIBits(
+                    dc,
+                    bitmap,
+                    0,
+                    height as u32,
+                    Some(pixels.as_mut_ptr() as _),
+                    &mut info,
+                    DIB_RGB_COLORS
+                ),
+                height
+            );
+            let mut bytes = b"BM".to_vec();
+            bytes.extend((54 + pixels.len() as u32).to_le_bytes());
+            bytes.extend([0u8; 4]);
+            bytes.extend(54u32.to_le_bytes());
+            bytes.extend(std::slice::from_raw_parts(&info.bmiHeader as *const _ as *const u8, 40));
+            bytes.extend(pixels);
+            std::fs::write(path, bytes).unwrap();
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(dc);
+            ReleaseDC(None, screen);
+        }
+    }
+    let _desktop = desktop();
+    let t = TempDir::new("visual");
+    for folder in ["Documents", "Pictures", "Projects"] {
+        std::fs::create_dir(t.0.join(folder)).unwrap();
+    }
+    std::fs::write(t.0.join("Read me.txt"), "Preview text\r\nKestrel navigation review.").unwrap();
+    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/ui-review");
+    std::fs::create_dir_all(&out).unwrap();
+    for (name, theme) in
+        [("light", kestrel::theme::ThemeChoice::Light), ("dark", kestrel::theme::ThemeChoice::Dark)]
+    {
+        let settings = kestrel::settings::Settings { theme, dual_pane: true, ..Default::default() };
+        ui::init_process().unwrap();
+        let hwnd = ui::create_main_window(&t.0, &settings).unwrap();
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()).len() == 4));
+        pump_until(Duration::from_millis(250), || false);
+        capture(hwnd, &out.join(format!("{name}-main.bmp")));
+        command(hwnd, ui::toolbar::SETTINGS);
+        let settings = unsafe { FindWindowW(w!("KestrelSettings"), None) }.unwrap();
+        let pages = unsafe { GetDlgItem(Some(settings), 5) }.unwrap();
+        unsafe {
+            SendMessageW(pages, TCM_SETCURSEL, Some(WPARAM(1)), None);
+        }
+        notify(settings, hdr(pages, TCN_SELCHANGE));
+        capture(settings, &out.join(format!("{name}-settings.bmp")));
+        command(settings, IDCANCEL.0 as usize);
+        key(ui::active_list().unwrap(), VK_F1);
+        assert!(pump_until(WAIT, || unsafe { FindWindowW(w!("KestrelShortcuts"), None) }.is_ok()));
+        let guide = unsafe { FindWindowW(w!("KestrelShortcuts"), None) }.unwrap();
+        capture(guide, &out.join(format!("{name}-shortcuts.bmp")));
+        command(guide, IDCANCEL.0 as usize);
+        close(hwnd);
+    }
+}
