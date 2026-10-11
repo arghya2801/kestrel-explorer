@@ -360,7 +360,7 @@ impl Browser {
         self.order = order;
         self.order_spec = (sort, hidden, filter);
         self.shown_generation = generation;
-        let mut select: Vec<usize> = keep.iter().filter_map(|n| self.row_named(n)).collect();
+        let mut select = self.rows_named(&keep);
         if let Some(row) = self.select_next.as_deref().and_then(|n| self.row_named(n)) {
             select = vec![row];
             self.select_next = None;
@@ -429,6 +429,24 @@ impl Browser {
         let s = self.snapshot()?;
         let same = |a: &[u16]| unsafe { CompareStringOrdinal(a, name, true) } == CSTR_EQUAL;
         self.order.iter().position(|&i| same(s.name(i as usize)))
+    }
+
+    fn rows_named(&self, names: &[Vec<u16>]) -> Vec<usize> {
+        if names.len() <= 8 {
+            return names.iter().filter_map(|n| self.row_named(n)).collect();
+        }
+        let Some(snapshot) = self.snapshot() else { return Vec::new() };
+        let name = |row: usize| snapshot.name(self.order[row] as usize);
+        let compare = |a: &[u16], b: &[u16]| unsafe { CompareStringOrdinal(a, b, true) }.0.cmp(&CSTR_EQUAL.0);
+        let mut index: Vec<usize> = (0..self.order.len()).collect();
+        index.sort_unstable_by(|&a, &b| compare(name(a), name(b)).then(a.cmp(&b)));
+        names
+            .iter()
+            .filter_map(|wanted| {
+                let at = index.partition_point(|&row| compare(name(row), wanted).is_lt());
+                index.get(at).copied().filter(|&row| compare(name(row), wanted).is_eq())
+            })
+            .collect()
     }
 
     /// First row at or after `start` (wrapping) whose name starts with `prefix`, ignoring case.
@@ -938,5 +956,24 @@ mod tests {
         let p = parse_location(r"%SystemRoot%\System32", None).unwrap();
         assert_eq!(p, Path::new(&root).join("System32"));
         assert_eq!(expand_env("100% sure %NOPE_NOT_SET% x"), "100% sure %NOPE_NOT_SET% x");
+    }
+
+    #[test]
+    fn large_refresh_preserves_selection_across_reordering_and_case_changes() {
+        let mut b = Browser::default();
+        let mut old = Snapshot::new(PathBuf::from(r"C:\large"));
+        let mut new = Snapshot::new(PathBuf::from(r"C:\large"));
+        for i in 0..100_001 {
+            old.add(&w(&format!("item-{i:06}.txt")), 0, 0, 0);
+            new.add(&w(&format!("ITEM-{i:06}.TXT")), 0, 0, 0);
+        }
+        let job = b.go(old.dir.clone());
+        b.on_listed(job.generation, Ok((old, (0..100_001).collect())), &[]);
+        let selected: Vec<_> = (0..100_001).step_by(2).collect();
+        let job = b.refresh().unwrap();
+        let began = std::time::Instant::now();
+        let result = b.on_listed(job.generation, Ok((new, (0..100_001).rev().collect())), &selected);
+        eprintln!("100k selection restoration: {:?}", began.elapsed());
+        assert_eq!(result, shown(&selected.iter().map(|row| 100_000 - row).collect::<Vec<_>>(), false));
     }
 }

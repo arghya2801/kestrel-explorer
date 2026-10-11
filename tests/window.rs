@@ -1597,3 +1597,34 @@ fn sidebar_offers_all_children_after_load_more() {
     assert_eq!(tv_children(tree, parent).last().unwrap().0, "child-5001");
     close(hwnd);
 }
+
+#[test]
+fn refresh_preserves_bulk_selection_and_focused_row() {
+    let t = TempDir::new("bulk-selection");
+    for i in 0..64 {
+        std::fs::write(t.0.join(format!("{i:03}.txt")), "").unwrap();
+    }
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list).len() == 64));
+    command(hwnd, ui::CMD_SELECT_ALL);
+    let focused = LVITEMW { state: LVIS_FOCUSED, stateMask: LVIS_FOCUSED, ..Default::default() };
+    unsafe {
+        SendMessageW(list, LVM_SETITEMSTATE, Some(WPARAM(17)), Some(LPARAM(&focused as *const _ as isize)));
+    }
+    std::fs::write(t.0.join("extra.txt"), "").unwrap();
+    assert!(pump_until(WAIT, || rows(list).len() == 65));
+    assert_eq!(unsafe { SendMessageW(list, LVM_GETSELECTEDCOUNT, None, None).0 }, 64);
+    assert_eq!(
+        unsafe {
+            SendMessageW(list, LVM_GETNEXTITEM, Some(WPARAM(usize::MAX)), Some(LPARAM(LVNI_FOCUSED as isize)))
+                .0
+        },
+        17
+    );
+    command(hwnd, ui::CMD_SELECT_ALL);
+    command(hwnd, ui::toolbar::REFRESH);
+    assert!(pump_until(WAIT, || status_text(hwnd) == "65 items"));
+    assert_eq!(unsafe { SendMessageW(list, LVM_GETSELECTEDCOUNT, None, None).0 }, 65);
+    close(hwnd);
+}

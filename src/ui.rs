@@ -868,6 +868,9 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
                 Some(LRESULT(0))
             }
             LVN_ITEMCHANGED | LVN_ODSTATECHANGED => {
+                if with_app(|a| a.view.restoring_selection) == Some(true) {
+                    return Some(LRESULT(0));
+                }
                 toolbar::update();
                 if let Some(main) = with_app(|a| a.hwnd) {
                     preview::selection_changed(main);
@@ -938,6 +941,7 @@ fn apply(ev: Event) {
         Event::Listed { generation, result } => {
             let id = crate::tabs::tab_of_generation(generation);
             let sel = selected_rows_for(id);
+            let focus = focused_name(id);
             let applied = with_view(id, |v| {
                 let r = v.browser.on_listed(generation, result, &sel);
                 if r != Applied::Stale {
@@ -947,7 +951,7 @@ fn apply(ev: Event) {
             });
             match applied {
                 Some(Applied::Shown { select, new_folder }) => {
-                    refresh_view(id, &select, new_folder);
+                    refresh_view(id, &select, new_folder, focus.as_deref());
                     if new_folder && view_visible(id) {
                         watch_view(id);
                     }
@@ -996,14 +1000,15 @@ fn apply(ev: Event) {
         }
         Event::WatchReady { id, handle } => on_watch_ready(id, handle),
         Event::OpDone { view, dir, result, edit } => commands::on_op_done(view, dir, result, edit),
-        Event::Resync(id) => refresh_view(id, &selected_rows_for(id), false),
+        Event::Resync(id) => refresh_view(id, &selected_rows_for(id), false, focused_name(id).as_deref()),
         Event::Sorted { generation, sort, show_hidden, filter, order } => {
             let id = crate::tabs::tab_of_generation(generation);
             let sel = selected_rows_for(id);
+            let focus = focused_name(id);
             if let Some(Applied::Shown { select, .. }) =
                 with_view(id, |v| v.browser.on_sorted(generation, sort, show_hidden, &filter, order, &sel))
             {
-                refresh_view(id, &select, false);
+                refresh_view(id, &select, false, focus.as_deref());
             }
         }
         Event::Navigate { generation, dir } => {
@@ -1453,6 +1458,10 @@ fn selected_rows() -> Vec<usize> {
 
 fn selected_rows_for(id: u64) -> Vec<usize> {
     let Some(list) = with_view(id, |v| v.list) else { return Vec::new() };
+    let count = unsafe { SendMessageW(list, LVM_GETITEMCOUNT, None, None).0 as usize };
+    if unsafe { SendMessageW(list, LVM_GETSELECTEDCOUNT, None, None).0 as usize } == count {
+        return (0..count).collect();
+    }
     let mut rows = Vec::new();
     let mut i = -1isize;
     loop {
@@ -1473,7 +1482,19 @@ fn selected_rows_for(id: u64) -> Vec<usize> {
 }
 
 /// Pushes the browser's contents to the list, selecting `select`.
-fn refresh_view(id: u64, select: &[usize], new_folder: bool) {
+fn focused_name(id: u64) -> Option<Vec<u16>> {
+    let list = with_view(id, |v| v.list)?;
+    let row = unsafe {
+        SendMessageW(list, LVM_GETNEXTITEM, Some(WPARAM(usize::MAX)), Some(LPARAM(LVNI_FOCUSED as isize))).0
+    };
+    with_view(id, |v| {
+        let entry = *v.browser.order.get(usize::try_from(row).ok()?)?;
+        Some(v.browser.snapshot()?.name(entry as usize).to_vec())
+    })
+    .flatten()
+}
+
+fn refresh_view(id: u64, select: &[usize], new_folder: bool, focus: Option<&[u16]>) {
     let Some((list, count, renaming)) =
         with_view(id, |v| (v.list, v.browser.order.len(), v.renaming.is_some()))
     else {
@@ -1487,7 +1508,12 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool) {
         }
         unsafe { SendMessageW(list, LVM_CANCELEDITLABEL, None, None) };
     }
+    with_view(id, |v| v.restoring_selection = true);
     unsafe {
+        let visible = IsWindowVisible(list).as_bool();
+        if visible {
+            SendMessageW(list, WM_SETREDRAW, Some(WPARAM(0)), None);
+        }
         let set = |row: isize, state: u32| {
             let item = LVITEMW {
                 state: LIST_VIEW_ITEM_STATE_FLAGS(state),
@@ -1504,18 +1530,32 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool) {
         set(-1, 0);
         let flags = if new_folder { 0 } else { LVSICF_NOSCROLL };
         SendMessageW(list, LVM_SETITEMCOUNT, Some(WPARAM(count)), Some(LPARAM(flags as isize)));
-        // ponytail: one message per selected row; slow only for "select all" in 100k+ folders.
-        for &row in select {
-            set(row as isize, LVIS_SELECTED.0);
+        if select.len() == count && count > 0 {
+            set(-1, LVIS_SELECTED.0);
+        } else {
+            for &row in select {
+                set(row as isize, LVIS_SELECTED.0);
+            }
         }
-        if let Some(&first) = select.first() {
-            set(first as isize, LVIS_SELECTED.0 | LVIS_FOCUSED.0);
-            SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(first)), Some(LPARAM(0)));
+        let focused = if new_folder {
+            None
+        } else {
+            focus.and_then(|n| with_view(id, |v| v.browser.row_named(n)).flatten())
+        };
+        if let Some(first) = focused.or_else(|| select.first().copied()) {
+            set(first as isize, LVIS_FOCUSED.0 | if select.contains(&first) { LVIS_SELECTED.0 } else { 0 });
+            if new_folder {
+                SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(first)), Some(LPARAM(0)));
+            }
         } else if new_folder && count > 0 {
             SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(0)), Some(LPARAM(0)));
         }
+        if visible {
+            SendMessageW(list, WM_SETREDRAW, Some(WPARAM(1)), None);
+        }
         let _ = InvalidateRect(Some(list), None, false);
     }
+    with_view(id, |v| v.restoring_selection = false);
     if with_app(|a| a.view.id == id) == Some(true) {
         update_chrome();
     }

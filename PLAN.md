@@ -135,7 +135,7 @@ src/settings.rs, src/main.rs, navigation/settings tests, tests/window.rs.
 
 ## 5. Remove large-folder limits and add the missing view
 
-- [ ] Measure selection restoration in 100k+ item folders and replace avoidable per-row work while preserving selection and focus.
+- [x] Measure selection restoration in 100k+ item folders and replace avoidable per-row work while preserving selection and focus.
 - [x] Replace the silent 5,000-child sidebar cap with incremental loading or a visible Load more action.
 - [ ] Measure icon lag while scrolling executable-heavy folders; discard requests for rows no longer needed if lag is confirmed.
 - [ ] Add large-icon/thumbnail grid view as an explicit later feature, selectable through View and Settings.
@@ -205,3 +205,8 @@ hidden-item changes, exposes network discovery, and pages beyond 5,000 children.
 are rejected after rebuilds. The new 5,002-child window test and hidden-folder synchronization test
 passed; Clippy passed. Network discovery depends on Windows network services and is not assumed
 to succeed; typed UNC navigation stays available.
+
+2026-10-11: 100,001-item refresh with 50,001 selected names (including changed casing and reversed
+order) restored selection in 26.44 ms in the release logic test. Bulk native selection is batched,
+notifications are suppressed during restoration, and keyboard focus is retained. The bulk-selection
+window regression and live-refresh selection test passed; Clippy passed.
