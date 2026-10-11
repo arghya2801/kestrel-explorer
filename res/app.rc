@@ -2,8 +2,8 @@
 1 ICON "app.ico"
 
 1 VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION 1,1,0,0
+PRODUCTVERSION 1,1,0,0
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -12,11 +12,11 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "Kestrel"
-      VALUE "FileVersion", "1.0.0"
+      VALUE "FileVersion", "1.1.0"
       VALUE "InternalName", "kestrel"
       VALUE "OriginalFilename", "kestrel.exe"
       VALUE "ProductName", "Kestrel"
-      VALUE "ProductVersion", "1.0.0"
+      VALUE "ProductVersion", "1.1.0"
     END
   END
   BLOCK "VarFileInfo"
