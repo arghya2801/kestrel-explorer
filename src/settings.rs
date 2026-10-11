@@ -24,6 +24,9 @@ pub struct Settings {
     pub preview_width: Option<i32>,
     pub last_folder: Option<PathBuf>,
     pub theme: ThemeChoice,
+    pub restore_session: bool,
+    pub tabs: Vec<SavedTab>,
+    pub active_tab: usize,
 }
 
 impl Default for Settings {
@@ -41,6 +44,9 @@ impl Default for Settings {
             preview_width: None,
             last_folder: None,
             theme: ThemeChoice::System,
+            restore_session: true,
+            tabs: Vec::new(),
+            active_tab: 0,
         }
     }
 }
@@ -98,10 +104,18 @@ impl Settings {
                 }
                 "split" => s.split = value.parse().ok().filter(|&w: &i32| w > 0),
                 "theme" => s.theme = ThemeChoice::parse(value).unwrap_or(ThemeChoice::System),
+                "restore_session" => s.restore_session = flag(value).unwrap_or(true),
+                "tab" => {
+                    if let Some(tab) = SavedTab::parse(value) {
+                        s.tabs.push(tab);
+                    }
+                }
+                "active_tab" => s.active_tab = value.parse().unwrap_or(0),
                 "last_folder" => s.last_folder = (!value.is_empty()).then(|| PathBuf::from(value)),
                 _ => {}
             }
         }
+        s.active_tab = s.active_tab.min(s.tabs.len().saturating_sub(1));
         s
     }
 
@@ -129,6 +143,11 @@ impl Settings {
         out += &format!("theme={}\n", self.theme.name());
         if let Some(p) = &self.last_folder {
             out += &format!("last_folder={}\n", p.display());
+        }
+        out += &format!("restore_session={}\n", self.restore_session);
+        out += &format!("active_tab={}\n", self.active_tab);
+        for tab in &self.tabs {
+            out += &format!("tab={}\n", tab.text());
         }
         out
     }
@@ -200,6 +219,15 @@ mod tests {
             preview_width: Some(350),
             last_folder: Some(PathBuf::from(r"C:\Users\me\Ünï =x")),
             theme: ThemeChoice::Light,
+            restore_session: true,
+            tabs: vec![SavedTab {
+                folder: PathBuf::from(r"C:\a,b=Ü"),
+                other: Some(PathBuf::from(r"D:\")),
+                split: true,
+                right_active: true,
+                ratio: 600,
+            }],
+            active_tab: 0,
         };
         assert_eq!(Settings::parse(&s.to_text()), s);
     }
@@ -266,5 +294,63 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temp file left behind");
         assert_eq!(Settings::load_from(&dir.join("missing.txt")), Settings::default());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedTab {
+    pub folder: PathBuf,
+    pub other: Option<PathBuf>,
+    pub split: bool,
+    pub right_active: bool,
+    pub ratio: i32,
+}
+
+// Encode UTF-16 units so commas, line breaks and unpaired surrogates round-trip.
+fn encode_path(path: &Path) -> String {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str().encode_wide().map(|c| format!("{c:04x}")).collect()
+}
+fn decode_path(text: &str) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    if text.is_empty() || !text.len().is_multiple_of(4) || !text.is_ascii() {
+        return None;
+    }
+    let units: Option<Vec<u16>> = text
+        .as_bytes()
+        .chunks(4)
+        .map(|c| u16::from_str_radix(std::str::from_utf8(c).ok()?, 16).ok())
+        .collect();
+    let units = units?;
+    if units.contains(&0) {
+        return None;
+    }
+    Some(std::ffi::OsString::from_wide(&units).into())
+}
+impl SavedTab {
+    fn parse(text: &str) -> Option<Self> {
+        let parts: Vec<_> = text.split(',').collect();
+        if parts.len() != 5 {
+            return None;
+        }
+        let ratio = parts[2].parse().ok().filter(|v| (100..=900).contains(v))?;
+        let other = if parts[4].is_empty() { None } else { Some(decode_path(parts[4])?) };
+        Some(Self {
+            split: flag(parts[0])? && other.is_some(),
+            right_active: flag(parts[1])?,
+            ratio,
+            folder: decode_path(parts[3])?,
+            other,
+        })
+    }
+    fn text(&self) -> String {
+        format!(
+            "{},{},{},{},{}",
+            self.split,
+            self.right_active,
+            self.ratio,
+            encode_path(&self.folder),
+            self.other.as_deref().map(encode_path).unwrap_or_default()
+        )
     }
 }

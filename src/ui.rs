@@ -63,6 +63,7 @@ mod tree;
 const CLASS: PCWSTR = w!("Kestrel");
 const WM_APP_EVENTS: u32 = WM_APP + 1;
 const WM_APP_LATE_INIT: u32 = WM_APP + 2;
+const WM_APP_PREFERENCES: u32 = WM_APP + 3;
 const ID_BACK: usize = 1;
 const ID_FORWARD: usize = 2;
 const ID_UP: usize = 3;
@@ -149,6 +150,7 @@ struct App {
     buttons: [HWND; 3],
     toolbar: Vec<HWND>,
     startup_override: Option<Option<PathBuf>>,
+    restore_session: bool,
     status: HWND,
     font: HFONT,
     events: Arc<Events<Event>>,
@@ -414,6 +416,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 buttons,
                 toolbar: toolbar_buttons,
                 startup_override: None,
+                restore_session: settings.restore_session,
                 status,
                 font,
                 events,
@@ -442,9 +445,13 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         preview::restore(hwnd, settings.preview);
         let _ = SetFocus(Some(list));
         go(start.to_path_buf());
-        if settings.dual_pane {
+        if settings.dual_pane && settings.tabs.is_empty() {
             panes::toggle();
         }
+        if !settings.tabs.is_empty() {
+            tabbar::restore(settings);
+        }
+        crate::session::register(hwnd.0 as isize, settings.clone());
         // Icons and the sidebar wait until the window has painted once.
         dark::apply(hwnd, Palette::new(settings.theme.is_dark(system_prefers_dark())));
         let _ = PostMessageW(Some(hwnd), WM_APP_LATE_INIT, WPARAM(0), LPARAM(0));
@@ -601,6 +608,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
+            WM_APP_PREFERENCES => {
+                if let Some(theme) = crate::session::theme() {
+                    with_app(|a| a.theme = theme);
+                    dark::apply(hwnd, Palette::new(theme.is_dark(system_prefers_dark())));
+                }
+                LRESULT(0)
+            }
             WM_APP_LATE_INIT => {
                 late_init();
                 LRESULT(0)
@@ -940,7 +954,13 @@ fn apply(ev: Event) {
                         spawn_sort(job);
                     }
                 }
-                Some(Applied::Failed) if with_view(id, |v| v.browser.dir().is_none()) == Some(true) => {
+                Some(Applied::Failed)
+                    if with_view(id, |v| {
+                        let first = v.browser.dir().is_none() && !v.fallback_attempted;
+                        v.fallback_attempted = true;
+                        first
+                    }) == Some(true) =>
+                {
                     if let Some(home) = std::env::var_os("USERPROFILE")
                         && let Some(job) = with_view(id, |v| v.browser.go(PathBuf::from(home)))
                     {
@@ -1122,6 +1142,7 @@ fn late_init() {
 /// Records the view state for saving once the window is gone.
 fn capture_settings(hwnd: HWND) {
     if let Some(s) = current_settings(hwnd) {
+        crate::session::closing(hwnd.0 as isize, s.clone());
         FINAL_SETTINGS.with(|f| *f.borrow_mut() = Some(s));
     }
 }
@@ -1142,6 +1163,7 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
                 .clone()
                 .unwrap_or_else(|| a.view.browser.dir().map(Path::to_path_buf)),
             theme: a.theme,
+            restore_session: a.restore_session,
             ..Default::default()
         };
         (a.view.list, s)
@@ -1157,6 +1179,7 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
             .map(|i| SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(i)), None).0 as i32)
             .collect();
     }
+    (s.tabs, s.active_tab) = tabbar::saved();
     Some(s)
 }
 
@@ -1179,7 +1202,7 @@ pub fn wait_for_other_windows() {
 /// Ctrl+N: a second window on the same folder, the two tiled side by side.
 fn open_side_by_side(hwnd: HWND) {
     let Some(mut s) = current_settings(hwnd) else { return };
-    let start = s.last_folder.clone().unwrap_or_else(|| PathBuf::from(r"C:\"));
+    s.tabs.clear();
     unsafe {
         let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         if GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
@@ -1191,6 +1214,12 @@ fn open_side_by_side(hwnd: HWND) {
             s.maximized = false;
         }
     }
+    open_restored_window(s);
+}
+
+/// Opens a restored window on its own UI thread.
+pub fn open_restored_window(s: Settings) {
+    let start = s.last_folder.clone().unwrap_or_else(|| PathBuf::from(r"C:\"));
     let spawned = std::thread::Builder::new().name("window".into()).spawn(move || {
         crash::guard(|| {
             if init_process().is_err() {
@@ -1761,6 +1790,7 @@ fn set_font(controls: &[HWND], font: HFONT) {
 fn apply_settings(hwnd: HWND, settings: Settings) {
     let Some((list, job)) = with_app(|a| {
         a.theme = settings.theme;
+        a.restore_session = settings.restore_session;
         a.split = settings.split.unwrap_or(240);
         a.pane_ratio = settings.pane_ratio;
         a.preview_width = settings.preview_width;
@@ -1803,10 +1833,15 @@ fn apply_settings(hwnd: HWND, settings: Settings) {
     update_sort_arrows();
     layout(hwnd);
     let Some(events) = with_app(|a| a.events.clone()) else { return };
+    for other in crate::session::preferences(settings) {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(other as _)), WM_APP_PREFERENCES, WPARAM(0), LPARAM(0));
+        }
+    }
     let saving = OpGuard::new();
     spawn("settings", move || {
         let _saving = saving;
-        if let Err(e) = settings.save_to(&Settings::file()) {
+        if let Err(e) = crate::session::flush_preferences() {
             events.send(Event::Message(format!("Settings could not be saved: {e}")));
         }
     });

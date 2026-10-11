@@ -113,3 +113,8 @@ cargo run --release --example stress -- 600                  # 10 minutes of chu
 Two folder panes: use **Split** or **Ctrl+Shift+S**; **F6** focuses the other pane. Each pane keeps its
 folder, history, selection and filter. Tabs remember both panes. Drag the center or preview divider
 to resize; layout defaults are also available in Settings.
+
+Startup settings can restore tabs and windows. Secondary windows still open when the original
+window closes are restored with it; close a secondary window first to leave it out of the next session.
+A command-line folder opens directly instead of restoring a saved session. Theme changes apply to
+all open windows; sorting, filters and layout apply to the current view/window.

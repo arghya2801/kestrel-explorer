@@ -30,6 +30,7 @@ const WIDTH: usize = 23;
 const HEIGHT: usize = 24;
 const MAXIMIZED: usize = 25;
 const ERROR: usize = 26;
+const SESSION: usize = 30;
 const DUAL: usize = 27;
 const RATIO: usize = 28;
 const PREVIEW_WIDTH: usize = 29;
@@ -187,7 +188,8 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR) -> windows::core::Resu
                     (1, COLUMN + 1, "&Date column width", None, false),
                     (1, COLUMN + 2, "&Type column width", None, false),
                     (1, COLUMN + 3, "Si&ze column width", None, false),
-                    (2, FOLDER, "&Folder for next launch", None, false),
+                    (2, SESSION, "Restore tabs and windows", None, true),
+                    (2, FOLDER, "&Folder when not restoring", None, false),
                     (3, X, "Window &X", None, false),
                     (3, Y, "Window &Y", None, false),
                     (3, WIDTH, "&Width", None, false),
@@ -321,6 +323,7 @@ fn fill(hwnd: HWND, s: &Settings) {
     text(SIDEBAR, s.split.unwrap_or(240).to_string());
     check(PREVIEW, s.preview);
     check(DUAL, s.dual_pane);
+    check(SESSION, s.restore_session);
     text(RATIO, (s.pane_ratio / 10).to_string());
     text(PREVIEW_WIDTH, s.preview_width.unwrap_or(320).to_string());
     check(HIDDEN, s.show_hidden);
@@ -377,6 +380,7 @@ fn read(hwnd: HWND) -> std::result::Result<Settings, String> {
         split: Some(number(SIDEBAR, "Sidebar width", 120, 4000)?),
         preview: checked(PREVIEW),
         dual_pane: checked(DUAL),
+        restore_session: checked(SESSION),
         pane_ratio: number(RATIO, "Left pane percentage", 10, 90)? * 10,
         preview_width: Some(number(PREVIEW_WIDTH, "Preview width", 100, 10000)?),
         show_hidden: checked(HIDDEN),
@@ -400,6 +404,7 @@ fn read(hwnd: HWND) -> std::result::Result<Settings, String> {
             number(HEIGHT, "Height", 240, 16384)?,
         )),
         maximized: checked(MAXIMIZED),
+        ..Default::default()
     })
 }
 

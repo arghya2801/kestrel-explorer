@@ -1472,3 +1472,51 @@ fn split_and_preview_dividers_are_dragged_and_remembered() {
     assert!(settings.pane_ratio > 500);
     assert!(settings.preview_width.is_some());
 }
+
+#[test]
+fn session_restores_tabs_and_both_folders() {
+    let _desktop = desktop();
+    let t = TempDir::new("restore");
+    for name in ["one", "two", "three"] {
+        std::fs::create_dir(t.0.join(name)).unwrap();
+        std::fs::write(t.0.join(name).join(format!("{name}.txt")), "").unwrap();
+    }
+    use kestrel::settings::{SavedTab, Settings};
+    let settings = Settings {
+        tabs: vec![
+            SavedTab {
+                folder: t.0.join("one"),
+                other: Some(t.0.join("two")),
+                split: true,
+                right_active: true,
+                ratio: 620,
+            },
+            SavedTab {
+                folder: t.0.join("three"),
+                other: None,
+                split: false,
+                right_active: false,
+                ratio: 500,
+            },
+        ],
+        active_tab: 0,
+        ..Default::default()
+    };
+    ui::init_process().unwrap();
+    let hwnd = ui::create_main_window(&t.0, &settings).unwrap();
+    assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()) == ["one.txt"]));
+    assert_eq!(tab_labels(hwnd).len(), 2);
+    let first = ui::active_list().unwrap();
+    key(first, VK_F6);
+    assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()) == ["two.txt"]));
+    ctrl_key(ui::active_list().unwrap(), VK_TAB, false);
+    assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()) == ["three.txt"]));
+    close(hwnd);
+    let saved = ui::take_final_settings().unwrap();
+    assert_eq!(saved.active_tab, 1);
+    assert_eq!(saved.tabs.len(), 2);
+    assert_eq!(saved.tabs[0].folder, t.0.join("two"));
+    assert_eq!(saved.tabs[0].other, Some(t.0.join("one")));
+    assert_eq!(saved.tabs[0].ratio, 620);
+    assert_eq!(Settings::parse(&saved.to_text()).tabs, saved.tabs);
+}

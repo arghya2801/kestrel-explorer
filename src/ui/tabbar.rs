@@ -5,7 +5,7 @@ use super::{
     with_app,
 };
 use crate::{browser::Browser, settings::Settings};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Controls::*;
@@ -89,7 +89,7 @@ pub(super) fn new_tab(dir: Option<PathBuf>) {
             },
             a.events.clone(),
             a.font,
-            dir.or_else(|| a.view.browser.dir().map(Path::to_path_buf)),
+            dir.or_else(|| a.view.browser.requested_location().map(|l| l.dir)),
         )
     }) else {
         return;
@@ -253,5 +253,56 @@ pub(super) fn on_notify(hdr: &NMHDR) -> Option<LRESULT> {
             Some(LRESULT(1))
         }
         _ => None,
+    }
+}
+
+pub(super) fn saved() -> (Vec<crate::settings::SavedTab>, usize) {
+    with_app(|a| {
+        let tabs = a
+            .tabs
+            .items()
+            .iter()
+            .map(|t| {
+                let (view, other, split, right_active, ratio) = match &t.workspace {
+                    Some(w) => (&w.view, w.other.as_ref(), w.split, w.right_active, w.ratio),
+                    None => (&a.view, a.other.as_ref(), a.split_view, a.right_active, a.pane_ratio),
+                };
+                crate::settings::SavedTab {
+                    folder: view.browser.requested_location().map(|l| l.dir).unwrap_or_default(),
+                    other: other.and_then(|v| v.browser.requested_location().map(|l| l.dir)),
+                    split,
+                    right_active,
+                    ratio,
+                }
+            })
+            .collect();
+        (tabs, a.tabs.active())
+    })
+    .unwrap_or_default()
+}
+pub(super) fn restore(settings: &Settings) {
+    for (i, tab) in settings.tabs.iter().enumerate() {
+        if i > 0 {
+            new_tab(Some(tab.folder.clone()));
+        } else {
+            super::go(tab.folder.clone());
+        }
+        if let Some(dir) = &tab.other {
+            if with_app(|a| a.other.is_none()) == Some(true) {
+                panes::toggle();
+            }
+            if let Some(job) = with_app(|a| a.other.as_mut().map(|v| v.browser.go(dir.clone()))).flatten() {
+                super::spawn_list(job);
+            }
+        }
+        with_app(|a| {
+            a.split_view = tab.split && a.other.is_some();
+            a.right_active = tab.right_active;
+            a.pane_ratio = tab.ratio;
+        });
+    }
+    switch_to(settings.active_tab.min(settings.tabs.len().saturating_sub(1)));
+    if let Some(hwnd) = with_app(|a| a.hwnd) {
+        super::layout(hwnd);
     }
 }

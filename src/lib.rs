@@ -11,6 +11,7 @@ pub mod ops;
 pub mod places;
 pub mod preview;
 pub mod search;
+pub mod session;
 pub mod settings;
 pub mod shell;
 pub mod shellmenu;

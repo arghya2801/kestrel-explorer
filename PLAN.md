@@ -70,8 +70,8 @@ Expose existing settings first, grouped into these pages:
 - [x] Add Apply, OK, Cancel, and Restore defaults for preferences. Resetting preferences must not delete files.
 - [x] Validate folder input and numeric sizes; unavailable folders follow the existing fallback behavior.
 - [x] Preserve existing settings files, the old-name migration, atomic saves, and defaults for missing or malformed keys.
-- [ ] Apply live changes to open windows where appropriate; save through one owner so windows do not overwrite each other's settings.
-- [ ] Distinguish global defaults from current view/session state so changing a default does not unexpectedly reset another window.
+- [x] Apply live changes to open windows where appropriate; save through one owner so windows do not overwrite each other's settings.
+- [x] Distinguish global defaults from current view/session state so changing a default does not unexpectedly reset another window.
 - [x] Add controls for new split/preview dimensions when those features are implemented.
 
 Font size, density, click behavior, custom key bindings, plugins, and other currently unsupported preferences are not part of this Settings pass.
@@ -121,9 +121,9 @@ event callers and routing, tests/window.rs, relevant logic tests.
 - [ ] Sidebar follows the active pane's folder.
 - [ ] Hidden-item changes invalidate and reload affected sidebar children.
 - [ ] Add a Network node. Network enumeration must run on workers; typed server paths remain usable when discovery is unavailable.
-- [ ] Restore open tabs, active tab, split layout, and each pane's folder.
-- [ ] Save and restore secondary-window state through one coordinated writer; retain every window's state instead of letting the last writer win.
-- [ ] Restore missing folders gracefully and fit window bounds to the current monitors.
+- [x] Restore open tabs, active tab, split layout, and each pane's folder.
+- [x] Save and restore secondary-window state through one coordinated writer; retain every window's state instead of letting the last writer win.
+- [x] Restore missing folders gracefully and fit window bounds to the current monitors.
 - [x] Give the preview pane a draggable divider and persist its width.
 - [x] Fix repeated Back presses during a load; check the same situation for Forward and cancellation.
 
@@ -193,3 +193,9 @@ repeat under quiet conditions after the remaining features. Startup first-paint 
 center/preview dividers, and Ctrl+Shift+S / F6 added. The window regression run passed 33 tests
 before exposing a filter casing regression; that regression was fixed and its test passed separately.
 Clippy passed. SMB remains ignored; two clipboard-writing tests were excluded.
+
+2026-10-11: session records restore tabs and split folders, active tab/pane, and window bounds.
+The primary window owns the final save; secondary windows open when it closes are included.
+A secondary window closed earlier is treated as intentionally closed. Theme applies across open
+windows; view settings stay local. Settings round-trip tests and the new window restoration test
+passed; Clippy passed. The Startup page can disable session restoration.
