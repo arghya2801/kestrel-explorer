@@ -138,6 +138,8 @@ impl Settings {
     }
 
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }

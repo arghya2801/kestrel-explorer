@@ -32,10 +32,10 @@ These results describe that review, not a guarantee for later changes.
 - [ ] Create hidden preview controls on first use if measurements show a worthwhile improvement.
 - [ ] Measure the cost of applying dark mode before first paint; preserve readable controls and avoid a visible theme flash.
 - [ ] Investigate DLL loading only after measurements identify its contribution. Do not add delay-loading machinery without evidence.
-- [ ] Run the existing 600-second release stress test, recording handle, GDI, USER counts, and worst stall.
+- [x] Run the existing 600-second release stress test, recording handle, GDI, USER counts, and worst stall.
 - [ ] Keep the historical 5.4-second stall open until there is evidence explaining it. Inspect the watchdog dump if it recurs.
-- [ ] Separate environment-dependent test prerequisites from application failures. The localhost-share test currently assumes C$ is available.
-- [ ] Document clipboard contention and focus-sensitive test limitations.
+- [x] Separate environment-dependent test prerequisites from application failures. The localhost-share test currently assumes C$ is available.
+- [x] Document clipboard contention and focus-sensitive test limitations.
 
 Pass condition: measured startup improves, repeated stress runs show no sustained resource growth, and remaining failures have recorded causes.
 Update the measurements before the proposed v1.1.0 stabilization release. Update Cargo, lockfile metadata as needed, and Windows resource versions together.
@@ -47,14 +47,14 @@ examples/stress.rs, affected unit/window tests, Cargo.toml, Cargo.lock, res/app.
 
 ### Toolbar
 
-- [ ] Keep Back, Forward, Up, address, and filter on the top row.
-- [ ] Put a command row immediately below it, with New folder, Cut, Copy, Paste, Rename, Delete, Refresh, and dropdowns for View and More.
+- [x] Keep Back, Forward, Up, address, and filter on the top row.
+- [x] Put a command row immediately below it, with New folder, Cut, Copy, Paste, Rename, Delete, Refresh, and dropdowns for View and More.
 - [ ] Put Split, Settings, and Help on the command row. Split becomes available with step 3.
-- [ ] View exposes sorting, hidden items, and preview visibility; additional view modes appear only when implemented.
-- [ ] More exposes Copy as path, Select all, Show in Explorer, and the existing full Windows menu.
-- [ ] Disable selection-dependent actions when unavailable. Give every button a readable label or tooltip and keyboard access.
-- [ ] At narrow widths, move lower-priority commands into More rather than clipping the address bar or buttons.
-- [ ] Route toolbar, menus, and keyboard actions through the existing command handling. Preserve text-box editing behavior and restore list focus appropriately.
+- [x] View exposes sorting, hidden items, and preview visibility; additional view modes appear only when implemented.
+- [x] More exposes Copy as path, Select all, Show in Explorer, and the existing full Windows menu.
+- [x] Disable selection-dependent actions when unavailable. Give every button a readable label or tooltip and keyboard access.
+- [x] At narrow widths, move lower-priority commands into More rather than clipping the address bar or buttons.
+- [x] Route toolbar, menus, and keyboard actions through the existing command handling. Preserve text-box editing behavior and restore list focus appropriately.
 
 ### Settings
 
@@ -67,9 +67,9 @@ Expose existing settings first, grouped into these pages:
 | Startup | The saved folder used on the next launch; an explicit command-line folder continues to win |
 | Window | Saved position and size, maximized state, and a reset of window bounds |
 
-- [ ] Add Apply, OK, Cancel, and Restore defaults for preferences. Resetting preferences must not delete files.
-- [ ] Validate folder input and numeric sizes; unavailable folders follow the existing fallback behavior.
-- [ ] Preserve existing settings files, the old-name migration, atomic saves, and defaults for missing or malformed keys.
+- [x] Add Apply, OK, Cancel, and Restore defaults for preferences. Resetting preferences must not delete files.
+- [x] Validate folder input and numeric sizes; unavailable folders follow the existing fallback behavior.
+- [x] Preserve existing settings files, the old-name migration, atomic saves, and defaults for missing or malformed keys.
 - [ ] Apply live changes to open windows where appropriate; save through one owner so windows do not overwrite each other's settings.
 - [ ] Distinguish global defaults from current view/session state so changing a default does not unexpectedly reset another window.
 - [ ] Add controls for new split/preview dimensions when those features are implemented.
@@ -78,9 +78,9 @@ Font size, density, click behavior, custom key bindings, plugins, and other curr
 
 ### Shortcut guide
 
-- [ ] Open it through Help > Keyboard shortcuts and F1.
-- [ ] Group shortcuts into Navigation, Files, Search, Tabs/windows, and View.
-- [ ] Show action, keys, and scope, including cases where a key keeps its normal meaning in an edit box.
+- [x] Open it through Help > Keyboard shortcuts and F1.
+- [x] Group shortcuts into Navigation, Files, Search, Tabs/windows, and View.
+- [x] Show action, keys, and scope, including cases where a key keeps its normal meaning in an edit box.
 - [ ] Include every supported shortcut, including Ctrl+Shift+Tab, Shift+F10, Shift+Del, and the new split-pane commands when added.
 - [ ] Keep the guide consistent with actual command handling and menu labels. Once shared shortcut definitions exist, use them for the guide.
 - [ ] Make the guide keyboard navigable, readable in both themes, and usable at high DPI.
@@ -179,3 +179,12 @@ Use existing workers and Windows integrations rather than adding a dependency fo
 - Shortcut-arrow overlays stay deferred unless safe worker-based loading has a measured acceptable cost.
 - Plugins, cloud integrations, archive browsing, and an in-process Properties dialog remain outside this plan.
 - No release date is assumed. Stabilization comes first, followed by toolbar/settings/help, two-pane navigation, and the remaining polish.
+
+## Implementation results
+
+2026-10-11: toolbar, Settings pages, and F1 shortcut guide added. Clippy passed; 31 window tests passed,
+one SMB test was explicitly ignored and two clipboard-writing tests were excluded.
+The baseline 600-second stress run completed 11,713 UI actions and 213,177 file changes.
+Longest loop stall was 101.29 ms; growth after warm-up was handles -14, GDI 0, USER -1.
+Two individual early paint messages took 128 ms and 166 ms. A debug build ran during this test;
+repeat under quiet conditions after the remaining features. Startup first-paint measurements remain pending.

@@ -49,9 +49,11 @@ use crate::{crash, format, shell};
 
 mod commands;
 mod dark;
+mod dialogs;
 mod drag;
 mod preview;
 mod tabbar;
+pub mod toolbar;
 pub use commands::{
     CMD_COPY, CMD_COPY_PATH, CMD_CUT, CMD_DELETE, CMD_DELETE_PERMANENTLY, CMD_MORE_OPTIONS, CMD_NEW_FOLDER,
     CMD_OPEN, CMD_OPEN_NEW_TAB, CMD_PASTE, CMD_RENAME, CMD_SELECT_ALL, CMD_SHOW_IN_EXPLORER,
@@ -128,6 +130,8 @@ struct App {
     /// Filter box: narrows the list as you type; Enter searches subfolders.
     filter: HWND,
     buttons: [HWND; 3],
+    toolbar: Vec<HWND>,
+    startup_override: Option<Option<PathBuf>>,
     status: HWND,
     font: HFONT,
     browser: Browser,
@@ -171,9 +175,13 @@ struct App {
 }
 
 impl App {
-    fn controls(&self) -> [HWND; 9] {
+    fn controls(&self) -> Vec<HWND> {
         let [b0, b1, b2] = self.buttons;
-        [self.list, self.status, self.address, self.filter, self.tree, self.tab_strip, b0, b1, b2]
+        let mut controls =
+            vec![self.list, self.status, self.address, self.filter, self.tree, self.tab_strip, b0, b1, b2];
+        controls.extend(&self.toolbar);
+        controls.extend(preview::controls(&self.preview));
+        controls
     }
 }
 
@@ -250,7 +258,7 @@ pub fn init_process() -> Result<()> {
 unsafe fn child(
     parent: HWND,
     class: PCWSTR,
-    text: PCWSTR,
+    text: impl windows::core::Param<PCWSTR>,
     style: WINDOW_STYLE,
     ex: WINDOW_EX_STYLE,
     id: usize,
@@ -378,10 +386,12 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let tree = tree::create(hwnd)?;
         let tab_strip = tabbar::create(hwnd)?;
         let preview_pane = preview::create(hwnd)?;
+        let toolbar_buttons = toolbar::create(hwnd)?;
 
         let font = message_font(hwnd);
         set_font(&[list, status, address, filter, tree, tab_strip, buttons[0], buttons[1], buttons[2]], font);
         set_font(&preview::controls(&preview_pane), font);
+        set_font(&toolbar_buttons, font);
 
         let target = hwnd.0 as isize;
         let events = Arc::new(Events::new(move || {
@@ -403,6 +413,8 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 list,
                 address,
                 buttons,
+                toolbar: toolbar_buttons,
+                startup_override: None,
                 status,
                 font,
                 browser: {
@@ -447,6 +459,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         with_app(|a| a.drop_target = Some(target));
         // Owner-data lists keep only selection and focus; the drop highlight comes from `fill`.
         SendMessageW(list, LVM_SETCALLBACKMASK, Some(WPARAM(LVIS_DROPHILITED.0 as usize)), None);
+        let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener(hwnd);
         layout(hwnd);
         update_sort_arrows();
         preview::restore(hwnd, settings.preview);
@@ -475,6 +488,9 @@ pub fn run_message_loop() {
 /// App-wide keyboard shortcuts, checked before a message is dispatched.
 /// Returns true if the message was consumed. Call from every message loop.
 pub fn translate(msg: &MSG) -> bool {
+    if dialogs::translate(msg) {
+        return true;
+    }
     if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
         return false;
     }
@@ -485,7 +501,13 @@ fn on_key(msg: &MSG) -> bool {
     let Some((list, address, tree, filter)) = with_app(|a| (a.list, a.address, a.tree, a.filter)) else {
         return false;
     };
-    if ![list, address, tree, filter].contains(&msg.hwnd) {
+    if msg.message == WM_KEYDOWN && msg.wParam.0 == VK_F1.0 as usize {
+        if let Some(hwnd) = with_app(|a| a.hwnd) {
+            dialogs::shortcuts(hwnd);
+        }
+        return true;
+    }
+    if ![list, address, tree, filter].contains(&msg.hwnd) && !toolbar::owns(msg.hwnd) {
         return false;
     }
     let key = VIRTUAL_KEY(msg.wParam.0 as u16);
@@ -566,7 +588,14 @@ fn on_key(msg: &MSG) -> bool {
         VK_TAB if ctrl => tabbar::cycle(shift_held()),
         VK_TAB => unsafe {
             // Focus order: address bar, sidebar, list.
-            let order = [address, filter, tree, list];
+            let mut order = vec![address, filter];
+            order.extend(
+                with_app(|a| a.toolbar.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|&h| IsWindowVisible(h).as_bool() && IsWindowEnabled(h).as_bool()),
+            );
+            order.extend([tree, list]);
             let at = order.iter().position(|&h| h == msg.hwnd).unwrap_or(0);
             let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
             let next = if shift { (at + order.len() - 1) % order.len() } else { (at + 1) % order.len() };
@@ -610,7 +639,9 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     update_chrome();
                     return LRESULT(0);
                 }
-                let from_button = with_app(|a| a.buttons.iter().any(|b| b.0 as isize == from)) == Some(true);
+                let from_button =
+                    with_app(|a| a.buttons.iter().chain(a.toolbar.iter()).any(|b| b.0 as isize == from))
+                        == Some(true);
                 let ours = (from == 0 && code == 0) || (from_button && code == BN_CLICKED as usize);
                 if !ours {
                     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -619,10 +650,12 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     ID_BACK if from_button => run(Browser::back),
                     ID_FORWARD if from_button => run(Browser::forward),
                     ID_UP if from_button => run(Browser::up),
-                    id if from == 0 && commands::run(id) => {}
+                    id if (from == 0 || from_button) && (toolbar::execute(id) || commands::run(id)) => {}
                     _ => return DefWindowProcW(hwnd, msg, wp, lp),
                 }
-                if let Some(list) = with_app(|a| a.list) {
+                if !matches!(id, toolbar::SETTINGS | toolbar::SHORTCUTS | toolbar::HELP)
+                    && let Some(list) = with_app(|a| a.list)
+                {
                     let _ = SetFocus(Some(list));
                 }
                 LRESULT(0)
@@ -732,6 +765,10 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 commands::context_menu(hwnd, lp);
                 LRESULT(0)
             }
+            WM_CLIPBOARDUPDATE => {
+                toolbar::update();
+                LRESULT(0)
+            }
             WM_DEVICECHANGE => {
                 on_device_change(wp.0 as u32, lp);
                 LRESULT(1)
@@ -742,6 +779,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_DESTROY => {
+                let _ = windows::Win32::System::DataExchange::RemoveClipboardFormatListener(hwnd);
                 preview::shutdown();
                 if let Some(list) = with_app(|a| a.list) {
                     let _ = windows::Win32::System::Ole::RevokeDragDrop(list);
@@ -800,6 +838,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
                 Some(LRESULT(0))
             }
             LVN_ITEMCHANGED | LVN_ODSTATECHANGED => {
+                toolbar::update();
                 if let Some(main) = with_app(|a| a.hwnd) {
                     preview::selection_changed(main);
                 }
@@ -1054,7 +1093,7 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
             show_hidden: a.browser.show_hidden,
             split: Some(a.split),
             preview: preview::is_visible_in(a),
-            last_folder: a.browser.dir().map(Path::to_path_buf),
+            last_folder: a.startup_override.clone().unwrap_or_else(|| a.browser.dir().map(Path::to_path_buf)),
             theme: a.theme,
             ..Default::default()
         };
@@ -1404,6 +1443,7 @@ fn update_chrome() {
         }
         let _ = SetWindowTextW(hwnd, &HSTRING::from(format!("{title} - Kestrel")));
     }
+    toolbar::update();
     show_location();
     tabbar::update_label();
     if let Some(text) = with_app(|a| a.browser.status()) {
@@ -1487,7 +1527,8 @@ fn layout(hwnd: HWND) {
         let fw = scale(hwnd, 240).min((client.right / 3).max(0));
         let _ = MoveWindow(address, ax, pad, (client.right - ax - fw - 2 * pad).max(0), bar, true);
         let _ = MoveWindow(filter, client.right - fw - pad, pad, fw, bar, true);
-        let _ = MoveWindow(strip, 0, bar + 2 * pad, client.right, tab_height(hwnd), true);
+        toolbar::layout(hwnd, client.right);
+        let _ = MoveWindow(strip, 0, scale(hwnd, 68), client.right, tab_height(hwnd), true);
         let top = content_top(hwnd);
         let h = (client.bottom - (sr.bottom - sr.top) - top).max(0);
         let split = tree::clamp_split(split, client.right, GetDpiForWindow(hwnd));
@@ -1525,7 +1566,7 @@ fn tab_height(hwnd: HWND) -> i32 {
 
 /// Where the sidebar and list start: below the toolbar and the tab strip.
 fn content_top(hwnd: HWND) -> i32 {
-    scale(hwnd, 28) + 2 * scale(hwnd, 4) + tab_height(hwnd)
+    scale(hwnd, 68) + tab_height(hwnd)
 }
 
 fn shift_held() -> bool {
@@ -1551,4 +1592,53 @@ fn set_font(controls: &[HWND], font: HFONT) {
     for &c in controls {
         unsafe { SendMessageW(c, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1))) };
     }
+}
+
+fn apply_settings(hwnd: HWND, settings: Settings) {
+    let Some((list, job)) = with_app(|a| {
+        a.theme = settings.theme;
+        a.split = settings.split.unwrap_or(240);
+        a.startup_override = Some(settings.last_folder.clone());
+        a.browser.show_hidden = settings.show_hidden;
+        let job = a.browser.set_sort(settings.sort);
+        (a.list, job)
+    }) else {
+        return;
+    };
+    unsafe {
+        for (i, width) in settings.columns.iter().enumerate() {
+            SendMessageW(list, LVM_SETCOLUMNWIDTH, Some(WPARAM(i)), Some(LPARAM(*width as isize)));
+        }
+        if let Some((x, y, w, h)) = settings.window {
+            let r = RECT { left: x, top: y, right: x + w, bottom: y + h };
+            let monitor = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            let (x, y, w, h) = if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                let r = info.rcWork;
+                crate::settings::fit_window((x, y, w, h), (r.left, r.top, r.right, r.bottom))
+            } else {
+                (x, y, w, h)
+            };
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        let _ = ShowWindow(hwnd, if settings.maximized { SW_SHOWMAXIMIZED } else { SW_SHOWNOACTIVATE });
+    }
+    dark::apply(hwnd, Palette::new(settings.theme.is_dark(system_prefers_dark())));
+    if preview::is_visible() != settings.preview {
+        preview::toggle(hwnd);
+    }
+    if let Some(job) = job {
+        spawn_sort(job);
+    }
+    update_sort_arrows();
+    layout(hwnd);
+    let Some(events) = with_app(|a| a.events.clone()) else { return };
+    let saving = OpGuard::new();
+    spawn("settings", move || {
+        let _saving = saving;
+        if let Err(e) = settings.save_to(&Settings::file()) {
+            events.send(Event::Message(format!("Settings could not be saved: {e}")));
+        }
+    });
 }

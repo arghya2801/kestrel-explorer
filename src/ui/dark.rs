@@ -42,9 +42,17 @@ impl Drop for Brushes {
 
 /// Applies `palette` to the window and its controls.
 pub(super) fn apply(hwnd: HWND, palette: Palette) {
-    let Some((list, tree, strip, status, address, filter, buttons)) =
-        with_app(|a| (a.list, a.tree, a.tab_strip, a.status, a.address, a.filter, a.buttons))
-    else {
+    let Some((list, tree, strip, status, address, filter, buttons)) = with_app(|a| {
+        (
+            a.list,
+            a.tree,
+            a.tab_strip,
+            a.status,
+            a.address,
+            a.filter,
+            a.buttons.into_iter().chain(a.toolbar.iter().copied()).collect::<Vec<_>>(),
+        )
+    }) else {
         return;
     };
     let brushes = Brushes::new(&palette);

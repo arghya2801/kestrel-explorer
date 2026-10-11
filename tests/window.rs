@@ -1252,3 +1252,70 @@ fn window_text_of(h: HWND) -> String {
     let n = unsafe { GetWindowTextW(h, &mut buf) };
     String::from_utf16_lossy(&buf[..n as usize])
 }
+
+#[test]
+fn toolbar_commands_follow_selection_and_help_opens_with_f1() {
+    let _desktop = desktop();
+    let t = TempDir::new("toolbar");
+    std::fs::write(t.0.join("one.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["one.txt"]));
+    let copy = unsafe { GetDlgItem(Some(hwnd), ui::CMD_COPY as i32) }.unwrap();
+    assert!(!unsafe { IsWindowEnabled(copy) }.as_bool());
+    command(hwnd, ui::CMD_SELECT_ALL);
+    assert!(pump_until(WAIT, || unsafe { IsWindowEnabled(copy) }.as_bool()));
+    key(list, VK_F1);
+    let mut guide = HWND::default();
+    assert!(pump_until(WAIT, || {
+        guide = unsafe { FindWindowW(w!("KestrelShortcuts"), None) }.unwrap_or_default();
+        !guide.is_invalid()
+    }));
+    let edit = unsafe { GetDlgItem(Some(guide), 30) }.unwrap();
+    let mut buf = vec![0u16; 8192];
+    let n = unsafe { GetWindowTextW(edit, &mut buf) };
+    let text = String::from_utf16_lossy(&buf[..n as usize]);
+    assert!(text.contains("Shift+Delete") && text.contains("Ctrl+Shift+Tab") && text.contains("Text boxes"));
+    key(edit, VK_ESCAPE);
+    assert!(pump_until(WAIT, || !unsafe { IsWindow(Some(guide)) }.as_bool()));
+    close(hwnd);
+}
+
+#[test]
+fn settings_validate_apply_and_cancel_without_losing_preferences() {
+    let _desktop = desktop();
+    use kestrel::settings::Settings;
+    use kestrel::theme::ThemeChoice;
+    let t = TempDir::new("preferences");
+    ui::init_process().unwrap();
+    let hwnd =
+        ui::create_main_window(&t.0, &Settings { theme: ThemeChoice::Light, ..Default::default() }).unwrap();
+    command(hwnd, ui::toolbar::SETTINGS);
+    let dialog = unsafe { FindWindowW(w!("KestrelSettings"), None) }.unwrap();
+    let field = |id| unsafe { GetDlgItem(Some(dialog), id) }.unwrap();
+    unsafe {
+        SendMessageW(field(10), CB_SETCURSEL, Some(WPARAM(2)), None);
+        SetWindowTextW(field(11), w!("invalid")).unwrap();
+    }
+    command(dialog, 3);
+    assert!(window_text_of(field(26)).contains("whole number"));
+    assert_eq!(unsafe { SendMessageW(list_of(hwnd), LVM_GETBKCOLOR, None, None) }.0, 0x00ffffff);
+    unsafe {
+        SetWindowTextW(field(11), w!("300")).unwrap();
+        SendMessageW(field(13), BM_SETCHECK, Some(WPARAM(BST_CHECKED.0 as usize)), None);
+    }
+    command(dialog, 3);
+    assert_eq!(unsafe { SendMessageW(list_of(hwnd), LVM_GETBKCOLOR, None, None) }.0, 0x00202020);
+    assert_eq!(window_text_of(field(26)), "Settings applied.");
+    command(dialog, 4); // Restore defaults edits the form, not the running app.
+    command(dialog, IDCANCEL.0 as usize);
+    assert!(!unsafe { IsWindow(Some(dialog)) }.as_bool());
+    close(hwnd);
+    let saved = ui::take_final_settings().unwrap();
+    assert_eq!(saved.theme, ThemeChoice::Dark);
+    assert_eq!(saved.split, Some(300));
+    assert!(saved.show_hidden);
+    while ui::running_operations() > 0 {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}

@@ -23,6 +23,7 @@ block (disk, network, shell extensions) runs off the UI thread.
 - Tabs, plus side-by-side windows
 - Preview pane for text, images and anything with a Windows preview handler
 - Windows' full right-click menu (Shift+right-click), run in a helper process
+- Command toolbar, Settings pages, and an in-app keyboard shortcut guide
 - Dark mode that follows Windows
 - `\\server` in the address bar lists a computer's shared folders
 - Remembers window size, columns, sort, sidebar width and last folder
@@ -48,6 +49,7 @@ block (disk, network, shell extensions) runs off the UI thread.
 | Ctrl+T / Ctrl+W / Ctrl+Tab | New tab / close tab / next tab |
 | Ctrl+N | New window, side by side |
 | Alt+P | Preview pane |
+| F1 | Keyboard shortcut guide |
 | Shift+right-click | Windows' full right-click menu |
 
 ## How it stays responsive
