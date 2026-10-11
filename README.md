@@ -2,125 +2,137 @@
 
 <h1 align="center">Kestrel</h1>
 
-<p align="center">A small, fast Windows file explorer that doesn't freeze.<br>
-Rust and plain Win32, one 800 KB exe, no runtime.</p>
+<p align="center">A Windows file explorer built with Rust and Win32.<br>
+One executable, no separate runtime.</p>
 
----
-
-Kestrel opens in about 150 ms, uses around 25 MB of memory, and keeps its window responsive while
-a network drive is dead, a folder holds 200,000 files, or a copy is running. Everything that can
-block (disk, network, shell extensions) runs off the UI thread.
+Kestrel keeps folder listing, search, file operations and icon loading on background workers.
+Browse independent folders side by side, switch between tabs, and use Windows' own file operations
+and shell integrations. See [ROADMAP.md](ROADMAP.md) for measured startup, size and stress results.
 
 ## Features
 
-- Fast folder listing with Explorer-style natural sort ("file2" before "file10"), folders first
-- Address bar, Back / Forward / Up, sidebar with Quick access and drives
-- Live updates when files change on disk
-- Copy, cut, paste, rename, delete to Recycle Bin, new folder, all through Windows' own file
-  operations, and the clipboard works both ways with Explorer
-- Drag and drop with other apps
-- Filter the current folder as you type, or search all subfolders
-- Tabs, plus side-by-side windows
-- Preview pane for text, images and anything with a Windows preview handler
-- Windows' full right-click menu (Shift+right-click), run in a helper process
-- Command toolbar, Settings pages, and an in-app keyboard shortcut guide
-- Dark mode that follows Windows
-- `\\server` in the address bar lists a computer's shared folders
-- Remembers window size, columns, sort, sidebar width and last folder
+- Natural sorting, live folder updates, current-folder filtering and recursive search
+- Two independent folder panes in one window, tabs, and additional windows
+- Breadcrumb navigation, editable addresses, Quick access pins, recent folders, drives and Network
+- A command toolbar below the address bar, with overflow commands under More
+- Details and thumbnail grid views, hidden-item toggle, adjustable sidebar and preview widths
+- Text, image and Windows preview-handler previews
+- Copy, cut, paste, rename, recycle, permanent delete, new folder and drag/drop
+- Windows' full shell context menu through a separate helper process
+- Settings pages, light/dark/system themes, and an in-app keyboard shortcut guide
+- Session restoration for tabs, folder panes and window layouts
+- An operation-status window and Open terminal here
+
+## Using the new controls
+
+Choose **Split** or press **Ctrl+Shift+S** for two folder panes. **F6** focuses the other pane.
+Each pane keeps its folder, history, selection, sorting and filter. The shared address bar, sidebar,
+toolbar and preview follow the active pane. Each tab remembers its panes; drag the center divider
+to change their widths. Turning Split off preserves the second pane for reopening.
+
+**View** offers Details, Thumbnail grid, sorting, hidden items and preview visibility.
+**More** includes pin/unpin, recent folders, parent folders, Open terminal here and File operations.
+Click a breadcrumb to visit an ancestor; use **Edit** or **Ctrl+L** to type a path.
+The terminal command opens Windows PowerShell in the active folder.
+File operations shows running jobs and recent results for this process; Windows supplies progress
+and cancellation dialogs.
+
+**Settings** has four pages:
+
+| Page | Controls |
+|---|---|
+| Appearance | Theme, sidebar width, preview visibility/width, split layout and pane ratio |
+| File list | Details/grid, hidden items, sort column/direction and all four column widths |
+| Startup | Startup folder and session restoration |
+| Window | Saved position, size and maximized state |
+
+Apply saves changes, OK applies and closes, and Cancel discards edits made since the last Apply.
+Restore defaults resets preferences. Theme and pins apply across open windows; view and layout
+changes apply to the current view/window. Unsupported preferences such as custom key bindings,
+font size and plugins are not offered.
+
+Settings and logs live in %LOCALAPPDATA%\Kestrel. Settings from the old FileExplorerPro directory
+migrate once. Session restoration runs after a normal exit. Secondary windows still open when the
+original window closes are included; close a secondary window first to omit it from the next session.
+A command-line folder bypasses restoration. Restart restores folders and layout, while navigation
+history and selections remain specific to the running session.
 
 ## Keyboard
+
+Press **F1**, or choose **Help > Keyboard shortcuts**, for the in-app guide.
 
 | Keys | Action |
 |---|---|
 | Enter, double-click | Open |
 | Backspace, Alt+Left / Alt+Right | Back / Forward |
-| Alt+Up | Up one folder |
-| Ctrl+L, Alt+D, F4 | Address bar |
-| Ctrl+F | Filter; Enter in the filter searches subfolders |
-| Esc | Stop loading or searching, clear the filter |
-| F5 | Refresh |
-| Ctrl+H | Show hidden items |
+| Alt+Up | Parent folder |
+| Ctrl+L, Alt+D, F4 | Edit address |
+| Ctrl+F | Filter; Enter searches subfolders |
+| Esc | Cancel loading/search; clear the focused filter or restore the address |
+| F5 / Ctrl+H | Refresh / show hidden items |
 | F2 | Rename |
 | Del / Shift+Del | Recycle / delete permanently |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste |
-| Ctrl+Shift+N | New folder |
-| Ctrl+Shift+C | Copy as path |
+| Ctrl+Shift+N / Ctrl+Shift+C | New folder / copy paths |
 | Ctrl+A | Select all |
-| Ctrl+T / Ctrl+W / Ctrl+Tab | New tab / close tab / next tab |
+| Ctrl+T / Ctrl+W | New tab / close tab |
+| Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+N | New window, side by side |
-| Alt+P | Preview pane |
-| F1 | Keyboard shortcut guide |
-| Shift+right-click | Windows' full right-click menu |
+| Ctrl+Shift+S / F6 | Toggle split / focus the other pane |
+| Alt+P | Toggle preview |
+| Tab / Shift+Tab | Next / previous control |
+| Shift+F10, Menu key | Context menu |
+| Shift+right-click | Full Windows context menu |
 
-## How it stays responsive
-
-- **The UI thread never waits on disk, network or the shell.** Listings, searches, icons, file
-  operations and clipboard reads run on worker threads and report back through a message queue.
-  A folder on a dead network share shows "Loading…", and Esc abandons it.
-- **Third-party shell extensions stay out of the process.** Right-click menu handlers run in a
-  short-lived helper copy of Kestrel, and preview handlers in Windows' own preview host. A buggy
-  extension can crash those, not your window.
-- **Crashes are caught and recorded.** Panics in callbacks are contained, native crashes write a
-  minidump, and a watchdog records a dump if the window ever stops responding
-  (`%LOCALAPPDATA%\Kestrel\crashes`).
-- **Moves are never half done.** Closing the window while files are copying keeps the process
-  alive until the copy finishes.
+Text boxes keep their normal editing shortcuts.
 
 ## Build
 
-Requires Windows 10/11, Rust (stable, MSVC toolchain) and the Visual Studio Build Tools.
+Requires Windows 10/11, Rust stable with the MSVC toolchain, and Visual Studio Build Tools.
 
-```
+~~~powershell
 cargo build --release
 target\release\kestrel.exe [folder]
-```
+~~~
 
-## Tests
+Closing the windows leaves the process running until pending copies and moves finish.
+Shell context-menu handlers run in a helper process, and preview handlers use Windows' preview host.
+Crash logs and watchdog dumps are written under %LOCALAPPDATA%\Kestrel.
 
-```
+## Tests and measurements
+
+~~~powershell
 cargo test
-```
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+cargo run --release --example startup -- 7
+cargo run --release --example bench -- C:\Windows\System32
+cargo run --release --example stress -- 600
+~~~
 
-Unit tests cover the logic (listing, sorting, navigation, file operations, clipboard, search,
-settings…). `tests/window.rs` drives the real window: it sends the input a user would and waits
-for the background work to show up.
+Unit tests cover navigation, listing, settings, sessions, file operations and worker behavior.
+Window tests drive real Win32 controls. Clipboard tests write the desktop clipboard, and focus tests
+should run while the desktop is idle. SMB administrative-share tests are opt-in and require a
+readable localhost C$ share:
 
-The localhost administrative-share tests are opt-in: run `cargo test -- --ignored` on a machine
-with localhost SMB access and a readable administrative share named C$. Clipboard tests use the
-desktop clipboard; focus-dependent tests should run while the desktop is idle.
+~~~powershell
+cargo test --lib this_computers_disk_shares_are_listed -- --ignored
+cargo test --test window a_computer_lists_its_shares_and_up_returns_to_them -- --ignored
+~~~
 
-Other tools:
+The ignored executable-icon and visual-capture diagnostics can be run separately.
+[HANDOFF.md](HANDOFF.md) records exact checks, exclusions and remaining release work.
 
-```
-cargo run --release --example bench -- C:\Windows\System32   # listing and sorting speed
-cargo run --release --example stress -- 600                  # 10 minutes of churn and random use
-```
+## Source layout
 
-## Layout
-
-| Path | What |
+| Path | Responsibility |
 |---|---|
-| `src/listing.rs`, `sort.rs`, `search.rs` | Reading folders, ordering, searching |
-| `src/browser.rs` | Navigation state and history, independent of any window |
-| `src/ops.rs`, `clip.rs`, `dnd.rs` | File operations, clipboard, drag and drop |
-| `src/watch.rs` | Folder change watcher |
-| `src/ui.rs`, `src/ui/` | The window: list, sidebar, tabs, preview pane, menus, dark mode |
-| `res/make_icon.py` | Draws the app icon |
+| src/listing.rs, sort.rs, search.rs | Reading folders, sorting and searching |
+| src/browser.rs | Navigation and history |
+| src/ops.rs, clip.rs, dnd.rs, activity.rs | File operations, clipboard, drag/drop and operation status |
+| src/settings.rs, session.rs | Preferences and session persistence |
+| src/watch.rs | Folder change notifications |
+| src/ui.rs, src/ui/ | Window, panes, tabs, sidebar, toolbar, dialogs, thumbnails and previews |
+| res/make_icon.py | Application icon |
 
-[ROADMAP.md](ROADMAP.md) has the design decisions and historical measurements.
-[HANDOFF.md](HANDOFF.md) records known gaps; [PLAN.md](PLAN.md) organizes the remaining work and planned features.
-
-Two folder panes: use **Split** or **Ctrl+Shift+S**; **F6** focuses the other pane. Each pane keeps its
-folder, history, selection and filter. Tabs remember both panes. Drag the center or preview divider
-to resize; layout defaults are also available in Settings.
-
-Startup settings can restore tabs and windows. Secondary windows still open when the original
-window closes are restored with it; close a secondary window first to leave it out of the next session.
-A command-line folder opens directly instead of restoring a saved session. Theme changes apply to
-all open windows; sorting, filters and layout apply to the current view/window.
-
-Use **View → Thumbnail grid** for image browsing, or choose Details for columns. **More** includes
-pin/unpin, recent folders, parent folders, Open terminal here (Windows PowerShell), and File operations.
-Click an address breadcrumb to visit an ancestor; use **Edit** or **Ctrl+L** to type a path.
-File operations shows running jobs and recent results for this session; Windows provides progress
-and cancellation dialogs.
+[PLAN.md](PLAN.md) tracks implementation and verification.

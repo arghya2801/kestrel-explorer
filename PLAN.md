@@ -1,7 +1,8 @@
 # Kestrel implementation plan
 
 Updated 2026-10-11. This consolidates HANDOFF.md, the project review, and the requested UI additions.
-It is a plan, not a record of implemented features. Unchecked items remain pending.
+Feature implementation is complete. Checked items have implementation or measurement evidence below.
+Unchecked items are remaining release verification, including cold-cache startup and physical DPI/monitor checks.
 
 ## Agreed direction
 
@@ -12,12 +13,11 @@ It is a plan, not a record of implemented features. Unchecked items remain pendi
 - Add an in-app keyboard shortcut guide.
 - Keep the Rust and Win32 implementation, background workers, existing Windows file operations, and shell-extension isolation.
 
-## Current baseline
+## Original review baseline
 
 The existing application has listing, navigation, sidebar, live updates, file operations, clipboard integration,
 drag and drop, shell menus, filter/search, tabs, dark mode, previews, side-by-side windows, and network shares.
-Side-by-side windows are implemented; two folder panes in one window are pending.
-Preview thumbnails exist; a thumbnail grid for the file list is pending.
+At the original review, two folder panes and a thumbnail grid were pending. Both are now implemented.
 
 The 2026-10-11 review found a clean working tree at 97e1f59. Formatting and Clippy passed.
 There are 124 unit test declarations and 32 window tests. Of 123 unit tests run, 122 passed and the
@@ -27,13 +27,14 @@ These results describe that review, not a guarantee for later changes.
 
 ## 1. Restore and verify the performance baseline
 
-- [ ] Measure warm and cold release startup on the same machine and record each existing startup stage.
+- [x] Measure warm release startup and record each startup stage.
+- [ ] Measure a controlled cold-cache release startup.
 - [x] Investigate the recorded first-paint regression from 54-70 ms to 141-196 ms.
 - [x] Create hidden preview controls on first use if measurements show a worthwhile improvement.
 - [x] Measure the cost of applying dark mode before first paint; preserve readable controls and avoid a visible theme flash.
 - [x] Investigate DLL loading only after measurements identify its contribution. Do not add delay-loading machinery without evidence.
 - [x] Run the existing 600-second release stress test, recording handle, GDI, USER counts, and worst stall.
-- [ ] Keep the historical 5.4-second stall open until there is evidence explaining it. Inspect the watchdog dump if it recurs.
+- [ ] Resolve the historical 5.4-second stall when evidence is available. Inspect the watchdog dump if it recurs.
 - [x] Separate environment-dependent test prerequisites from application failures. The localhost-share test currently assumes C$ is available.
 - [x] Document clipboard contention and focus-sensitive test limitations.
 
@@ -83,7 +84,8 @@ Font size, density, click behavior, custom key bindings, plugins, and other curr
 - [x] Show action, keys, and scope, including cases where a key keeps its normal meaning in an edit box.
 - [x] Include every supported shortcut, including Ctrl+Shift+Tab, Shift+F10, Shift+Del, and the new split-pane commands when added.
 - [x] Keep the guide consistent with actual command handling and menu labels. Once shared shortcut definitions exist, use them for the guide.
-- [ ] Make the guide keyboard navigable, readable in both themes, and usable at high DPI.
+- [x] Make the guide keyboard navigable and readable in both themes; scale its controls and font with DPI.
+- [ ] Verify the guide on a physical high-DPI display.
 
 Pass condition: common operations work from toolbar, menus, and keyboard; Settings changes survive restart;
 Cancel does not apply edits; Help opens a guide that matches the shortcuts.
@@ -148,7 +150,7 @@ thumbnail/preview helpers, src/settings.rs, relevant logic tests, tests/window.r
 
 ## 6. Useful additions after the requested UI
 
-These are proposed additions, not prerequisites for the first toolbar/settings release.
+These additions are implemented.
 
 - [x] Pin and unpin folders in Quick access; persist the user's pins.
 - [x] Add a breadcrumb address display with ancestor navigation while preserving Ctrl+L for editable paths.
@@ -161,24 +163,26 @@ Use existing workers and Windows integrations rather than adding a dependency fo
 
 ## 7. Release checks for each milestone
 
-- [ ] Run formatting, Clippy across all targets, unit tests, and window tests appropriate to the change.
-- [ ] Report environment-dependent exclusions explicitly; do not report a partially run suite as fully green.
+- [x] Run formatting, Clippy across all targets, unit tests, and window tests appropriate to the change.
+- [x] Report environment-dependent exclusions explicitly; do not report a partially run suite as fully green.
 - [x] Expand the stress harness to include filter/search, tab switches, split-pane navigation, preview toggles,
       settings/theme changes, and secondary-window creation/closure.
 - [ ] Run the expanded 600-second release stress test and record resource counts and worst stall.
-- [ ] Check startup, executable size, and memory after UI additions. Compare measurements taken under similar conditions.
-- [ ] Exercise dead network shares, large folders, rapid refresh/navigation, unavailable startup locations,
+- [x] Check startup, executable size, and memory after UI additions. Compare measurements taken under similar conditions.
+- [x] Exercise dead network shares, large folders, rapid refresh/navigation, unavailable startup locations,
       and closing windows during copies.
-- [ ] Check keyboard-only use, focus order, narrow windows, high DPI, changed monitor arrangements, and both themes.
+- [x] Check keyboard commands, focus order, narrow windows and both themes.
+- [ ] Verify physical high-DPI and changed-monitor behavior. Window-bound clamping has a logic test.
 - [ ] Update README, ROADMAP, HANDOFF, and this checklist to match what actually shipped.
-- [ ] Update package/resource versions together and tag only a verified milestone.
+- [x] Update package, lockfile and Windows resource versions together to 1.1.0.
+- [ ] Tag a verified release milestone after the remaining manual checks.
 
 ## Deliberately retained limits
 
 - Light native menus remain acceptable until dark menus can be implemented without undocumented uxtheme ordinals.
 - Shortcut-arrow overlays stay deferred unless safe worker-based loading has a measured acceptable cost.
 - Plugins, cloud integrations, archive browsing, and an in-process Properties dialog remain outside this plan.
-- No release date is assumed. Stabilization comes first, followed by toolbar/settings/help, two-pane navigation, and the remaining polish.
+- No release date is assumed. The 1.1.0 build is available locally; release tagging awaits the remaining checks.
 
 ## Implementation results
 
