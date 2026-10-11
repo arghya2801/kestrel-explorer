@@ -22,7 +22,7 @@ use crate::dnd::{self, MOVE, NONE};
 pub(super) fn begin_drag() {
     let rows = selected_rows();
     let Some((list, paths)) = with_app(|a| {
-        (a.list, rows.iter().filter_map(|&r| a.browser.path_at(r).map(|p| p.0)).collect::<Vec<_>>())
+        (a.view.list, rows.iter().filter_map(|&r| a.view.browser.path_at(r).map(|p| p.0)).collect::<Vec<_>>())
     }) else {
         return;
     };
@@ -63,10 +63,10 @@ impl DropTarget {
         .0;
         let paths = self.paths.borrow();
         let (row, target) = with_app(|a| {
-            let over = usize::try_from(row).ok().and_then(|r| a.browser.path_at(r).map(|p| (r, p)));
+            let over = usize::try_from(row).ok().and_then(|r| a.view.browser.path_at(r).map(|p| (r, p)));
             match over {
                 Some((r, (dir, true))) if !paths.contains(&dir) => (Some(r), Some(dir)),
-                _ => (None, a.browser.dir().map(|d| d.to_path_buf())),
+                _ => (None, a.view.browser.dir().map(|d| d.to_path_buf())),
             }
         })
         .unwrap_or((None, None));
@@ -79,7 +79,7 @@ impl DropTarget {
 
 /// Highlights the folder row a drop would go into (`None`: no row).
 fn set_drop_row(list: HWND, row: Option<usize>) {
-    let Some(old) = with_app(|a| std::mem::replace(&mut a.drop_row, row)) else { return };
+    let Some(old) = with_app(|a| std::mem::replace(&mut a.view.drop_row, row)) else { return };
     if old == row {
         return;
     }

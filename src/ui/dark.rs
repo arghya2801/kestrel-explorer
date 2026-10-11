@@ -44,7 +44,7 @@ impl Drop for Brushes {
 pub(super) fn apply(hwnd: HWND, palette: Palette) {
     let Some((list, tree, strip, status, address, filter, buttons)) = with_app(|a| {
         (
-            a.list,
+            a.view.list,
             a.tree,
             a.tab_strip,
             a.status,

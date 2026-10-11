@@ -73,7 +73,9 @@ pub(super) fn layout(parent: HWND, width: i32) {
 pub(super) fn enabled(id: usize) -> bool {
     use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
     use windows::Win32::System::Ole::CF_HDROP;
-    let Some((list, has_folder)) = with_app(|a| (a.list, a.browser.dir().is_some())) else { return false };
+    let Some((list, has_folder)) = with_app(|a| (a.view.list, a.view.browser.dir().is_some())) else {
+        return false;
+    };
     match id {
         commands::CMD_CUT
         | commands::CMD_COPY
@@ -101,7 +103,7 @@ pub(super) fn execute(id: usize) -> bool {
     match id {
         REFRESH => run(Browser::refresh),
         HIDDEN => {
-            if let Some(job) = with_app(|a| a.browser.toggle_hidden()).flatten() {
+            if let Some(job) = with_app(|a| a.view.browser.toggle_hidden()).flatten() {
                 spawn_sort(job);
             }
         }
@@ -113,11 +115,14 @@ pub(super) fn execute(id: usize) -> bool {
                     SORT_DATE => SortKey::Modified,
                     SORT_TYPE => SortKey::Type,
                     SORT_SIZE => SortKey::Size,
-                    _ => a.browser.sort.key,
+                    _ => a.view.browser.sort.key,
                 };
-                let descending =
-                    if id == DESCENDING { !a.browser.sort.descending } else { a.browser.sort.descending };
-                a.browser.set_sort(crate::sort::Sort { key, descending })
+                let descending = if id == DESCENDING {
+                    !a.view.browser.sort.descending
+                } else {
+                    a.view.browser.sort.descending
+                };
+                a.view.browser.set_sort(crate::sort::Sort { key, descending })
             })
             .flatten();
             if let Some(job) = job {
@@ -144,9 +149,9 @@ fn popup(hwnd: HWND, kind: usize) {
         };
         match kind {
             VIEW => {
-                let Some((sort, hidden, preview)) =
-                    with_app(|a| (a.browser.sort, a.browser.show_hidden, preview::is_visible_in(a)))
-                else {
+                let Some((sort, hidden, preview)) = with_app(|a| {
+                    (a.view.browser.sort, a.view.browser.show_hidden, preview::is_visible_in(a))
+                }) else {
                     let _ = DestroyMenu(menu);
                     return;
                 };

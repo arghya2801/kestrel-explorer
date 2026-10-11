@@ -83,7 +83,9 @@ fn label_for(b: &Browser) -> String {
 
 /// Refreshes the active tab's label.
 pub(super) fn update_label() {
-    if let Some((strip, index, text)) = with_app(|a| (a.tab_strip, a.tabs.active(), label_for(&a.browser))) {
+    if let Some((strip, index, text)) =
+        with_app(|a| (a.tab_strip, a.tabs.active(), label_for(&a.view.browser)))
+    {
         set_label(strip, index, &text);
     }
 }
@@ -94,8 +96,8 @@ pub(super) fn new_tab(dir: Option<PathBuf>) {
         let id = a.next_tab_id;
         a.next_tab_id += 1;
         let mut b = Browser::with_generation_base(generation_base(id));
-        (b.sort, b.show_hidden) = (a.browser.sort, a.browser.show_hidden);
-        let dir = dir.or_else(|| a.browser.dir().map(Path::to_path_buf));
+        (b.sort, b.show_hidden) = (a.view.browser.sort, a.view.browser.show_hidden);
+        let dir = dir.or_else(|| a.view.browser.dir().map(Path::to_path_buf));
         let from = a.tabs.active();
         let slot = TabSlot { browser: Some(b), ..TabSlot::active(id) };
         let index = a.tabs.open(slot);
@@ -145,7 +147,8 @@ pub(super) fn cycle(back: bool) {
 }
 
 pub(super) fn switch_to(to: usize) {
-    let Some((list, strip, from, len)) = with_app(|a| (a.list, a.tab_strip, a.tabs.active(), a.tabs.len()))
+    let Some((list, strip, from, len)) =
+        with_app(|a| (a.view.list, a.tab_strip, a.tabs.active(), a.tabs.len()))
     else {
         return;
     };
@@ -161,9 +164,9 @@ pub(super) fn switch_to(to: usize) {
         let lister = incoming.lister.take();
         let cancel = incoming.lister_cancel.clone();
         let (in_sel, in_top) = (std::mem::take(&mut incoming.selected), incoming.top);
-        let out_browser = std::mem::replace(&mut a.browser, browser);
-        let out_lister = std::mem::replace(&mut a.lister, lister);
-        let out_cancel = std::mem::replace(&mut a.lister_cancel, cancel);
+        let out_browser = std::mem::replace(&mut a.view.browser, browser);
+        let out_lister = std::mem::replace(&mut a.view.lister, lister);
+        let out_cancel = std::mem::replace(&mut a.view.lister_cancel, cancel);
         let outgoing = &mut a.tabs.items_mut()[from];
         (outgoing.browser, outgoing.lister, outgoing.lister_cancel) =
             (Some(out_browser), out_lister, out_cancel);
@@ -185,13 +188,13 @@ pub(super) fn switch_to(to: usize) {
             SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(top.min(count - 1))), Some(LPARAM(0)));
         }
     }
-    if with_app(|a| a.browser.dir().is_some()) == Some(true) {
+    if with_app(|a| a.view.browser.dir().is_some()) == Some(true) {
         watch_current();
     }
     update_sort_arrows();
     update_chrome();
     // Catch up on changes made while the tab was in the background.
-    if let Some(job) = with_app(|a| a.browser.on_dir_changed()).flatten() {
+    if let Some(job) = with_app(|a| a.view.browser.on_dir_changed()).flatten() {
         spawn_list(job);
     }
 }

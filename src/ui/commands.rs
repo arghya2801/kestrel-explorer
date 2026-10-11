@@ -62,16 +62,16 @@ pub(super) fn run(cmd: usize) -> bool {
 }
 
 fn current_dir() -> Option<PathBuf> {
-    with_app(|a| a.browser.dir().map(|d| d.to_path_buf())).flatten()
+    with_app(|a| a.view.browser.dir().map(|d| d.to_path_buf())).flatten()
 }
 
 fn selected_paths() -> Vec<(PathBuf, bool)> {
     let rows = selected_rows();
-    with_app(|a| rows.iter().filter_map(|&r| a.browser.path_at(r)).collect()).unwrap_or_default()
+    with_app(|a| rows.iter().filter_map(|&r| a.view.browser.path_at(r)).collect()).unwrap_or_default()
 }
 
 fn list() -> Option<HWND> {
-    with_app(|a| a.list)
+    with_app(|a| a.view.list)
 }
 
 /// Shows the right-click menu for the list at `lp` (screen coordinates, or -1 from the keyboard).
@@ -274,12 +274,12 @@ pub(super) fn on_op_done(result: Result<Option<String>, String>, edit: bool) {
             // The watcher would notice too; refreshing now makes the result show up at once.
             let job = with_app(|a| {
                 if let Some(name) = name {
-                    a.browser.select_after_refresh(&name);
+                    a.view.browser.select_after_refresh(&name);
                     if edit {
-                        a.edit_pending = Some(name);
+                        a.view.edit_pending = Some(name);
                     }
                 }
-                a.browser.on_dir_changed()
+                a.view.browser.on_dir_changed()
             });
             if let Some(job) = job.flatten() {
                 spawn_list(job);
@@ -292,10 +292,10 @@ pub(super) fn on_op_done(result: Result<Option<String>, String>, edit: bool) {
 /// After the list shows new contents: start renaming a just-created item.
 pub(super) fn after_refresh() {
     let Some((list, row)) = with_app(|a| {
-        let name: Vec<u16> = a.edit_pending.as_ref()?.encode_utf16().collect();
-        let row = a.browser.row_named(&name)?;
-        a.edit_pending = None;
-        Some((a.list, row))
+        let name: Vec<u16> = a.view.edit_pending.as_ref()?.encode_utf16().collect();
+        let row = a.view.browser.row_named(&name)?;
+        a.view.edit_pending = None;
+        Some((a.view.list, row))
     })
     .flatten() else {
         return;
@@ -319,15 +319,15 @@ pub(super) fn begin_rename(lp: LPARAM) -> LRESULT {
     let row = unsafe { (*(lp.0 as *const NMLVDISPINFOW)).item.iItem };
     let Some(list) = list() else { return LRESULT(1) };
     // Search results show paths relative to the searched folder: rename in the folder itself.
-    if with_app(|a| a.browser.query().is_some()) == Some(true) {
+    if with_app(|a| a.view.browser.query().is_some()) == Some(true) {
         return LRESULT(1);
     }
     let Some((path, is_dir)) =
-        usize::try_from(row).ok().and_then(|r| with_app(|a| a.browser.path_at(r)).flatten())
+        usize::try_from(row).ok().and_then(|r| with_app(|a| a.view.browser.path_at(r)).flatten())
     else {
         return LRESULT(1); // nothing there: don't edit
     };
-    with_app(|a| a.renaming = Some(path.clone()));
+    with_app(|a| a.view.renaming = Some(path.clone()));
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let stem = match name.rfind('.') {
         Some(dot) if dot > 0 && !is_dir => name[..dot].encode_utf16().count(),
@@ -345,9 +345,9 @@ pub(super) fn begin_rename(lp: LPARAM) -> LRESULT {
 /// runs as a file operation and the refresh shows the result.
 pub(super) fn end_rename(lp: LPARAM) -> LRESULT {
     let item = unsafe { &(*(lp.0 as *const NMLVDISPINFOW)).item };
-    let Some((path, resync, events)) =
-        with_app(|a| (a.renaming.take(), std::mem::take(&mut a.resync_after_rename), a.events.clone()))
-    else {
+    let Some((path, resync, events)) = with_app(|a| {
+        (a.view.renaming.take(), std::mem::take(&mut a.view.resync_after_rename), a.events.clone())
+    }) else {
         return LRESULT(0);
     };
     if resync {
@@ -362,7 +362,7 @@ pub(super) fn end_rename(lp: LPARAM) -> LRESULT {
         Err(e) => set_status(&e),
         Ok(name) if path.file_name().is_some_and(|n| n.to_string_lossy() == name) => {}
         Ok(name) => {
-            with_app(|a| a.browser.select_after_refresh(&name));
+            with_app(|a| a.view.browser.select_after_refresh(&name));
             start_op(Op::Rename { path, name }, false);
         }
     }

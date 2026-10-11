@@ -51,6 +51,7 @@ mod commands;
 mod dark;
 mod dialogs;
 mod drag;
+mod panes;
 mod preview;
 mod tabbar;
 pub mod toolbar;
@@ -125,21 +126,15 @@ enum Event {
 
 struct App {
     hwnd: HWND,
-    list: HWND,
+    view: panes::FolderView,
     address: HWND,
-    /// Filter box: narrows the list as you type; Enter searches subfolders.
     filter: HWND,
     buttons: [HWND; 3],
     toolbar: Vec<HWND>,
     startup_override: Option<Option<PathBuf>>,
     status: HWND,
     font: HFONT,
-    browser: Browser,
     events: Arc<Events<Event>>,
-    /// Thread listing the folder being loaded, so Esc can cancel its blocking I/O.
-    lister: Option<JoinHandle<()>>,
-    /// Tells a running search to stop.
-    lister_cancel: Arc<std::sync::atomic::AtomicBool>,
     tabs: Tabs<tabbar::TabSlot>,
     tab_strip: HWND,
     next_tab_id: u64,
@@ -150,35 +145,26 @@ struct App {
     live_listers: Arc<AtomicUsize>,
     tree: HWND,
     nodes: Vec<tree::Node>,
-    /// Sidebar width in pixels.
     split: i32,
-    /// While dragging the splitter: where in the gap it was grabbed.
     drag_offset: Option<i32>,
-    icons: Icons,
-    /// Watcher for the folder on screen, with its id; events from older ids are ignored.
-    watcher: Option<(u64, Watcher)>,
     watch_ids: u64,
-    /// Device notification for the watched folder's handle, and that handle.
-    device_note: Option<(isize, isize)>,
-    /// The sidebar's "This PC" node, whose children are the drives.
     this_pc: usize,
-    /// Name of a just-created item to start renaming once it shows up.
-    edit_pending: Option<String>,
-    /// The item whose name is being edited in place. Kept as a path: rows can
-    /// move under the edit box if the folder changes meanwhile.
-    renaming: Option<PathBuf>,
-    /// The folder changed during the rename; sync the list once the box closes.
-    resync_after_rename: bool,
-    /// Folder row highlighted as the destination of a drag in progress.
-    drop_row: Option<usize>,
-    drop_target: Option<windows::Win32::System::Ole::IDropTarget>,
 }
 
 impl App {
     fn controls(&self) -> Vec<HWND> {
         let [b0, b1, b2] = self.buttons;
-        let mut controls =
-            vec![self.list, self.status, self.address, self.filter, self.tree, self.tab_strip, b0, b1, b2];
+        let mut controls = vec![
+            self.view.list,
+            self.status,
+            self.address,
+            self.filter,
+            self.tree,
+            self.tab_strip,
+            b0,
+            b1,
+            b2,
+        ];
         controls.extend(&self.toolbar);
         controls.extend(preview::controls(&self.preview));
         controls
@@ -215,7 +201,7 @@ impl Drop for OpGuard {
 
 /// The list's drop target, for tests that simulate a drop.
 pub fn drop_target() -> Option<windows::Win32::System::Ole::IDropTarget> {
-    with_app(|a| a.drop_target.clone()).flatten()
+    with_app(|a| a.view.drop_target.clone()).flatten()
 }
 
 /// The settings captured when the main window closed on this thread.
@@ -410,21 +396,31 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         APP.with(|cell| {
             *cell.borrow_mut() = Some(App {
                 hwnd,
-                list,
+                view: panes::FolderView {
+                    list,
+                    browser: {
+                        let mut b = Browser::default();
+                        (b.sort, b.show_hidden) = (settings.sort, settings.show_hidden);
+                        b
+                    },
+                    lister: None,
+                    lister_cancel: Arc::default(),
+                    icons,
+                    watcher: None,
+                    device_note: None,
+                    edit_pending: None,
+                    renaming: None,
+                    resync_after_rename: false,
+                    drop_row: None,
+                    drop_target: None,
+                },
                 address,
                 buttons,
                 toolbar: toolbar_buttons,
                 startup_override: None,
                 status,
                 font,
-                browser: {
-                    let mut b = Browser::default();
-                    (b.sort, b.show_hidden) = (settings.sort, settings.show_hidden);
-                    b
-                },
                 events,
-                lister: None,
-                lister_cancel: Arc::default(),
                 tabs: Tabs::new(tabbar::TabSlot::active(0)),
                 tab_strip,
                 next_tab_id: 1,
@@ -438,16 +434,8 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 nodes: Vec::new(),
                 split: settings.split.unwrap_or_else(|| scale(hwnd, 240)),
                 drag_offset: None,
-                icons,
-                watcher: None,
                 watch_ids: 0,
-                device_note: None,
                 this_pc: 0,
-                edit_pending: None,
-                renaming: None,
-                resync_after_rename: false,
-                drop_row: None,
-                drop_target: None,
             })
         });
 
@@ -456,7 +444,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         if let Err(e) = windows::Win32::System::Ole::RegisterDragDrop(list, &target) {
             crash::log(&format!("drag and drop into the list disabled: {e}"));
         }
-        with_app(|a| a.drop_target = Some(target));
+        with_app(|a| a.view.drop_target = Some(target));
         // Owner-data lists keep only selection and focus; the drop highlight comes from `fill`.
         SendMessageW(list, LVM_SETCALLBACKMASK, Some(WPARAM(LVIS_DROPHILITED.0 as usize)), None);
         let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener(hwnd);
@@ -498,7 +486,7 @@ pub fn translate(msg: &MSG) -> bool {
 }
 
 fn on_key(msg: &MSG) -> bool {
-    let Some((list, address, tree, filter)) = with_app(|a| (a.list, a.address, a.tree, a.filter)) else {
+    let Some((list, address, tree, filter)) = with_app(|a| (a.view.list, a.address, a.tree, a.filter)) else {
         return false;
     };
     if msg.message == WM_KEYDOWN && msg.wParam.0 == VK_F1.0 as usize {
@@ -558,13 +546,13 @@ fn on_key(msg: &MSG) -> bool {
         VK_BACK | VK_DELETE | VK_A | VK_C | VK_X | VK_V | VK_N | VK_H if msg.hwnd == filter => return false,
         VK_L if ctrl => focus_address(),
         VK_H if ctrl && !in_address => {
-            if let Some(job) = with_app(|a| a.browser.toggle_hidden()).flatten() {
+            if let Some(job) = with_app(|a| a.view.browser.toggle_hidden()).flatten() {
                 spawn_sort(job);
             }
         }
         VK_RETURN if in_address => {
             let text = window_text(address);
-            let current = with_app(|a| a.browser.dir().map(Path::to_path_buf)).flatten();
+            let current = with_app(|a| a.view.browser.dir().map(Path::to_path_buf)).flatten();
             match parse_location(&text, current.as_deref()) {
                 Some(dir) => {
                     go(dir);
@@ -633,7 +621,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 // Typing in the filter box narrows the list at once.
                 if code == EN_CHANGE as usize && with_app(|a| a.filter.0 as isize) == Some(from) {
                     let text = window_text(HWND(from as _));
-                    if let Some(job) = with_app(|a| a.browser.set_filter(&text)).flatten() {
+                    if let Some(job) = with_app(|a| a.view.browser.set_filter(&text)).flatten() {
                         spawn_sort(job);
                     }
                     update_chrome();
@@ -654,7 +642,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     _ => return DefWindowProcW(hwnd, msg, wp, lp),
                 }
                 if !matches!(id, toolbar::SETTINGS | toolbar::SHORTCUTS | toolbar::HELP)
-                    && let Some(list) = with_app(|a| a.list)
+                    && let Some(list) = with_app(|a| a.view.list)
                 {
                     let _ = SetFocus(Some(list));
                 }
@@ -732,7 +720,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_SETFOCUS => {
-                if let Some(list) = with_app(|a| a.list) {
+                if let Some(list) = with_app(|a| a.view.list) {
                     let _ = SetFocus(Some(list));
                 }
                 LRESULT(0)
@@ -761,7 +749,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 layout(hwnd);
                 LRESULT(0)
             }
-            WM_CONTEXTMENU if with_app(|a| a.list.0 as usize) == Some(wp.0) => {
+            WM_CONTEXTMENU if with_app(|a| a.view.list.0 as usize) == Some(wp.0) => {
                 commands::context_menu(hwnd, lp);
                 LRESULT(0)
             }
@@ -781,7 +769,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_DESTROY => {
                 let _ = windows::Win32::System::DataExchange::RemoveClipboardFormatListener(hwnd);
                 preview::shutdown();
-                if let Some(list) = with_app(|a| a.list) {
+                if let Some(list) = with_app(|a| a.view.list) {
                     let _ = windows::Win32::System::Ole::RevokeDragDrop(list);
                 }
                 capture_settings(hwnd);
@@ -799,7 +787,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 
 /// `None` = not handled, let DefWindowProc run.
 unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
-    let (list, tree, strip) = with_app(|a| (a.list, a.tree, a.tab_strip))?;
+    let (list, tree, strip) = with_app(|a| (a.view.list, a.tree, a.tab_strip))?;
     if hdr.hwndFrom == strip {
         return tabbar::on_notify(hdr);
     }
@@ -813,7 +801,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
         match hdr.code {
             LVN_GETDISPINFOW => {
                 let item = &mut (*(lp.0 as *mut NMLVDISPINFOW)).item;
-                with_app(|a| fill(&a.browser, &mut a.icons, a.drop_row, item));
+                with_app(|a| fill(&a.view.browser, &mut a.view.icons, a.view.drop_row, item));
                 Some(LRESULT(0))
             }
             LVN_ODFINDITEMW => {
@@ -822,14 +810,15 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
                     return Some(LRESULT(-1));
                 }
                 let prefix = find.lvfi.psz.as_wide();
-                let row = with_app(|a| a.browser.find_prefix(find.iStart.max(0) as usize, prefix)).flatten();
+                let row =
+                    with_app(|a| a.view.browser.find_prefix(find.iStart.max(0) as usize, prefix)).flatten();
                 Some(LRESULT(row.map_or(-1, |r| r as isize)))
             }
             LVN_COLUMNCLICK => {
                 let col = (*(lp.0 as *const NMLISTVIEW)).iSubItem as usize;
                 if let Some((_, _, key)) = COLUMNS.get(col) {
                     if let Some(job) =
-                        with_app(|a| a.browser.set_sort(a.browser.sort_for_column(*key))).flatten()
+                        with_app(|a| a.view.browser.set_sort(a.view.browser.sort_for_column(*key))).flatten()
                     {
                         spawn_sort(job);
                     }
@@ -853,7 +842,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
             LVN_ITEMACTIVATE => {
                 let row = (*(lp.0 as *const NMITEMACTIVATE)).iItem;
                 let target =
-                    usize::try_from(row).ok().and_then(|r| with_app(|a| a.browser.path_at(r)).flatten());
+                    usize::try_from(row).ok().and_then(|r| with_app(|a| a.view.browser.path_at(r)).flatten());
                 match target {
                     Some((dir, true)) => go(dir),
                     Some((file, false)) => open_file(file),
@@ -911,9 +900,9 @@ fn apply(ev: Event) {
         Event::Listed { generation, result } => {
             let sel = selected_rows();
             let applied = with_app(|a| {
-                let r = a.browser.on_listed(generation, result, &sel);
+                let r = a.view.browser.on_listed(generation, result, &sel);
                 if r != Applied::Stale {
-                    a.lister = None;
+                    a.view.lister = None;
                 }
                 r
             });
@@ -924,12 +913,12 @@ fn apply(ev: Event) {
                         watch_current();
                     }
                     commands::after_refresh();
-                    if let Some(job) = with_app(|a| a.browser.sort_job()).flatten() {
+                    if let Some(job) = with_app(|a| a.view.browser.sort_job()).flatten() {
                         spawn_sort(job);
                     }
                 }
                 // The very first folder couldn't be opened (gone since last run?): show the user folder.
-                Some(Applied::Failed) if with_app(|a| a.browser.dir().is_none()) == Some(true) => {
+                Some(Applied::Failed) if with_app(|a| a.view.browser.dir().is_none()) == Some(true) => {
                     update_chrome();
                     if let Some(home) = std::env::var_os("USERPROFILE") {
                         go(PathBuf::from(home));
@@ -939,13 +928,13 @@ fn apply(ev: Event) {
                 Some(Applied::Gone(job)) => spawn_list(job),
                 _ => {}
             }
-            if let Some(job) = with_app(|a| a.browser.follow_up()).flatten() {
+            if let Some(job) = with_app(|a| a.view.browser.follow_up()).flatten() {
                 spawn_list(job);
             }
         }
         Event::DirChanged(id) => {
             if let Some(job) = with_app(|a| {
-                (a.watcher.as_ref().map(|w| w.0) == Some(id)).then(|| a.browser.on_dir_changed())
+                (a.view.watcher.as_ref().map(|w| w.0) == Some(id)).then(|| a.view.browser.on_dir_changed())
             })
             .flatten()
             .flatten()
@@ -959,7 +948,7 @@ fn apply(ev: Event) {
         Event::Sorted { generation, sort, show_hidden, filter, order } => {
             let sel = selected_rows();
             if let Some(Applied::Shown { select, .. }) =
-                with_app(|a| a.browser.on_sorted(generation, sort, show_hidden, &filter, order, &sel))
+                with_app(|a| a.view.browser.on_sorted(generation, sort, show_hidden, &filter, order, &sel))
             {
                 refresh(&select, false);
             }
@@ -968,7 +957,7 @@ fn apply(ev: Event) {
         Event::Message(text) => set_status(&text),
         Event::Preview { token, shown } => preview::finish(token, shown),
         Event::SearchProgress(found) => {
-            if with_app(|a| a.browser.is_loading()) == Some(true) {
+            if with_app(|a| a.view.browser.is_loading()) == Some(true) {
                 set_status(&format!("Searching… {found} found so far  (Esc to stop)"));
             }
         }
@@ -976,7 +965,7 @@ fn apply(ev: Event) {
         Event::DriveLabel { node, text } => tree::on_label(node, text),
         Event::Icon(Done::Node { node, icon }) => tree::on_icon(node, icon),
         Event::Icon(done) => {
-            if let Some((list, true)) = with_app(|a| (a.list, a.icons.on_done(done))) {
+            if let Some((list, true)) = with_app(|a| (a.view.list, a.view.icons.on_done(done))) {
                 unsafe {
                     let _ = InvalidateRect(Some(list), None, false);
                 }
@@ -990,7 +979,7 @@ fn run(nav: impl FnOnce(&mut Browser) -> Option<ListJob>) {
     if with_app(|a| a.live_listers.load(Ordering::SeqCst) >= MAX_LISTERS) == Some(true) {
         return set_status("Too many folders still loading (network?). Wait a moment and try again.");
     }
-    if let Some(job) = with_app(|a| nav(&mut a.browser)).flatten() {
+    if let Some(job) = with_app(|a| nav(&mut a.view.browser)).flatten() {
         spawn_list(job);
     }
 }
@@ -1003,7 +992,7 @@ fn spawn_list(job: ListJob) {
     // A new listing supersedes any search still running.
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let Some((events, live)) = with_app(|a| {
-        std::mem::replace(&mut a.lister_cancel, cancel.clone()).store(true, Ordering::SeqCst);
+        std::mem::replace(&mut a.view.lister_cancel, cancel.clone()).store(true, Ordering::SeqCst);
         (a.events.clone(), a.live_listers.clone())
     }) else {
         return;
@@ -1043,14 +1032,14 @@ fn spawn_list(job: ListJob) {
     if worker.is_none() {
         with_app(|a| a.live_listers.fetch_sub(1, Ordering::SeqCst));
     }
-    with_app(|a| a.lister = worker);
+    with_app(|a| a.view.lister = worker);
     update_chrome();
 }
 
 /// Startup work that can wait for the first paint: the shell's icon list
 /// (~20 ms the first time) and the sidebar.
 fn late_init() {
-    let Some((list, tree)) = with_app(|a| (a.list, a.tree)) else { return };
+    let Some((list, tree)) = with_app(|a| (a.view.list, a.tree)) else { return };
     let (image_list, folder_icon) = icons::system_image_list().unwrap_or_default();
     startup_mark("image list");
     if !image_list.is_invalid() {
@@ -1069,7 +1058,7 @@ fn late_init() {
             );
         }
     }
-    with_app(|a| a.icons.folder = folder_icon);
+    with_app(|a| a.view.icons.folder = folder_icon);
     let this_pc = tree::populate();
     startup_mark("sidebar");
     with_app(|a| a.this_pc = this_pc);
@@ -1089,15 +1078,18 @@ fn capture_settings(hwnd: HWND) {
 fn current_settings(hwnd: HWND) -> Option<Settings> {
     let (list, mut s) = with_app(|a| {
         let s = Settings {
-            sort: a.browser.sort,
-            show_hidden: a.browser.show_hidden,
+            sort: a.view.browser.sort,
+            show_hidden: a.view.browser.show_hidden,
             split: Some(a.split),
             preview: preview::is_visible_in(a),
-            last_folder: a.startup_override.clone().unwrap_or_else(|| a.browser.dir().map(Path::to_path_buf)),
+            last_folder: a
+                .startup_override
+                .clone()
+                .unwrap_or_else(|| a.view.browser.dir().map(Path::to_path_buf)),
             theme: a.theme,
             ..Default::default()
         };
-        (a.list, s)
+        (a.view.list, s)
     })?;
     unsafe {
         let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
@@ -1197,7 +1189,7 @@ fn watch_current() {
     stop_watching();
     let Some((id, dir, events)) = with_app(|a| {
         a.watch_ids += 1;
-        Some((a.watch_ids, a.browser.dir()?.to_path_buf(), a.events.clone()))
+        Some((a.watch_ids, a.view.browser.dir()?.to_path_buf(), a.events.clone()))
     })
     .flatten() else {
         return;
@@ -1208,12 +1200,14 @@ fn watch_current() {
         move || events.send(Event::DirChanged(id)),
         move |handle| ready.send(Event::WatchReady { id, handle }),
     );
-    with_app(|a| a.watcher = Some((id, watcher)));
+    with_app(|a| a.view.watcher = Some((id, watcher)));
 }
 
 /// Stops the watcher (it closes the folder on its own thread) and drops its device notification.
 fn stop_watching() {
-    let Some((watcher, note)) = with_app(|a| (a.watcher.take(), a.device_note.take())) else { return };
+    let Some((watcher, note)) = with_app(|a| (a.view.watcher.take(), a.view.device_note.take())) else {
+        return;
+    };
     drop(watcher);
     if let Some((note, _)) = note {
         unsafe {
@@ -1223,7 +1217,8 @@ fn stop_watching() {
 }
 
 fn on_watch_ready(id: u64, handle: isize) {
-    let Some(hwnd) = with_app(|a| (a.watcher.as_ref().map(|w| w.0) == Some(id)).then_some(a.hwnd)).flatten()
+    let Some(hwnd) =
+        with_app(|a| (a.view.watcher.as_ref().map(|w| w.0) == Some(id)).then_some(a.hwnd)).flatten()
     else {
         return;
     };
@@ -1242,7 +1237,7 @@ fn on_watch_ready(id: u64, handle: isize) {
         )
     };
     if let Ok(note) = note {
-        with_app(|a| a.device_note = Some((note.0 as isize, handle)));
+        with_app(|a| a.view.device_note = Some((note.0 as isize, handle)));
     }
 }
 
@@ -1253,19 +1248,19 @@ fn on_device_change(event: u32, lp: LPARAM) {
     let hdr = unsafe { &*(lp.0 as *const DEV_BROADCAST_HDR) };
     if hdr.dbch_devicetype == DBT_DEVTYP_HANDLE {
         let handle = unsafe { (*(lp.0 as *const DEV_BROADCAST_HANDLE)).dbch_handle.0 as isize };
-        if with_app(|a| a.device_note.map(|n| n.1) == Some(handle)) != Some(true) {
+        if with_app(|a| a.view.device_note.map(|n| n.1) == Some(handle)) != Some(true) {
             return;
         }
         match event {
             DBT_DEVICEQUERYREMOVE => {
                 // The eject goes ahead only if nobody holds a handle on the drive: close ours now.
-                if let Some((_, w)) = with_app(|a| a.watcher.take()).flatten() {
+                if let Some((_, w)) = with_app(|a| a.view.watcher.take()).flatten() {
                     w.stop_and_wait(std::time::Duration::from_millis(500));
                 }
             }
             DBT_DEVICEREMOVECOMPLETE => {
                 stop_watching();
-                if let Some(job) = with_app(|a| a.browser.on_dir_changed()).flatten() {
+                if let Some(job) = with_app(|a| a.view.browser.on_dir_changed()).flatten() {
                     spawn_list(job);
                 }
             }
@@ -1279,8 +1274,10 @@ fn on_device_change(event: u32, lp: LPARAM) {
 }
 
 fn cancel_loading() {
-    with_app(|a| a.lister_cancel.store(true, Ordering::SeqCst));
-    let Some(worker) = with_app(|a| a.browser.cancel().then(|| a.lister.take()).flatten()).flatten() else {
+    with_app(|a| a.view.lister_cancel.store(true, Ordering::SeqCst));
+    let Some(worker) =
+        with_app(|a| a.view.browser.cancel().then(|| a.view.lister.take()).flatten()).flatten()
+    else {
         return update_chrome();
     };
     // Wakes the thread if it's blocked in a synchronous call (e.g. a dead network path).
@@ -1337,7 +1334,7 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Option<JoinHandle<()>
 
 /// The focused row's item, else the first selected one.
 fn focused_path() -> Option<(PathBuf, bool)> {
-    let list = with_app(|a| a.list)?;
+    let list = with_app(|a| a.view.list)?;
     let focused = unsafe {
         SendMessageW(
             list,
@@ -1348,11 +1345,11 @@ fn focused_path() -> Option<(PathBuf, bool)> {
     }
     .0;
     let row = usize::try_from(focused).ok().or_else(|| selected_rows().first().copied())?;
-    with_app(|a| a.browser.path_at(row)).flatten()
+    with_app(|a| a.view.browser.path_at(row)).flatten()
 }
 
 fn selected_rows() -> Vec<usize> {
-    let Some(list) = with_app(|a| a.list) else { return Vec::new() };
+    let Some(list) = with_app(|a| a.view.list) else { return Vec::new() };
     let mut rows = Vec::new();
     let mut i = -1isize;
     loop {
@@ -1374,14 +1371,15 @@ fn selected_rows() -> Vec<usize> {
 
 /// Pushes the browser's contents to the list, selecting `select`.
 fn refresh(select: &[usize], new_folder: bool) {
-    let Some((list, count, renaming)) = with_app(|a| (a.list, a.browser.order.len(), a.renaming.is_some()))
+    let Some((list, count, renaming)) =
+        with_app(|a| (a.view.list, a.view.browser.order.len(), a.view.renaming.is_some()))
     else {
         return;
     };
     if renaming {
         if !new_folder {
             // Resetting the list now would cancel the user's typing.
-            with_app(|a| a.resync_after_rename = true);
+            with_app(|a| a.view.resync_after_rename = true);
             return;
         }
         unsafe { SendMessageW(list, LVM_CANCELEDITLABEL, None, None) };
@@ -1421,7 +1419,7 @@ fn refresh(select: &[usize], new_folder: bool) {
 /// Title, address bar, button states and status text from the browser.
 fn update_chrome() {
     let Some((hwnd, buttons, enabled, title, filter, filter_text)) = with_app(|a| {
-        let b = &a.browser;
+        let b = &a.view.browser;
         let dir = b.dir().map(|d| d.display().to_string()).unwrap_or_default();
         let title = match b.query() {
             Some(q) => format!("\"{q}\" in {dir}"),
@@ -1446,14 +1444,14 @@ fn update_chrome() {
     toolbar::update();
     show_location();
     tabbar::update_label();
-    if let Some(text) = with_app(|a| a.browser.status()) {
+    if let Some(text) = with_app(|a| a.view.browser.status()) {
         set_status(&text);
     }
 }
 
 /// Puts the current folder in the address bar, unless the user is typing there.
 fn show_location() {
-    let Some((address, dir)) = with_app(|a| (a.address, a.browser.dir().map(Path::to_path_buf))) else {
+    let Some((address, dir)) = with_app(|a| (a.address, a.view.browser.dir().map(Path::to_path_buf))) else {
         return;
     };
     unsafe {
@@ -1489,7 +1487,7 @@ fn window_text(hwnd: HWND) -> String {
 }
 
 fn update_sort_arrows() {
-    let Some((list, sort)) = with_app(|a| (a.list, a.browser.sort)) else { return };
+    let Some((list, sort)) = with_app(|a| (a.view.list, a.view.browser.sort)) else { return };
     unsafe {
         let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as _);
         for (i, (_, _, key)) in COLUMNS.iter().enumerate() {
@@ -1510,7 +1508,7 @@ fn scale(hwnd: HWND, px: i32) -> i32 {
 
 fn layout(hwnd: HWND) {
     let Some((list, status, address, buttons, tree, split, filter, strip)) =
-        with_app(|a| (a.list, a.status, a.address, a.buttons, a.tree, a.split, a.filter, a.tab_strip))
+        with_app(|a| (a.view.list, a.status, a.address, a.buttons, a.tree, a.split, a.filter, a.tab_strip))
     else {
         return;
     };
@@ -1599,9 +1597,9 @@ fn apply_settings(hwnd: HWND, settings: Settings) {
         a.theme = settings.theme;
         a.split = settings.split.unwrap_or(240);
         a.startup_override = Some(settings.last_folder.clone());
-        a.browser.show_hidden = settings.show_hidden;
-        let job = a.browser.set_sort(settings.sort);
-        (a.list, job)
+        a.view.browser.show_hidden = settings.show_hidden;
+        let job = a.view.browser.set_sort(settings.sort);
+        (a.view.list, job)
     }) else {
         return;
     };

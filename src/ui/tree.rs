@@ -48,7 +48,7 @@ pub(super) fn populate() -> usize {
     let quick = insert(None, "Quick access", None, true);
     for (name, path) in places::known_folders() {
         let node = insert(Some(quick), name, Some(path.clone()), true);
-        with_app(|a| a.icons.request_node(node, path));
+        with_app(|a| a.view.icons.request_node(node, path));
     }
     let pc = insert(None, "This PC", None, true);
     add_drives(pc);
@@ -61,7 +61,7 @@ pub(super) fn populate() -> usize {
 fn add_drives(pc: usize) {
     for d in places::drives() {
         let node = insert(Some(pc), &places::drive_name(d.letter, d.kind, None), Some(d.root.clone()), true);
-        with_app(|a| a.icons.request_node(node, d.root.clone()));
+        with_app(|a| a.view.icons.request_node(node, d.root.clone()));
         // Network drives can take a long time to answer; their generic name is good enough.
         if d.kind != DriveKind::Network
             && let Some(events) = with_app(|a| a.events.clone())
@@ -116,7 +116,7 @@ fn insert(parent: Option<usize>, text: &str, path: Option<PathBuf>, expandable: 
         let parent_item = parent.map_or(TVI_ROOT.0, |p| a.nodes[p].item);
         let state = if loaded { State::Loaded } else { State::Unloaded };
         a.nodes.push(Node { path, item: 0, state, parent });
-        (a.tree, a.nodes.len() - 1, parent_item, a.icons.folder)
+        (a.tree, a.nodes.len() - 1, parent_item, a.view.icons.folder)
     }) else {
         return usize::MAX;
     };
@@ -185,7 +185,7 @@ fn start_loading(node: usize) {
             return None;
         }
         n.state = State::Loading;
-        Some((n.path.clone()?, a.browser.show_hidden, a.events.clone()))
+        Some((n.path.clone()?, a.view.browser.show_hidden, a.events.clone()))
     })
     .flatten() else {
         return;
