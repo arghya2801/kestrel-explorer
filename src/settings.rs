@@ -19,6 +19,9 @@ pub struct Settings {
     pub show_hidden: bool,
     pub split: Option<i32>,
     pub preview: bool,
+    pub dual_pane: bool,
+    pub pane_ratio: i32,
+    pub preview_width: Option<i32>,
     pub last_folder: Option<PathBuf>,
     pub theme: ThemeChoice,
 }
@@ -33,6 +36,9 @@ impl Default for Settings {
             show_hidden: false,
             split: None,
             preview: false,
+            dual_pane: false,
+            pane_ratio: 500,
+            preview_width: None,
             last_folder: None,
             theme: ThemeChoice::System,
         }
@@ -82,6 +88,14 @@ impl Settings {
                 }
                 "show_hidden" => s.show_hidden = flag(value).unwrap_or(false),
                 "preview" => s.preview = flag(value).unwrap_or(false),
+                "dual_pane" => s.dual_pane = flag(value).unwrap_or(false),
+                "pane_ratio" => {
+                    s.pane_ratio =
+                        value.parse::<i32>().ok().filter(|v| (100..=900).contains(v)).unwrap_or(500)
+                }
+                "preview_width" => {
+                    s.preview_width = value.parse::<i32>().ok().filter(|v| *v >= 100 && *v <= 10000)
+                }
                 "split" => s.split = value.parse().ok().filter(|&w: &i32| w > 0),
                 "theme" => s.theme = ThemeChoice::parse(value).unwrap_or(ThemeChoice::System),
                 "last_folder" => s.last_folder = (!value.is_empty()).then(|| PathBuf::from(value)),
@@ -105,6 +119,10 @@ impl Settings {
         out += &format!("sort={key},{}\n", self.sort.descending);
         out += &format!("show_hidden={}\n", self.show_hidden);
         out += &format!("preview={}\n", self.preview);
+        out += &format!("dual_pane={}\npane_ratio={}\n", self.dual_pane, self.pane_ratio);
+        if let Some(width) = self.preview_width {
+            out += &format!("preview_width={width}\n");
+        }
         if let Some(w) = self.split {
             out += &format!("split={w}\n");
         }
@@ -177,6 +195,9 @@ mod tests {
             show_hidden: true,
             split: Some(260),
             preview: true,
+            dual_pane: true,
+            pane_ratio: 650,
+            preview_width: Some(350),
             last_folder: Some(PathBuf::from(r"C:\Users\me\Ünï =x")),
             theme: ThemeChoice::Light,
         };

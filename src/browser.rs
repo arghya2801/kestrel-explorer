@@ -148,6 +148,10 @@ impl Browser {
         job
     }
 
+    pub fn requested_location(&self) -> Option<Location> {
+        self.loading.as_ref().map(|p| p.at.clone()).or_else(|| self.location())
+    }
+
     /// Where the list is now.
     pub fn location(&self) -> Option<Location> {
         Some(Location { dir: self.dir()?.to_path_buf(), query: self.shown_query.clone() })
@@ -267,6 +271,10 @@ impl Browser {
         self.dir().and_then(crate::network::up_from).is_some()
     }
     /// Generation of the folder on screen.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn shown_generation(&self) -> u64 {
         self.shown_generation
     }

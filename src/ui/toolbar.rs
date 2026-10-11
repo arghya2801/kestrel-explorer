@@ -21,6 +21,7 @@ pub const MORE: usize = 209;
 pub const HELP: usize = 210;
 pub const SHORTCUTS: usize = 211;
 pub const SETTINGS: usize = 212;
+pub const SPLIT: usize = 213;
 
 const BUTTONS: &[(usize, &str, i32)] = &[
     (commands::CMD_NEW_FOLDER, "New folder", 94),
@@ -30,6 +31,7 @@ const BUTTONS: &[(usize, &str, i32)] = &[
     (commands::CMD_RENAME, "Rename", 70),
     (commands::CMD_DELETE, "Delete", 62),
     (REFRESH, "Refresh", 70),
+    (SPLIT, "Split", 52),
     (VIEW, "View", 55),
     (MORE, "More", 58),
     (SETTINGS, "Settings", 72),
@@ -101,6 +103,7 @@ pub(super) fn update() {
 pub(super) fn execute(id: usize) -> bool {
     let Some(hwnd) = with_app(|a| a.hwnd) else { return false };
     match id {
+        SPLIT => super::panes::toggle(),
         REFRESH => run(Browser::refresh),
         HIDDEN => {
             if let Some(job) = with_app(|a| a.view.browser.toggle_hidden()).flatten() {

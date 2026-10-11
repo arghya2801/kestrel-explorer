@@ -42,9 +42,9 @@ impl Drop for Brushes {
 
 /// Applies `palette` to the window and its controls.
 pub(super) fn apply(hwnd: HWND, palette: Palette) {
-    let Some((list, tree, strip, status, address, filter, buttons)) = with_app(|a| {
+    let Some((lists, tree, strip, status, address, filter, buttons)) = with_app(|a| {
         (
-            a.view.list,
+            a.views().map(|v| v.list).collect::<Vec<_>>(),
             a.tree,
             a.tab_strip,
             a.status,
@@ -66,9 +66,11 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
         let flag = BOOL::from(dark);
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &flag as *const _ as *const _, 4);
 
-        let _ = SetWindowTheme(list, style(w!("Explorer"), w!("DarkMode_Explorer")), None);
-        let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as _);
-        let _ = SetWindowTheme(header, style(PCWSTR::null(), w!("DarkMode_ItemsView")), None);
+        for &list in &lists {
+            let _ = SetWindowTheme(list, style(w!("Explorer"), w!("DarkMode_Explorer")), None);
+            let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as _);
+            let _ = SetWindowTheme(header, style(PCWSTR::null(), w!("DarkMode_ItemsView")), None);
+        }
         let _ = SetWindowTheme(tree, style(w!("Explorer"), w!("DarkMode_Explorer")), None);
         for edit in [address, filter] {
             let _ = SetWindowTheme(edit, style(PCWSTR::null(), w!("DarkMode_CFD")), None);
@@ -78,9 +80,11 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
         }
 
         let (bg, fg) = (LPARAM(palette.window as isize), LPARAM(palette.text as isize));
-        SendMessageW(list, LVM_SETBKCOLOR, None, Some(bg));
-        SendMessageW(list, LVM_SETTEXTBKCOLOR, None, Some(bg));
-        SendMessageW(list, LVM_SETTEXTCOLOR, None, Some(fg));
+        for &list in &lists {
+            SendMessageW(list, LVM_SETBKCOLOR, None, Some(bg));
+            SendMessageW(list, LVM_SETTEXTBKCOLOR, None, Some(bg));
+            SendMessageW(list, LVM_SETTEXTCOLOR, None, Some(fg));
+        }
         // -1: the tree's own default colors.
         let (tbg, tfg) = if dark { (bg, fg) } else { (LPARAM(-1), LPARAM(-1)) };
         SendMessageW(tree, TVM_SETBKCOLOR, None, Some(tbg));
@@ -90,7 +94,9 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
             let _ = SetWindowSubclass(c, Some(paint_dark), 1, 0);
         }
         // Column header text: the header tells the list (not us) when it draws.
-        let _ = SetWindowSubclass(list, Some(header_text), 2, 0);
+        for &list in &lists {
+            let _ = SetWindowSubclass(list, Some(header_text), 2, 0);
+        }
         let _ =
             RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
     }

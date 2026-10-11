@@ -54,6 +54,7 @@ impl DropTarget {
     /// The effect and destination for the cursor at `pt` (screen coordinates).
     /// Over a folder row, the folder is the destination and gets highlighted.
     fn decide(&self, keys: MODIFIERKEYS_FLAGS, pt: &POINTL) -> (u32, Option<PathBuf>) {
+        super::panes::activate(self.list);
         let mut client = POINT { x: pt.x, y: pt.y };
         let _ = unsafe { ScreenToClient(self.list, &mut client) };
         let mut hit = LVHITTESTINFO { pt: client, ..Default::default() };

@@ -395,3 +395,12 @@ extern "system" fn pane_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
     })
     .unwrap_or(LRESULT(0))
 }
+
+pub(super) fn invalidate() {
+    with_app(|a| a.preview.token += 1);
+    send(Cmd::Clear);
+    with_app(|a| show_only(&a.preview, a.preview.message, Some("Select a file to preview.")));
+    if let Some(hwnd) = with_app(|a| a.hwnd) {
+        selection_changed(hwnd);
+    }
+}

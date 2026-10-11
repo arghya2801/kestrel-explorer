@@ -191,8 +191,8 @@ fn copy_paths() {
 }
 
 fn paste() {
-    let (Some(dest), Some((events, hwnd))) =
-        (current_dir(), with_app(|a| (a.events.clone(), a.hwnd.0 as isize)))
+    let (Some(dest), Some((events, hwnd, view))) =
+        (current_dir(), with_app(|a| (a.events.clone(), a.hwnd.0 as isize, a.view.id)))
     else {
         return;
     };
@@ -200,13 +200,14 @@ fn paste() {
     let running = super::OpGuard::new();
     spawn("paste", move || {
         let _running = running;
+        let dir = Some(dest.clone());
         let ev = match crash::guard(clip::get_files).flatten() {
             None => Event::Message("Nothing to paste.".into()),
             Some((paths, cut)) => {
                 let op = if cut { Op::Move { paths, dest } } else { Op::Copy { paths, dest } };
                 let result = crash::guard(|| ops::run(&op, Mode::Interactive(hwnd)))
                     .unwrap_or_else(|| Err("Internal error while pasting.".into()));
-                Event::OpDone { result, edit: false }
+                Event::OpDone { view, dir, result, edit: false }
             }
         };
         events.send(ev);
@@ -258,28 +259,41 @@ pub(super) fn transfer(paths: Vec<PathBuf>, dest: PathBuf, move_: bool) {
 
 /// Runs `op` on its own thread; `edit` starts renaming the item it creates.
 fn start_op(op: Op, edit: bool) {
-    let Some((events, hwnd)) = with_app(|a| (a.events.clone(), a.hwnd.0 as isize)) else { return };
+    let Some((events, hwnd, view, dir)) = with_app(|a| {
+        (a.events.clone(), a.hwnd.0 as isize, a.view.id, a.view.browser.dir().map(PathBuf::from))
+    }) else {
+        return;
+    };
     let running = super::OpGuard::new();
     spawn("op", move || {
         let _running = running;
         let result = crash::guard(|| ops::run(&op, Mode::Interactive(hwnd)))
             .unwrap_or_else(|| Err("Internal error during a file operation.".into()));
-        events.send(Event::OpDone { result, edit });
+        events.send(Event::OpDone { view, dir, result, edit });
     });
 }
 
-pub(super) fn on_op_done(result: Result<Option<String>, String>, edit: bool) {
+pub(super) fn on_op_done(
+    view: u64,
+    dir: Option<PathBuf>,
+    result: Result<Option<String>, String>,
+    edit: bool,
+) {
+    let active = with_app(|a| a.view.id == view) == Some(true);
     match result {
         Ok(name) => {
             // The watcher would notice too; refreshing now makes the result show up at once.
-            let job = with_app(|a| {
+            let job = super::with_view(view, |v| {
+                if v.browser.dir() != dir.as_deref() {
+                    return None;
+                }
                 if let Some(name) = name {
-                    a.view.browser.select_after_refresh(&name);
-                    if edit {
-                        a.view.edit_pending = Some(name);
+                    v.browser.select_after_refresh(&name);
+                    if edit && active {
+                        v.edit_pending = Some(name);
                     }
                 }
-                a.view.browser.on_dir_changed()
+                v.browser.on_dir_changed()
             });
             if let Some(job) = job.flatten() {
                 spawn_list(job);
@@ -350,8 +364,8 @@ pub(super) fn end_rename(lp: LPARAM) -> LRESULT {
     }) else {
         return LRESULT(0);
     };
-    if resync {
-        events.send(Event::Resync); // after the box is gone
+    if resync && let Some(id) = with_app(|a| a.view.id) {
+        events.send(Event::Resync(id)); // after the box is gone
     }
     let Some(path) = path else { return LRESULT(0) };
     if item.pszText.is_null() {

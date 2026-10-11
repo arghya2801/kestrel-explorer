@@ -30,6 +30,9 @@ const WIDTH: usize = 23;
 const HEIGHT: usize = 24;
 const MAXIMIZED: usize = 25;
 const ERROR: usize = 26;
+const DUAL: usize = 27;
+const RATIO: usize = 28;
+const PREVIEW_WIDTH: usize = 29;
 
 thread_local! { static WINDOWS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) }; }
 
@@ -67,7 +70,9 @@ Tabs and windows\r\n\
 Ctrl+T    New tab\r\n\
 Ctrl+W    Close the active tab (the last tab stays)\r\n\
 Ctrl+Tab / Ctrl+Shift+Tab    Next / previous tab\r\n\
-Ctrl+N    New window, side by side\r\n\r\n\
+Ctrl+N    New window, side by side\r\n\
+Ctrl+Shift+S    Toggle two folder panes\r\n\
+F6    Focus the other folder pane\r\n\r\n\
 View and help\r\n\
 Ctrl+H    Toggle hidden items\r\n\
 Alt+P    Toggle preview\r\n\
@@ -172,6 +177,9 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR) -> windows::core::Resu
                     (0, THEME, "&Theme", Some("System|Light|Dark"), false),
                     (0, SIDEBAR, "&Sidebar width", None, false),
                     (0, PREVIEW, "Show &preview pane", None, true),
+                    (0, DUAL, "Two folder panes", None, true),
+                    (0, RATIO, "Left pane percentage", None, false),
+                    (0, PREVIEW_WIDTH, "Preview width", None, false),
                     (1, HIDDEN, "Show &hidden items", None, true),
                     (1, SORT, "&Sort by", Some("Name|Date modified|Type|Size"), false),
                     (1, DESCENDING, "&Descending", None, true),
@@ -312,6 +320,9 @@ fn fill(hwnd: HWND, s: &Settings) {
     );
     text(SIDEBAR, s.split.unwrap_or(240).to_string());
     check(PREVIEW, s.preview);
+    check(DUAL, s.dual_pane);
+    text(RATIO, (s.pane_ratio / 10).to_string());
+    text(PREVIEW_WIDTH, s.preview_width.unwrap_or(320).to_string());
     check(HIDDEN, s.show_hidden);
     select(
         SORT,
@@ -365,6 +376,9 @@ fn read(hwnd: HWND) -> std::result::Result<Settings, String> {
         },
         split: Some(number(SIDEBAR, "Sidebar width", 120, 4000)?),
         preview: checked(PREVIEW),
+        dual_pane: checked(DUAL),
+        pane_ratio: number(RATIO, "Left pane percentage", 10, 90)? * 10,
+        preview_width: Some(number(PREVIEW_WIDTH, "Preview width", 100, 10000)?),
         show_hidden: checked(HIDDEN),
         sort: Sort {
             key: match selected(SORT) {

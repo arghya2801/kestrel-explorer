@@ -109,3 +109,7 @@ cargo run --release --example stress -- 600                  # 10 minutes of chu
 
 [ROADMAP.md](ROADMAP.md) has the design decisions and historical measurements.
 [HANDOFF.md](HANDOFF.md) records known gaps; [PLAN.md](PLAN.md) organizes the remaining work and planned features.
+
+Two folder panes: use **Split** or **Ctrl+Shift+S**; **F6** focuses the other pane. Each pane keeps its
+folder, history, selection and filter. Tabs remember both panes. Drag the center or preview divider
+to resize; layout defaults are also available in Settings.

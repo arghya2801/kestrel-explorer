@@ -9,7 +9,6 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -33,7 +32,7 @@ use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{HSTRING, PCWSTR, PWSTR, Result, w};
+use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::browser::{Applied, Browser, ListJob, SortJob, parse_location};
 use crate::events::Events;
@@ -89,7 +88,10 @@ enum Event {
         order: Vec<u32>,
     },
     /// A shortcut resolved to a folder: show it.
-    Navigate(PathBuf),
+    Navigate {
+        generation: u64,
+        dir: PathBuf,
+    },
     /// One-off status bar message.
     Message(String),
     /// A preview finished loading.
@@ -98,7 +100,10 @@ enum Event {
         shown: preview::Shown,
     },
     /// A search is running; this many matches so far.
-    SearchProgress(usize),
+    SearchProgress {
+        generation: u64,
+        found: usize,
+    },
     TreeChildren {
         node: usize,
         result: io::Result<Vec<String>>,
@@ -107,7 +112,10 @@ enum Event {
         node: usize,
         text: String,
     },
-    Icon(Done),
+    Icon {
+        view: u64,
+        done: Done,
+    },
     /// The watched folder changed (`id` names the watcher).
     DirChanged(u64),
     /// A watcher opened its folder; `handle` is for device-removal notifications.
@@ -116,9 +124,11 @@ enum Event {
         handle: isize,
     },
     /// The list should catch up with the browser (after a rename box closed).
-    Resync,
+    Resync(u64),
     /// A file operation ended: the item to select, or an error.
     OpDone {
+        view: u64,
+        dir: Option<PathBuf>,
         result: std::result::Result<Option<String>, String>,
         edit: bool,
     },
@@ -127,8 +137,15 @@ enum Event {
 struct App {
     hwnd: HWND,
     view: panes::FolderView,
+    other: Option<panes::FolderView>,
+    split_view: bool,
+    right_active: bool,
+    pane_ratio: i32,
+    preview_width: Option<i32>,
+    drag_kind: SplitKind,
     address: HWND,
     filter: HWND,
+    syncing_filter: bool,
     buttons: [HWND; 3],
     toolbar: Vec<HWND>,
     startup_override: Option<Option<PathBuf>>,
@@ -152,6 +169,28 @@ struct App {
 }
 
 impl App {
+    fn views(&self) -> impl Iterator<Item = &panes::FolderView> {
+        std::iter::once(&self.view).chain(self.other.iter()).chain(
+            self.tabs
+                .items()
+                .iter()
+                .filter_map(|t| t.workspace.as_ref())
+                .flat_map(|w| std::iter::once(&w.view).chain(w.other.iter())),
+        )
+    }
+    fn view_mut(&mut self, id: u64) -> Option<&mut panes::FolderView> {
+        std::iter::once(&mut self.view)
+            .chain(self.other.iter_mut())
+            .chain(
+                self.tabs
+                    .items_mut()
+                    .iter_mut()
+                    .filter_map(|t| t.workspace.as_mut())
+                    .flat_map(|w| std::iter::once(&mut w.view).chain(w.other.iter_mut())),
+            )
+            .find(|v| v.id == id)
+    }
+
     fn controls(&self) -> Vec<HWND> {
         let [b0, b1, b2] = self.buttons;
         let mut controls = vec![
@@ -165,6 +204,8 @@ impl App {
             b1,
             b2,
         ];
+        controls.extend(self.views().filter(|v| v.id != self.view.id).map(|v| v.list));
+        controls.extend(self.views().map(|v| v.label));
         controls.extend(&self.toolbar);
         controls.extend(preview::controls(&self.preview));
         controls
@@ -211,13 +252,15 @@ pub fn take_final_settings() -> Option<Settings> {
 
 /// Runs `f` on the app state; `None` if there is none yet or it is already borrowed.
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
-    APP.with(|cell| match cell.try_borrow_mut() {
+    APP.try_with(|cell| match cell.try_borrow_mut() {
         Ok(mut app) => app.as_mut().map(f),
         Err(_) => {
             crash::log("re-entrant access to UI state");
             None
         }
     })
+    .ok()
+    .flatten()
 }
 
 /// Process-wide setup. Call on each UI thread before creating windows.
@@ -339,81 +382,34 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
             Some(WPARAM(1)),
             Some(LPARAM(w!("Filter  (Enter: search subfolders)").0 as isize)),
         );
-        let list = child(
-            hwnd,
-            WC_LISTVIEWW,
-            w!(""),
-            WS_TABSTOP
-                | WINDOW_STYLE(
-                    LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS | LVS_EDITLABELS,
-                ),
-            none,
-            0,
-        )?;
-        let ex = LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER;
-        SendMessageW(
-            list,
-            LVM_SETEXTENDEDLISTVIEWSTYLE,
-            Some(WPARAM(ex as usize)),
-            Some(LPARAM(ex as isize)),
-        );
-        let _ = SetWindowTheme(list, w!("Explorer"), None);
-        for (i, (title, width, key)) in COLUMNS.iter().enumerate() {
-            let col = LVCOLUMNW {
-                mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
-                fmt: if *key == SortKey::Size { LVCFMT_RIGHT } else { LVCFMT_LEFT },
-                cx: settings.columns.get(i).copied().unwrap_or_else(|| scale(hwnd, *width)),
-                pszText: PWSTR(title.0 as *mut _),
-                ..Default::default()
-            };
-            SendMessageW(list, LVM_INSERTCOLUMNW, Some(WPARAM(i)), Some(LPARAM(&col as *const _ as isize)));
-        }
+        let font = message_font(hwnd);
+        let target = hwnd.0 as isize;
+        let events = Arc::new(Events::new(move || {
+            PostMessageW(Some(HWND(target as _)), WM_APP_EVENTS, WPARAM(0), LPARAM(0)).is_ok()
+        }));
+        let view = panes::create(hwnd, settings, 0, events.clone(), font)?;
+        let list = view.list;
         let status = child(hwnd, STATUSCLASSNAMEW, w!(""), WINDOW_STYLE(SBARS_SIZEGRIP), none, 0)?;
         let tree = tree::create(hwnd)?;
         let tab_strip = tabbar::create(hwnd)?;
         let preview_pane = preview::create(hwnd)?;
         let toolbar_buttons = toolbar::create(hwnd)?;
 
-        let font = message_font(hwnd);
         set_font(&[list, status, address, filter, tree, tab_strip, buttons[0], buttons[1], buttons[2]], font);
         set_font(&preview::controls(&preview_pane), font);
         set_font(&toolbar_buttons, font);
 
-        let target = hwnd.0 as isize;
-        let events = Arc::new(Events::new(move || {
-            PostMessageW(Some(HWND(target as _)), WM_APP_EVENTS, WPARAM(0), LPARAM(0)).is_ok()
-        }));
         startup_mark("controls");
-        let (icon_jobs, icon_rx) = mpsc::channel();
-        let icons = Icons::new(icon_jobs, 0); // folder icon known after `late_init`
-        let icon_events = events.clone();
-        // The worker stops when `icons` (the only sender) is dropped with the window.
-        if let Err(e) =
-            icons::spawn_worker(icon_rx, icons.latest.clone(), move |d| icon_events.send(Event::Icon(d)))
-        {
-            crash::log(&format!("icons disabled: {e}"));
-        }
         APP.with(|cell| {
             *cell.borrow_mut() = Some(App {
                 hwnd,
-                view: panes::FolderView {
-                    list,
-                    browser: {
-                        let mut b = Browser::default();
-                        (b.sort, b.show_hidden) = (settings.sort, settings.show_hidden);
-                        b
-                    },
-                    lister: None,
-                    lister_cancel: Arc::default(),
-                    icons,
-                    watcher: None,
-                    device_note: None,
-                    edit_pending: None,
-                    renaming: None,
-                    resync_after_rename: false,
-                    drop_row: None,
-                    drop_target: None,
-                },
+                view,
+                other: None,
+                split_view: false,
+                right_active: false,
+                pane_ratio: settings.pane_ratio,
+                preview_width: settings.preview_width,
+                drag_kind: SplitKind::Sidebar,
                 address,
                 buttons,
                 toolbar: toolbar_buttons,
@@ -429,6 +425,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 brushes: None,
                 preview: preview_pane,
                 filter,
+                syncing_filter: false,
                 live_listers: Arc::new(AtomicUsize::new(0)),
                 tree,
                 nodes: Vec::new(),
@@ -439,20 +436,15 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
             })
         });
 
-        // Drops from other apps (and from this list onto its own folders).
-        let target = drag::DropTarget::create(list);
-        if let Err(e) = windows::Win32::System::Ole::RegisterDragDrop(list, &target) {
-            crash::log(&format!("drag and drop into the list disabled: {e}"));
-        }
-        with_app(|a| a.view.drop_target = Some(target));
-        // Owner-data lists keep only selection and focus; the drop highlight comes from `fill`.
-        SendMessageW(list, LVM_SETCALLBACKMASK, Some(WPARAM(LVIS_DROPHILITED.0 as usize)), None);
         let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener(hwnd);
         layout(hwnd);
         update_sort_arrows();
         preview::restore(hwnd, settings.preview);
         let _ = SetFocus(Some(list));
         go(start.to_path_buf());
+        if settings.dual_pane {
+            panes::toggle();
+        }
         // Icons and the sidebar wait until the window has painted once.
         dark::apply(hwnd, Palette::new(settings.theme.is_dark(system_prefers_dark())));
         let _ = PostMessageW(Some(hwnd), WM_APP_LATE_INIT, WPARAM(0), LPARAM(0));
@@ -486,6 +478,7 @@ pub fn translate(msg: &MSG) -> bool {
 }
 
 fn on_key(msg: &MSG) -> bool {
+    panes::activate(msg.hwnd);
     let Some((list, address, tree, filter)) = with_app(|a| (a.view.list, a.address, a.tree, a.filter)) else {
         return false;
     };
@@ -516,6 +509,8 @@ fn on_key(msg: &MSG) -> bool {
     }
     match key {
         VK_BACK if !in_address && msg.hwnd != filter => run(Browser::back),
+        VK_F6 => panes::focus_other(),
+        VK_S if ctrl && shift => panes::toggle(),
         VK_F2 if in_list => _ = commands::run(commands::CMD_RENAME),
         VK_DELETE if in_list && shift => _ = commands::run(commands::CMD_DELETE_PERMANENTLY),
         VK_DELETE if in_list => _ = commands::run(commands::CMD_DELETE),
@@ -584,6 +579,11 @@ fn on_key(msg: &MSG) -> bool {
                     .filter(|&h| IsWindowVisible(h).as_bool() && IsWindowEnabled(h).as_bool()),
             );
             order.extend([tree, list]);
+            if let Some(other) =
+                with_app(|a| a.split_view.then(|| a.other.as_ref().map(|v| v.list)).flatten()).flatten()
+            {
+                order.push(other);
+            }
             let at = order.iter().position(|&h| h == msg.hwnd).unwrap_or(0);
             let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
             let next = if shift { (at + order.len() - 1) % order.len() } else { (at + 1) % order.len() };
@@ -620,6 +620,9 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let (id, code, from) = (wp.0 & 0xFFFF, (wp.0 >> 16) & 0xFFFF, lp.0);
                 // Typing in the filter box narrows the list at once.
                 if code == EN_CHANGE as usize && with_app(|a| a.filter.0 as isize) == Some(from) {
+                    if with_app(|a| a.syncing_filter) == Some(true) {
+                        return LRESULT(0);
+                    }
                     let text = window_text(HWND(from as _));
                     if let Some(job) = with_app(|a| a.view.browser.set_filter(&text)).flatten() {
                         spawn_sort(job);
@@ -658,7 +661,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
                 LRESULT(1)
             }
-            WM_CTLCOLOREDIT => {
+            WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
                 dark::edit_colors(HDC(wp.0 as _)).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
             }
             WM_ERASEBKGND if dark::erase(hwnd, HDC(wp.0 as _)) => LRESULT(1),
@@ -682,20 +685,21 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             // The only bare client area below the toolbar is the splitter gap.
             WM_LBUTTONDOWN => {
-                if over_splitter(hwnd, lp) {
+                if let Some((kind, edge)) = splitter_at(hwnd, lp) {
                     let x = (lp.0 & 0xFFFF) as i16 as i32;
-                    with_app(|a| a.drag_offset = Some(x - a.split));
+                    with_app(|a| {
+                        a.drag_offset = Some(x - edge);
+                        a.drag_kind = kind;
+                    });
                     SetCapture(hwnd);
                 }
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
-                if let Some(offset) = with_app(|a| a.drag_offset).flatten() {
-                    let mut client = RECT::default();
-                    let _ = GetClientRect(hwnd, &mut client);
+                if let Some((offset, kind)) = with_app(|a| a.drag_offset.map(|o| (o, a.drag_kind))).flatten()
+                {
                     let x = (lp.0 & 0xFFFF) as i16 as i32;
-                    let dpi = GetDpiForWindow(hwnd);
-                    with_app(|a| a.split = tree::clamp_split(x - offset, client.right, dpi));
+                    drag_splitter(hwnd, kind, x - offset);
                     layout(hwnd);
                 }
                 LRESULT(0)
@@ -749,7 +753,8 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 layout(hwnd);
                 LRESULT(0)
             }
-            WM_CONTEXTMENU if with_app(|a| a.view.list.0 as usize) == Some(wp.0) => {
+            WM_CONTEXTMENU if with_app(|a| a.views().any(|v| v.list.0 as usize == wp.0)) == Some(true) => {
+                panes::activate(HWND(wp.0 as _));
                 commands::context_menu(hwnd, lp);
                 LRESULT(0)
             }
@@ -787,14 +792,32 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 
 /// `None` = not handled, let DefWindowProc run.
 unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
-    let (list, tree, strip) = with_app(|a| (a.view.list, a.tree, a.tab_strip))?;
+    let (_list, tree, strip) = with_app(|a| (a.view.list, a.tree, a.tab_strip))?;
     if hdr.hwndFrom == strip {
         return tabbar::on_notify(hdr);
     }
     if hdr.hwndFrom == tree {
         return unsafe { tree::on_notify(hdr, lp) };
     }
-    if hdr.hwndFrom != list {
+    let view = with_app(|a| a.views().find(|v| v.list == hdr.hwndFrom).map(|v| v.id)).flatten()?;
+    if hdr.code == LVN_GETDISPINFOW {
+        let item = unsafe { &mut (*(lp.0 as *mut NMLVDISPINFOW)).item };
+        with_view(view, |v| fill(&v.browser, &mut v.icons, v.drop_row, item));
+        return Some(LRESULT(0));
+    }
+    if matches!(
+        hdr.code,
+        NM_SETFOCUS
+            | NM_CLICK
+            | LVN_COLUMNCLICK
+            | LVN_ITEMACTIVATE
+            | LVN_BEGINDRAG
+            | LVN_BEGINRDRAG
+            | LVN_BEGINLABELEDITW
+    ) {
+        panes::activate(hdr.hwndFrom);
+    }
+    if with_app(|a| a.view.list) != Some(hdr.hwndFrom) {
         return None;
     }
     unsafe {
@@ -894,78 +917,93 @@ fn write(item: &mut LVITEMW, text: &[u16]) {
 
 fn apply(ev: Event) {
     match ev {
-        Event::Listed { generation, result } if tabbar::is_background(generation) => {
-            tabbar::route_listed(generation, result)
-        }
         Event::Listed { generation, result } => {
-            let sel = selected_rows();
-            let applied = with_app(|a| {
-                let r = a.view.browser.on_listed(generation, result, &sel);
+            let id = crate::tabs::tab_of_generation(generation);
+            let sel = selected_rows_for(id);
+            let applied = with_view(id, |v| {
+                let r = v.browser.on_listed(generation, result, &sel);
                 if r != Applied::Stale {
-                    a.view.lister = None;
+                    v.lister = None;
                 }
                 r
             });
             match applied {
                 Some(Applied::Shown { select, new_folder }) => {
-                    refresh(&select, new_folder);
-                    if new_folder {
-                        watch_current();
+                    refresh_view(id, &select, new_folder);
+                    if new_folder && view_visible(id) {
+                        watch_view(id);
                     }
-                    commands::after_refresh();
-                    if let Some(job) = with_app(|a| a.view.browser.sort_job()).flatten() {
+                    if with_app(|a| a.view.id == id) == Some(true) {
+                        commands::after_refresh();
+                    }
+                    if let Some(job) = with_view(id, |v| v.browser.sort_job()).flatten() {
                         spawn_sort(job);
                     }
                 }
-                // The very first folder couldn't be opened (gone since last run?): show the user folder.
-                Some(Applied::Failed) if with_app(|a| a.view.browser.dir().is_none()) == Some(true) => {
-                    update_chrome();
-                    if let Some(home) = std::env::var_os("USERPROFILE") {
-                        go(PathBuf::from(home));
+                Some(Applied::Failed) if with_view(id, |v| v.browser.dir().is_none()) == Some(true) => {
+                    if let Some(home) = std::env::var_os("USERPROFILE")
+                        && let Some(job) = with_view(id, |v| v.browser.go(PathBuf::from(home)))
+                    {
+                        spawn_list(job);
                     }
                 }
-                Some(Applied::Failed) => update_chrome(),
+                Some(Applied::Failed) => {
+                    if with_app(|a| a.view.id == id) == Some(true) {
+                        update_chrome();
+                    }
+                }
                 Some(Applied::Gone(job)) => spawn_list(job),
                 _ => {}
             }
-            if let Some(job) = with_app(|a| a.view.browser.follow_up()).flatten() {
+            tabbar::update_label_for(id);
+            panes::update_labels();
+            if let Some(job) = with_view(id, |v| v.browser.follow_up()).flatten() {
                 spawn_list(job);
             }
         }
-        Event::DirChanged(id) => {
-            if let Some(job) = with_app(|a| {
-                (a.view.watcher.as_ref().map(|w| w.0) == Some(id)).then(|| a.view.browser.on_dir_changed())
+        Event::DirChanged(watch_id) => {
+            let id = with_app(|a| {
+                a.views().find(|v| v.watcher.as_ref().is_some_and(|w| w.0 == watch_id)).map(|v| v.id)
             })
-            .flatten()
-            .flatten()
-            {
+            .flatten();
+            if let Some(job) = id.and_then(|id| with_view(id, |v| v.browser.on_dir_changed()).flatten()) {
                 spawn_list(job);
             }
         }
         Event::WatchReady { id, handle } => on_watch_ready(id, handle),
-        Event::OpDone { result, edit } => commands::on_op_done(result, edit),
-        Event::Resync => refresh(&selected_rows(), false),
+        Event::OpDone { view, dir, result, edit } => commands::on_op_done(view, dir, result, edit),
+        Event::Resync(id) => refresh_view(id, &selected_rows_for(id), false),
         Event::Sorted { generation, sort, show_hidden, filter, order } => {
-            let sel = selected_rows();
+            let id = crate::tabs::tab_of_generation(generation);
+            let sel = selected_rows_for(id);
             if let Some(Applied::Shown { select, .. }) =
-                with_app(|a| a.view.browser.on_sorted(generation, sort, show_hidden, &filter, order, &sel))
+                with_view(id, |v| v.browser.on_sorted(generation, sort, show_hidden, &filter, order, &sel))
             {
-                refresh(&select, false);
+                refresh_view(id, &select, false);
             }
         }
-        Event::Navigate(dir) => go(dir),
+        Event::Navigate { generation, dir } => {
+            let id = crate::tabs::tab_of_generation(generation);
+            if let Some(job) =
+                with_view(id, |v| (v.browser.generation() == generation).then(|| v.browser.go(dir))).flatten()
+            {
+                spawn_list(job);
+            }
+        }
         Event::Message(text) => set_status(&text),
         Event::Preview { token, shown } => preview::finish(token, shown),
-        Event::SearchProgress(found) => {
-            if with_app(|a| a.view.browser.is_loading()) == Some(true) {
+        Event::SearchProgress { generation, found } => {
+            if with_app(|a| a.view.browser.generation() == generation && a.view.browser.is_loading())
+                == Some(true)
+            {
                 set_status(&format!("Searching… {found} found so far  (Esc to stop)"));
             }
         }
         Event::TreeChildren { node, result } => tree::on_children(node, result),
         Event::DriveLabel { node, text } => tree::on_label(node, text),
-        Event::Icon(Done::Node { node, icon }) => tree::on_icon(node, icon),
-        Event::Icon(done) => {
-            if let Some((list, true)) = with_app(|a| (a.view.list, a.view.icons.on_done(done))) {
+        Event::Icon { done: Done::Node { node, icon }, .. } => tree::on_icon(node, icon),
+        Event::Icon { view, done } => {
+            if let Some((list, true)) = with_view(view, |v| (v.list, v.icons.on_done(done))) {
                 unsafe {
                     let _ = InvalidateRect(Some(list), None, false);
                 }
@@ -989,10 +1027,13 @@ fn go(dir: PathBuf) {
 }
 
 fn spawn_list(job: ListJob) {
+    let id = crate::tabs::tab_of_generation(job.generation);
     // A new listing supersedes any search still running.
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let Some((events, live)) = with_app(|a| {
-        std::mem::replace(&mut a.view.lister_cancel, cancel.clone()).store(true, Ordering::SeqCst);
+        if let Some(v) = a.view_mut(id) {
+            std::mem::replace(&mut v.lister_cancel, cancel.clone()).store(true, Ordering::SeqCst);
+        }
         (a.events.clone(), a.live_listers.clone())
     }) else {
         return;
@@ -1014,7 +1055,7 @@ fn spawn_list(job: ListJob) {
                     let mut progress = |found: usize| {
                         if last.elapsed() > std::time::Duration::from_millis(250) {
                             last = std::time::Instant::now();
-                            events.send(Event::SearchProgress(found));
+                            events.send(Event::SearchProgress { generation, found });
                         }
                     };
                     search::search(&dir, q, show_hidden, &|| cancel.load(Ordering::SeqCst), &mut progress)
@@ -1032,24 +1073,30 @@ fn spawn_list(job: ListJob) {
     if worker.is_none() {
         with_app(|a| a.live_listers.fetch_sub(1, Ordering::SeqCst));
     }
-    with_app(|a| a.view.lister = worker);
-    update_chrome();
+    with_view(id, |v| v.lister = worker);
+    if with_app(|a| a.view.id == id) == Some(true) {
+        update_chrome();
+    }
 }
 
 /// Startup work that can wait for the first paint: the shell's icon list
 /// (~20 ms the first time) and the sidebar.
 fn late_init() {
-    let Some((list, tree)) = with_app(|a| (a.view.list, a.tree)) else { return };
+    let Some((lists, tree)) = with_app(|a| (a.views().map(|v| v.list).collect::<Vec<_>>(), a.tree)) else {
+        return;
+    };
     let (image_list, folder_icon) = icons::system_image_list().unwrap_or_default();
     startup_mark("image list");
     if !image_list.is_invalid() {
         unsafe {
-            SendMessageW(
-                list,
-                LVM_SETIMAGELIST,
-                Some(WPARAM(LVSIL_SMALL as usize)),
-                Some(LPARAM(image_list.0)),
-            );
+            for &list in &lists {
+                SendMessageW(
+                    list,
+                    LVM_SETIMAGELIST,
+                    Some(WPARAM(LVSIL_SMALL as usize)),
+                    Some(LPARAM(image_list.0)),
+                );
+            }
             SendMessageW(
                 tree,
                 TVM_SETIMAGELIST,
@@ -1058,12 +1105,17 @@ fn late_init() {
             );
         }
     }
-    with_app(|a| a.view.icons.folder = folder_icon);
+    let ids = with_app(|a| a.views().map(|v| v.id).collect::<Vec<_>>()).unwrap_or_default();
+    for id in ids {
+        with_view(id, |v| v.icons.folder = folder_icon);
+    }
     let this_pc = tree::populate();
     startup_mark("sidebar");
     with_app(|a| a.this_pc = this_pc);
-    unsafe {
-        let _ = InvalidateRect(Some(list), None, false);
+    for list in lists {
+        unsafe {
+            let _ = InvalidateRect(Some(list), None, false);
+        }
     }
 }
 
@@ -1082,6 +1134,9 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
             show_hidden: a.view.browser.show_hidden,
             split: Some(a.split),
             preview: preview::is_visible_in(a),
+            dual_pane: a.split_view,
+            pane_ratio: a.pane_ratio,
+            preview_width: a.preview_width,
             last_folder: a
                 .startup_override
                 .clone()
@@ -1185,11 +1240,14 @@ pub fn startup_mark(what: &str) {
 }
 
 /// Starts watching the folder on screen, replacing any previous watcher.
-fn watch_current() {
-    stop_watching();
+fn watch_view(view: u64) {
+    stop_watching_view(view);
+    if !view_visible(view) {
+        return;
+    }
     let Some((id, dir, events)) = with_app(|a| {
         a.watch_ids += 1;
-        Some((a.watch_ids, a.view.browser.dir()?.to_path_buf(), a.events.clone()))
+        Some((a.watch_ids, a.view_mut(view)?.browser.dir()?.to_path_buf(), a.events.clone()))
     })
     .flatten() else {
         return;
@@ -1200,14 +1258,15 @@ fn watch_current() {
         move || events.send(Event::DirChanged(id)),
         move |handle| ready.send(Event::WatchReady { id, handle }),
     );
-    with_app(|a| a.view.watcher = Some((id, watcher)));
+    with_view(view, |v| v.watcher = Some((id, watcher)));
 }
-
-/// Stops the watcher (it closes the folder on its own thread) and drops its device notification.
 fn stop_watching() {
-    let Some((watcher, note)) = with_app(|a| (a.view.watcher.take(), a.view.device_note.take())) else {
-        return;
-    };
+    if let Some(id) = with_app(|a| a.view.id) {
+        stop_watching_view(id);
+    }
+}
+fn stop_watching_view(view: u64) {
+    let Some((watcher, note)) = with_view(view, |v| (v.watcher.take(), v.device_note.take())) else { return };
     drop(watcher);
     if let Some((note, _)) = note {
         unsafe {
@@ -1215,14 +1274,13 @@ fn stop_watching() {
         }
     }
 }
-
 fn on_watch_ready(id: u64, handle: isize) {
-    let Some(hwnd) =
-        with_app(|a| (a.view.watcher.as_ref().map(|w| w.0) == Some(id)).then_some(a.hwnd)).flatten()
-    else {
+    let Some((hwnd, view)) = with_app(|a| {
+        a.views().find(|v| v.watcher.as_ref().is_some_and(|w| w.0 == id)).map(|v| (a.hwnd, v.id))
+    })
+    .flatten() else {
         return;
     };
-    // Lets us close the folder when someone asks to eject its drive.
     let filter = DEV_BROADCAST_HANDLE {
         dbch_size: size_of::<DEV_BROADCAST_HANDLE>() as u32,
         dbch_devicetype: DBT_DEVTYP_HANDLE.0,
@@ -1237,7 +1295,7 @@ fn on_watch_ready(id: u64, handle: isize) {
         )
     };
     if let Ok(note) = note {
-        with_app(|a| a.view.device_note = Some((note.0 as isize, handle)));
+        with_view(view, |v| v.device_note = Some((note.0 as isize, handle)));
     }
 }
 
@@ -1248,19 +1306,22 @@ fn on_device_change(event: u32, lp: LPARAM) {
     let hdr = unsafe { &*(lp.0 as *const DEV_BROADCAST_HDR) };
     if hdr.dbch_devicetype == DBT_DEVTYP_HANDLE {
         let handle = unsafe { (*(lp.0 as *const DEV_BROADCAST_HANDLE)).dbch_handle.0 as isize };
-        if with_app(|a| a.view.device_note.map(|n| n.1) == Some(handle)) != Some(true) {
+        let Some(view) =
+            with_app(|a| a.views().find(|v| v.device_note.is_some_and(|n| n.1 == handle)).map(|v| v.id))
+                .flatten()
+        else {
             return;
-        }
+        };
         match event {
             DBT_DEVICEQUERYREMOVE => {
                 // The eject goes ahead only if nobody holds a handle on the drive: close ours now.
-                if let Some((_, w)) = with_app(|a| a.view.watcher.take()).flatten() {
+                if let Some((_, w)) = with_view(view, |v| v.watcher.take()).flatten() {
                     w.stop_and_wait(std::time::Duration::from_millis(500));
                 }
             }
             DBT_DEVICEREMOVECOMPLETE => {
-                stop_watching();
-                if let Some(job) = with_app(|a| a.view.browser.on_dir_changed()).flatten() {
+                stop_watching_view(view);
+                if let Some(job) = with_view(view, |v| v.browser.on_dir_changed()).flatten() {
                     spawn_list(job);
                 }
             }
@@ -1308,10 +1369,14 @@ fn spawn_sort(job: SortJob) {
 }
 
 fn open_file(path: PathBuf) {
-    let Some((events, hwnd)) = with_app(|a| (a.events.clone(), a.hwnd.0 as isize)) else { return };
+    let Some((events, hwnd, generation)) =
+        with_app(|a| (a.events.clone(), a.hwnd.0 as isize, a.view.browser.generation()))
+    else {
+        return;
+    };
     spawn("open", move || {
         let ev = match crash::guard(|| shell::open(&path, HWND(hwnd as _))) {
-            Some(Ok(Some(dir))) => Event::Navigate(dir),
+            Some(Ok(Some(dir))) => Event::Navigate { generation, dir },
             Some(Ok(None)) => return,
             Some(Err(e)) => Event::Message(e),
             None => Event::Message(format!("Can't open {}", path.display())),
@@ -1349,7 +1414,11 @@ fn focused_path() -> Option<(PathBuf, bool)> {
 }
 
 fn selected_rows() -> Vec<usize> {
-    let Some(list) = with_app(|a| a.view.list) else { return Vec::new() };
+    with_app(|a| a.view.id).map(selected_rows_for).unwrap_or_default()
+}
+
+fn selected_rows_for(id: u64) -> Vec<usize> {
+    let Some(list) = with_view(id, |v| v.list) else { return Vec::new() };
     let mut rows = Vec::new();
     let mut i = -1isize;
     loop {
@@ -1370,16 +1439,16 @@ fn selected_rows() -> Vec<usize> {
 }
 
 /// Pushes the browser's contents to the list, selecting `select`.
-fn refresh(select: &[usize], new_folder: bool) {
+fn refresh_view(id: u64, select: &[usize], new_folder: bool) {
     let Some((list, count, renaming)) =
-        with_app(|a| (a.view.list, a.view.browser.order.len(), a.view.renaming.is_some()))
+        with_view(id, |v| (v.list, v.browser.order.len(), v.renaming.is_some()))
     else {
         return;
     };
     if renaming {
         if !new_folder {
             // Resetting the list now would cancel the user's typing.
-            with_app(|a| a.view.resync_after_rename = true);
+            with_view(id, |v| v.resync_after_rename = true);
             return;
         }
         unsafe { SendMessageW(list, LVM_CANCELEDITLABEL, None, None) };
@@ -1413,7 +1482,9 @@ fn refresh(select: &[usize], new_folder: bool) {
         }
         let _ = InvalidateRect(Some(list), None, false);
     }
-    update_chrome();
+    if with_app(|a| a.view.id == id) == Some(true) {
+        update_chrome();
+    }
 }
 
 /// Title, address bar, button states and status text from the browser.
@@ -1430,10 +1501,12 @@ fn update_chrome() {
         return;
     };
     // The browser drops the filter when going elsewhere: empty the box to match.
-    if filter_text.is_empty() && unsafe { GetFocus() } != filter && !window_text(filter).is_empty() {
+    if unsafe { GetFocus() } != filter && !window_text(filter).eq_ignore_ascii_case(&filter_text) {
+        with_app(|a| a.syncing_filter = true);
         unsafe {
-            let _ = SetWindowTextW(filter, w!(""));
+            let _ = SetWindowTextW(filter, &HSTRING::from(filter_text));
         }
+        with_app(|a| a.syncing_filter = false);
     }
     unsafe {
         for (button, on) in buttons.iter().zip(enabled) {
@@ -1442,6 +1515,7 @@ fn update_chrome() {
         let _ = SetWindowTextW(hwnd, &HSTRING::from(format!("{title} - Kestrel")));
     }
     toolbar::update();
+    panes::update_labels();
     show_location();
     tabbar::update_label();
     if let Some(text) = with_app(|a| a.view.browser.status()) {
@@ -1534,13 +1608,35 @@ fn layout(hwnd: HWND) {
         let _ = MoveWindow(tree, 0, top, split, h, true);
         let rest = (client.right - split - gap).max(0);
         // Preview pane, when shown: a third of the space right of the sidebar.
-        let preview_w =
-            if preview::is_visible() { (rest / 3).max(scale(hwnd, 200)).min(rest / 2) } else { 0 };
-        let _ = MoveWindow(list, split + gap, top, rest - preview_w, h, true);
+        let preview_w = if preview::is_visible() {
+            with_app(|a| a.preview_width).flatten().unwrap_or(rest / 3).max(scale(hwnd, 100)).min(rest / 2)
+        } else {
+            0
+        };
+        let preview_space = if preview_w > 0 { preview_w + gap } else { 0 };
+        let _ = ShowWindow(list, SW_SHOWNA);
+        if let Some((other, enabled, right, ratio)) =
+            with_app(|a| a.other.as_ref().map(|v| (v.list, a.split_view, a.right_active, a.pane_ratio)))
+                .flatten()
+        {
+            let _ = ShowWindow(other, if enabled { SW_SHOWNA } else { SW_HIDE });
+            if enabled {
+                let width = (rest - preview_space - gap).max(0);
+                let left_width = width * ratio.clamp(100, 900) / 1000;
+                let (left, right) = if right { (other, list) } else { (list, other) };
+                let _ = MoveWindow(left, split + gap, top, left_width, h, true);
+                let _ = MoveWindow(right, split + gap + left_width + gap, top, width - left_width, h, true);
+            } else {
+                let _ = MoveWindow(list, split + gap, top, rest - preview_space, h, true);
+            }
+        } else {
+            let _ = MoveWindow(list, split + gap, top, rest - preview_space, h, true);
+        }
         if let Some(pane) = with_app(|a| a.preview.hwnd) {
             let _ = MoveWindow(pane, client.right - preview_w, top, preview_w, h, true);
         }
     }
+    panes::layout_labels(hwnd);
     if preview::is_visible() {
         preview::resize();
     }
@@ -1550,12 +1646,82 @@ fn splitter_width(hwnd: HWND) -> i32 {
     scale(hwnd, 5)
 }
 
-/// Is the client point in `lp` on the gap between sidebar and list?
+#[derive(Clone, Copy)]
+enum SplitKind {
+    Sidebar,
+    Panes,
+    Preview,
+}
+
+fn client_rect_of(parent: HWND, child: HWND) -> RECT {
+    let mut rect = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(child, &mut rect);
+        let mut point = POINT { x: rect.left, y: rect.top };
+        let _ = ScreenToClient(parent, &mut point);
+        let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+        rect = RECT { left: point.x, top: point.y, right: point.x + width, bottom: point.y + height };
+    }
+    rect
+}
+fn splitter_at(hwnd: HWND, lp: LPARAM) -> Option<(SplitKind, i32)> {
+    let x = (lp.0 & 0xffff) as i16 as i32;
+    let y = ((lp.0 >> 16) & 0xffff) as i16 as i32;
+    if y < content_top(hwnd) {
+        return None;
+    }
+    let (tree, list, other, right, split, preview) = with_app(|a| {
+        (a.tree, a.view.list, a.other.as_ref().map(|v| v.list), a.right_active, a.split_view, a.preview.hwnd)
+    })?;
+    let gap = splitter_width(hwnd);
+    let sidebar = client_rect_of(hwnd, tree).right;
+    if (sidebar..sidebar + gap).contains(&x) {
+        return Some((SplitKind::Sidebar, sidebar));
+    }
+    if split && let Some(other) = other {
+        let edge = client_rect_of(hwnd, if right { other } else { list }).right;
+        if (edge..edge + gap).contains(&x) {
+            return Some((SplitKind::Panes, edge));
+        }
+    }
+    if preview::is_visible() {
+        let edge = client_rect_of(hwnd, preview).left - gap;
+        if (edge..edge + gap).contains(&x) {
+            return Some((SplitKind::Preview, edge));
+        }
+    }
+    None
+}
 fn over_splitter(hwnd: HWND, lp: LPARAM) -> bool {
-    let x = (lp.0 & 0xFFFF) as i16 as i32;
-    let y = ((lp.0 >> 16) & 0xFFFF) as i16 as i32;
-    let Some(split) = with_app(|a| a.split) else { return false };
-    y >= content_top(hwnd) && x >= split && x < split + splitter_width(hwnd)
+    splitter_at(hwnd, lp).is_some()
+}
+fn drag_splitter(hwnd: HWND, kind: SplitKind, x: i32) {
+    let mut client = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+    }
+    match kind {
+        SplitKind::Sidebar => {
+            let dpi = unsafe { GetDpiForWindow(hwnd) };
+            with_app(|a| a.split = tree::clamp_split(x, client.right, dpi));
+        }
+        SplitKind::Preview => {
+            with_app(|a| a.preview_width = Some((client.right - x - splitter_width(hwnd)).max(100)));
+        }
+        SplitKind::Panes => {
+            if let Some((left, right)) = with_app(|a| {
+                a.other
+                    .as_ref()
+                    .map(|v| if a.right_active { (v.list, a.view.list) } else { (a.view.list, v.list) })
+            })
+            .flatten()
+            {
+                let left = client_rect_of(hwnd, left).left;
+                let width = (client_rect_of(hwnd, right).right - left - splitter_width(hwnd)).max(1);
+                with_app(|a| a.pane_ratio = ((x - left) * 1000 / width).clamp(100, 900));
+            }
+        }
+    }
 }
 
 fn tab_height(hwnd: HWND) -> i32 {
@@ -1596,6 +1762,8 @@ fn apply_settings(hwnd: HWND, settings: Settings) {
     let Some((list, job)) = with_app(|a| {
         a.theme = settings.theme;
         a.split = settings.split.unwrap_or(240);
+        a.pane_ratio = settings.pane_ratio;
+        a.preview_width = settings.preview_width;
         a.startup_override = Some(settings.last_folder.clone());
         a.view.browser.show_hidden = settings.show_hidden;
         let job = a.view.browser.set_sort(settings.sort);
@@ -1623,6 +1791,9 @@ fn apply_settings(hwnd: HWND, settings: Settings) {
         let _ = ShowWindow(hwnd, if settings.maximized { SW_SHOWMAXIMIZED } else { SW_SHOWNOACTIVATE });
     }
     dark::apply(hwnd, Palette::new(settings.theme.is_dark(system_prefers_dark())));
+    if with_app(|a| a.split_view) != Some(settings.dual_pane) {
+        panes::toggle();
+    }
     if preview::is_visible() != settings.preview {
         preview::toggle(hwnd);
     }
@@ -1639,4 +1810,17 @@ fn apply_settings(hwnd: HWND, settings: Settings) {
             events.send(Event::Message(format!("Settings could not be saved: {e}")));
         }
     });
+}
+
+fn with_view<R>(id: u64, f: impl FnOnce(&mut panes::FolderView) -> R) -> Option<R> {
+    with_app(|a| a.view_mut(id).map(f)).flatten()
+}
+fn view_visible(id: u64) -> bool {
+    with_app(|a| a.view.id == id || (a.split_view && a.other.as_ref().is_some_and(|v| v.id == id)))
+        == Some(true)
+}
+
+/// Active folder list, also used by the window tests and stress runner.
+pub fn active_list() -> Option<HWND> {
+    with_app(|a| a.view.list)
 }

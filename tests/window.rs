@@ -1011,28 +1011,45 @@ fn tabs_keep_their_own_folders() {
     let hwnd = open(&t.0);
     let list = list_of(hwnd);
     let root_rows = ["sub", "a.txt"];
-    assert!(pump_until(WAIT, || rows(list) == root_rows));
+    assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()) == root_rows));
     let root_name = t.0.file_name().unwrap().to_string_lossy().into_owned();
     assert_eq!(tab_labels(hwnd), std::slice::from_ref(&root_name));
 
     ctrl_key(list, VK_T, false);
     assert!(
-        pump_until(WAIT, || tab_labels(hwnd).len() == 2 && rows(list) == root_rows),
+        pump_until(WAIT, || tab_labels(hwnd).len() == 2 && rows(ui::active_list().unwrap()) == root_rows),
         "{:?}",
         tab_labels(hwnd)
     );
+    let list = ui::active_list().unwrap();
     activate(hwnd, list, 0);
-    assert!(pump_until(WAIT, || rows(list) == ["inner.txt"]), "{:?}", rows(list));
+    assert!(
+        pump_until(WAIT, || rows(ui::active_list().unwrap()) == ["inner.txt"]),
+        "{:?}",
+        rows(ui::active_list().unwrap())
+    );
     assert_eq!(tab_labels(hwnd), [root_name.clone(), "sub".to_string()]);
 
-    ctrl_key(list, VK_TAB, false);
-    assert!(pump_until(WAIT, || rows(list) == root_rows), "{:?}", rows(list));
-    ctrl_key(list, VK_TAB, true);
-    assert!(pump_until(WAIT, || rows(list) == ["inner.txt"]), "{:?}", rows(list));
+    ctrl_key(ui::active_list().unwrap(), VK_TAB, false);
+    assert!(
+        pump_until(WAIT, || rows(ui::active_list().unwrap()) == root_rows),
+        "{:?}",
+        rows(ui::active_list().unwrap())
+    );
+    ctrl_key(ui::active_list().unwrap(), VK_TAB, true);
+    assert!(
+        pump_until(WAIT, || rows(ui::active_list().unwrap()) == ["inner.txt"]),
+        "{:?}",
+        rows(ui::active_list().unwrap())
+    );
 
-    ctrl_key(list, VK_W, false);
-    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 1 && rows(list) == root_rows), "{:?}", rows(list));
-    ctrl_key(list, VK_W, false); // the last tab stays
+    ctrl_key(ui::active_list().unwrap(), VK_W, false);
+    assert!(
+        pump_until(WAIT, || tab_labels(hwnd).len() == 1 && rows(ui::active_list().unwrap()) == root_rows),
+        "{:?}",
+        rows(ui::active_list().unwrap())
+    );
+    ctrl_key(ui::active_list().unwrap(), VK_W, false); // the last tab stays
     assert_eq!(tab_labels(hwnd).len(), 1);
     close(hwnd);
 }
@@ -1318,4 +1335,140 @@ fn settings_validate_apply_and_cancel_without_losing_preferences() {
     while ui::running_operations() > 0 {
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+fn lists_in(hwnd: HWND) -> Vec<HWND> {
+    let mut lists = Vec::new();
+    let mut after = None;
+    while let Ok(list) = unsafe { FindWindowExW(Some(hwnd), after, w!("SysListView32"), None) } {
+        lists.push(list);
+        after = Some(list);
+    }
+    lists
+}
+fn focus_pane(hwnd: HWND, list: HWND) {
+    notify(hwnd, hdr(list, NM_SETFOCUS));
+}
+fn navigate_to(hwnd: HWND, path: &Path) {
+    let address = find(hwnd, w!("Edit"));
+    type_into(address, &path.display().to_string());
+    key(address, VK_RETURN);
+}
+
+#[test]
+fn split_panes_navigate_independently_and_survive_tab_switches() {
+    let _desktop = desktop();
+    let t = TempDir::new("split");
+    for name in ["left", "right"] {
+        std::fs::create_dir(t.0.join(name)).unwrap();
+        std::fs::write(t.0.join(name).join(format!("{name}.txt")), "").unwrap();
+    }
+    let hwnd = open(&t.0);
+    let left = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(left) == ["left", "right"]));
+    command(hwnd, ui::toolbar::SPLIT);
+    let right = lists_in(hwnd).into_iter().find(|&h| h != left).unwrap();
+    assert!(pump_until(WAIT, || rows(right) == ["left", "right"]));
+    focus_pane(hwnd, right);
+    navigate_to(hwnd, &t.0.join("right"));
+    assert!(pump_until(WAIT, || rows(right) == ["right.txt"]));
+    assert_eq!(rows(left), ["left", "right"]);
+    focus_pane(hwnd, left);
+    navigate_to(hwnd, &t.0.join("left"));
+    assert!(pump_until(WAIT, || rows(left) == ["left.txt"]));
+    assert_eq!(rows(right), ["right.txt"]);
+    ctrl_key(left, VK_T, false);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
+    let new_list = ui::active_list().unwrap();
+    ctrl_key(new_list, VK_TAB, false);
+    assert!(pump_until(WAIT, || ui::active_list() == Some(left)));
+    assert_eq!(rows(left), ["left.txt"]);
+    assert_eq!(rows(right), ["right.txt"]);
+    key(left, VK_F6);
+    assert!(pump_until(WAIT, || ui::active_list() == Some(right)));
+    key(right, VK_BACK);
+    assert!(pump_until(WAIT, || rows(right) == ["left", "right"]));
+    assert_eq!(rows(left), ["left.txt"]);
+    command(hwnd, ui::toolbar::SPLIT);
+    command(hwnd, ui::toolbar::SPLIT);
+    assert_eq!(rows(left), ["left.txt"]);
+    assert_eq!(rows(right), ["left", "right"]);
+    close(hwnd);
+}
+
+#[test]
+fn creating_a_folder_keeps_its_destination_when_focus_changes() {
+    let _desktop = desktop();
+    let t = TempDir::new("split-op");
+    std::fs::create_dir(t.0.join("target")).unwrap();
+    std::fs::write(t.0.join("target").join("marker.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let left = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(left) == ["target"]));
+    command(hwnd, ui::toolbar::SPLIT);
+    let right = lists_in(hwnd).into_iter().find(|&h| h != left).unwrap();
+    assert!(pump_until(WAIT, || rows(right) == ["target"]));
+    focus_pane(hwnd, right);
+    navigate_to(hwnd, &t.0.join("target"));
+    assert!(pump_until(WAIT, || rows(right) == ["marker.txt"]));
+    command(hwnd, ui::CMD_NEW_FOLDER);
+    focus_pane(hwnd, left);
+    assert!(
+        pump_until(WAIT, || t.0.join("target").join("New folder").exists() && ui::running_operations() == 0)
+    );
+    assert!(!t.0.join("New folder").exists());
+    assert_eq!(ui::active_list(), Some(left));
+    assert!(edit_control(left).is_invalid(), "completion must not start renaming in the other pane");
+    close(hwnd);
+}
+
+#[test]
+fn split_and_preview_dividers_are_dragged_and_remembered() {
+    let _desktop = desktop();
+    let t = TempDir::new("split-size");
+    let hwnd = open(&t.0);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    let left = list_of(hwnd);
+    command(hwnd, ui::toolbar::SPLIT);
+    let right = lists_in(hwnd).into_iter().find(|&h| h != left).unwrap();
+    let rect = |h| {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        unsafe {
+            GetWindowRect(h, &mut r).unwrap();
+        }
+        r
+    };
+    let a = rect(left);
+    let mut point = windows::Win32::Foundation::POINT { x: a.right + 2, y: a.top + 40 };
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point);
+    }
+    let lp = |x: i32, y: i32| LPARAM(((y as isize & 0xffff) << 16) | (x as isize & 0xffff));
+    unsafe {
+        SendMessageW(hwnd, WM_LBUTTONDOWN, Some(WPARAM(1)), Some(lp(point.x, point.y)));
+        SendMessageW(hwnd, WM_MOUSEMOVE, Some(WPARAM(1)), Some(lp(point.x + 70, point.y)));
+        SendMessageW(hwnd, WM_LBUTTONUP, None, Some(lp(point.x + 70, point.y)));
+    }
+    assert!(rect(left).right > a.right + 30);
+    assert!(rect(right).left > rect(left).right);
+    command(hwnd, ui::toolbar::PREVIEW);
+    let preview = find(hwnd, w!("KestrelPreview"));
+    let p = rect(preview);
+    let mut point = windows::Win32::Foundation::POINT { x: p.left - 2, y: p.top + 40 };
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point);
+    }
+    unsafe {
+        SendMessageW(hwnd, WM_LBUTTONDOWN, Some(WPARAM(1)), Some(lp(point.x, point.y)));
+        SendMessageW(hwnd, WM_MOUSEMOVE, Some(WPARAM(1)), Some(lp(point.x - 40, point.y)));
+        SendMessageW(hwnd, WM_LBUTTONUP, None, Some(lp(point.x - 40, point.y)));
+    }
+    assert!(rect(preview).left < p.left);
+    close(hwnd);
+    let settings = ui::take_final_settings().unwrap();
+    assert!(settings.dual_pane);
+    assert!(settings.pane_ratio > 500);
+    assert!(settings.preview_width.is_some());
 }

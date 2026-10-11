@@ -49,7 +49,7 @@ examples/stress.rs, affected unit/window tests, Cargo.toml, Cargo.lock, res/app.
 
 - [x] Keep Back, Forward, Up, address, and filter on the top row.
 - [x] Put a command row immediately below it, with New folder, Cut, Copy, Paste, Rename, Delete, Refresh, and dropdowns for View and More.
-- [ ] Put Split, Settings, and Help on the command row. Split becomes available with step 3.
+- [x] Put Split, Settings, and Help on the command row. Split becomes available with step 3.
 - [x] View exposes sorting, hidden items, and preview visibility; additional view modes appear only when implemented.
 - [x] More exposes Copy as path, Select all, Show in Explorer, and the existing full Windows menu.
 - [x] Disable selection-dependent actions when unavailable. Give every button a readable label or tooltip and keyboard access.
@@ -72,7 +72,7 @@ Expose existing settings first, grouped into these pages:
 - [x] Preserve existing settings files, the old-name migration, atomic saves, and defaults for missing or malformed keys.
 - [ ] Apply live changes to open windows where appropriate; save through one owner so windows do not overwrite each other's settings.
 - [ ] Distinguish global defaults from current view/session state so changing a default does not unexpectedly reset another window.
-- [ ] Add controls for new split/preview dimensions when those features are implemented.
+- [x] Add controls for new split/preview dimensions when those features are implemented.
 
 Font size, density, click behavior, custom key bindings, plugins, and other currently unsupported preferences are not part of this Settings pass.
 
@@ -81,7 +81,7 @@ Font size, density, click behavior, custom key bindings, plugins, and other curr
 - [x] Open it through Help > Keyboard shortcuts and F1.
 - [x] Group shortcuts into Navigation, Files, Search, Tabs/windows, and View.
 - [x] Show action, keys, and scope, including cases where a key keeps its normal meaning in an edit box.
-- [ ] Include every supported shortcut, including Ctrl+Shift+Tab, Shift+F10, Shift+Del, and the new split-pane commands when added.
+- [x] Include every supported shortcut, including Ctrl+Shift+Tab, Shift+F10, Shift+Del, and the new split-pane commands when added.
 - [ ] Keep the guide consistent with actual command handling and menu labels. Once shared shortcut definitions exist, use them for the guide.
 - [ ] Make the guide keyboard navigable, readable in both themes, and usable at high DPI.
 
@@ -93,17 +93,17 @@ small UI modules for the toolbar/settings/help as needed, tests/window.rs, relev
 
 ## 3. Add two-pane navigation inside one window
 
-- [ ] Toggle between one folder view and two side-by-side folder views.
-- [ ] Give each pane its own folder, history, selection, scroll position, sorting, filter/search, loading cancellation, and watcher.
-- [ ] Use a draggable center divider and a clear active-pane indication.
-- [ ] Keep one address/filter row, sidebar, command toolbar, and preview area; they follow the active pane.
-- [ ] Keep the existing single tab strip. Each tab remembers its one- or two-pane layout and each pane's browsing state.
-- [ ] New split starts with the second pane at the current folder. Turning split off preserves the second pane's state for reopening.
-- [ ] Route navigation, file commands, menus, and drops to the intended pane.
-- [ ] Capture operation paths and destinations when commands start, so later focus changes cannot redirect a copy, move, or rename.
-- [ ] Identify asynchronous results by pane and tab as well as generation. Late results must not update a different pane.
-- [ ] Preserve in-progress operations and discard stale UI results when a pane, tab, or window closes.
-- [ ] Add documented commands for toggling split and focusing the other pane; choose keys after checking current shortcuts.
+- [x] Toggle between one folder view and two side-by-side folder views.
+- [x] Give each pane its own folder, history, selection, scroll position, sorting, filter/search, loading cancellation, and watcher.
+- [x] Use a draggable center divider and a clear active-pane indication.
+- [x] Keep one address/filter row, sidebar, command toolbar, and preview area; they follow the active pane.
+- [x] Keep the existing single tab strip. Each tab remembers its one- or two-pane layout and each pane's browsing state.
+- [x] New split starts with the second pane at the current folder. Turning split off preserves the second pane's state for reopening.
+- [x] Route navigation, file commands, menus, and drops to the intended pane.
+- [x] Capture operation paths and destinations when commands start, so later focus changes cannot redirect a copy, move, or rename.
+- [x] Identify asynchronous results by pane and tab as well as generation. Late results must not update a different pane.
+- [x] Preserve in-progress operations and discard stale UI results when a pane, tab, or window closes.
+- [x] Add documented commands for toggling split and focusing the other pane; choose keys after checking current shortcuts.
 
 Implementation approach: move the state that actually belongs to a folder view out of the current single-view App fields.
 Reuse Browser, Tabs, listing/sorting, Events, icons, Watcher, ops, clipboard, and drag/drop behavior.
@@ -124,7 +124,7 @@ event callers and routing, tests/window.rs, relevant logic tests.
 - [ ] Restore open tabs, active tab, split layout, and each pane's folder.
 - [ ] Save and restore secondary-window state through one coordinated writer; retain every window's state instead of letting the last writer win.
 - [ ] Restore missing folders gracefully and fit window bounds to the current monitors.
-- [ ] Give the preview pane a draggable divider and persist its width.
+- [x] Give the preview pane a draggable divider and persist its width.
 - [x] Fix repeated Back presses during a load; check the same situation for Forward and cancellation.
 
 Pass condition: restart restores the session, secondary windows retain their settings, sidebar state matches the active folder,
@@ -188,3 +188,8 @@ The baseline 600-second stress run completed 11,713 UI actions and 213,177 file 
 Longest loop stall was 101.29 ms; growth after warm-up was handles -14, GDI 0, USER -1.
 Two individual early paint messages took 128 ms and 166 ms. A debug build ran during this test;
 repeat under quiet conditions after the remaining features. Startup first-paint measurements remain pending.
+
+2026-10-11: independent folder panes, pane-scoped worker results and operations, per-tab view controls,
+center/preview dividers, and Ctrl+Shift+S / F6 added. The window regression run passed 33 tests
+before exposing a filter casing regression; that regression was fixed and its test passed separately.
+Clippy passed. SMB remains ignored; two clipboard-writing tests were excluded.

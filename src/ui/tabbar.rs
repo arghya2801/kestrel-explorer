@@ -1,46 +1,24 @@
-//! Tabs. The active tab's browser lives in `App::browser` like before; the
-//! others wait in their `TabSlot`. Switching swaps them, saving the outgoing
-//! tab's selection and scroll position.
-
+//! A tab owns its folder views; switching tabs preserves both panes.
+use super::{
+    child,
+    panes::{self, Workspace},
+    with_app,
+};
+use crate::{browser::Browser, settings::Settings};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
-
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Controls::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PWSTR, Result, w};
 
-use super::{
-    child, go, refresh, selected_rows, spawn_list, stop_watching, update_chrome, update_sort_arrows,
-    watch_current, with_app,
-};
-use crate::browser::{Applied, Browser};
-use crate::listing::Snapshot;
-use crate::tabs::{generation_base, tab_of_generation};
-
 pub(super) struct TabSlot {
-    pub(super) id: u64,
-    /// `None` for the active tab, whose browser is `App::browser`.
-    browser: Option<Browser>,
-    lister: Option<JoinHandle<()>>,
-    lister_cancel: Arc<AtomicBool>,
-    selected: Vec<usize>,
-    top: usize,
+    pub workspace: Option<Workspace>,
 }
-
 impl TabSlot {
-    pub(super) fn active(id: u64) -> TabSlot {
-        TabSlot {
-            id,
-            browser: None,
-            lister: None,
-            lister_cancel: Arc::default(),
-            selected: Vec::new(),
-            top: 0,
-        }
+    pub(super) fn active(_id: u64) -> Self {
+        Self { workspace: None }
     }
 }
 
@@ -51,7 +29,6 @@ pub(super) unsafe fn create(parent: HWND) -> Result<HWND> {
     insert_label(strip, 0, "");
     Ok(strip)
 }
-
 fn insert_label(strip: HWND, index: usize, text: &str) {
     let text = HSTRING::from(text);
     let item = TCITEMW { mask: TCIF_TEXT, pszText: PWSTR(text.as_ptr() as *mut _), ..Default::default() };
@@ -59,7 +36,6 @@ fn insert_label(strip: HWND, index: usize, text: &str) {
         SendMessageW(strip, TCM_INSERTITEMW, Some(WPARAM(index)), Some(LPARAM(&item as *const _ as isize)))
     };
 }
-
 fn set_label(strip: HWND, index: usize, text: &str) {
     let text = HSTRING::from(text);
     let item = TCITEMW { mask: TCIF_TEXT, pszText: PWSTR(text.as_ptr() as *mut _), ..Default::default() };
@@ -67,21 +43,14 @@ fn set_label(strip: HWND, index: usize, text: &str) {
         SendMessageW(strip, TCM_SETITEMW, Some(WPARAM(index)), Some(LPARAM(&item as *const _ as isize)))
     };
 }
-
-/// Short name for a tab: the folder's name, or the search.
 fn label_for(b: &Browser) -> String {
     if let Some(q) = b.query() {
         return format!("Search: {q}");
     }
-    match b.dir() {
-        Some(d) => {
-            d.file_name().map_or_else(|| d.display().to_string(), |n| n.to_string_lossy().into_owned())
-        }
-        None => "Loading…".into(),
-    }
+    b.dir()
+        .map(|p| p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "Loading…".into())
 }
-
-/// Refreshes the active tab's label.
 pub(super) fn update_label() {
     if let Some((strip, index, text)) =
         with_app(|a| (a.tab_strip, a.tabs.active(), label_for(&a.view.browser)))
@@ -89,31 +58,62 @@ pub(super) fn update_label() {
         set_label(strip, index, &text);
     }
 }
-
-/// Opens a tab right of the active one showing `dir` (default: the current folder).
+pub(super) fn update_label_for(id: u64) {
+    if let Some((strip, index, text)) = with_app(|a| {
+        if a.view.id == id {
+            return Some((a.tab_strip, a.tabs.active(), label_for(&a.view.browser)));
+        }
+        a.tabs.items().iter().enumerate().find_map(|(i, t)| {
+            t.workspace
+                .as_ref()
+                .filter(|w| w.view.id == id)
+                .map(|w| (a.tab_strip, i, label_for(&w.view.browser)))
+        })
+    })
+    .flatten()
+    {
+        set_label(strip, index, &text);
+    }
+}
 pub(super) fn new_tab(dir: Option<PathBuf>) {
-    let Some((index, strip, dir)) = with_app(|a| {
+    let Some((hwnd, id, settings, events, font, dir)) = with_app(|a| {
         let id = a.next_tab_id;
         a.next_tab_id += 1;
-        let mut b = Browser::with_generation_base(generation_base(id));
-        (b.sort, b.show_hidden) = (a.view.browser.sort, a.view.browser.show_hidden);
-        let dir = dir.or_else(|| a.view.browser.dir().map(Path::to_path_buf));
+        (
+            a.hwnd,
+            id,
+            Settings {
+                sort: a.view.browser.sort,
+                show_hidden: a.view.browser.show_hidden,
+                ..Default::default()
+            },
+            a.events.clone(),
+            a.font,
+            dir.or_else(|| a.view.browser.dir().map(Path::to_path_buf)),
+        )
+    }) else {
+        return;
+    };
+    let view = match unsafe { panes::create(hwnd, &settings, id, events, font) } {
+        Ok(v) => v,
+        Err(e) => return super::set_status(&format!("Couldn't create tab: {e}")),
+    };
+    let Some((strip, index)) = with_app(|a| {
         let from = a.tabs.active();
-        let slot = TabSlot { browser: Some(b), ..TabSlot::active(id) };
-        let index = a.tabs.open(slot);
-        a.tabs.select(from); // `switch_to` does the activating
-        (index, a.tab_strip, dir)
+        let index = a.tabs.open(TabSlot {
+            workspace: Some(Workspace { view, other: None, split: false, right_active: false, ratio: 500 }),
+        });
+        a.tabs.select(from);
+        (a.tab_strip, index)
     }) else {
         return;
     };
     insert_label(strip, index, "Loading…");
     switch_to(index);
     if let Some(dir) = dir {
-        go(dir);
+        super::go(dir);
     }
 }
-
-/// Closes tab `index`; the last tab stays.
 pub(super) fn close_tab(index: usize) {
     let Some((active, len, strip)) = with_app(|a| (a.tabs.active(), a.tabs.len(), a.tab_strip)) else {
         return;
@@ -124,103 +124,85 @@ pub(super) fn close_tab(index: usize) {
     if index == active {
         switch_to(if index + 1 < len { index + 1 } else { index - 1 });
     }
-    if let Some(slot) = with_app(|a| a.tabs.close(index)).flatten() {
-        slot.lister_cancel.store(true, Ordering::SeqCst);
-    }
+    let closed = with_app(|a| a.tabs.close(index)).flatten();
+    drop(closed);
     unsafe {
         SendMessageW(strip, TCM_DELETEITEM, Some(WPARAM(index)), None);
         let active = with_app(|a| a.tabs.active()).unwrap_or(0);
         SendMessageW(strip, TCM_SETCURSEL, Some(WPARAM(active)), None);
     }
 }
-
 pub(super) fn close_active() {
     if let Some(i) = with_app(|a| a.tabs.active()) {
         close_tab(i);
     }
 }
-
-/// Moves to the next (or previous) tab, wrapping around.
 pub(super) fn cycle(back: bool) {
-    let Some(to) = with_app(|a| if back { a.tabs.prev_index() } else { a.tabs.next_index() }) else { return };
-    switch_to(to);
+    if let Some(i) = with_app(|a| if back { a.tabs.prev_index() } else { a.tabs.next_index() }) {
+        switch_to(i);
+    }
 }
-
 pub(super) fn switch_to(to: usize) {
-    let Some((list, strip, from, len)) =
-        with_app(|a| (a.view.list, a.tab_strip, a.tabs.active(), a.tabs.len()))
-    else {
-        return;
-    };
-    if from == to || to >= len {
-        return;
-    }
-    let selected = selected_rows();
-    let top = unsafe { SendMessageW(list, LVM_GETTOPINDEX, None, None) }.0.max(0) as usize;
-    stop_watching();
-    let restored = with_app(|a| {
-        let incoming = &mut a.tabs.items_mut()[to];
-        let browser = incoming.browser.take()?;
-        let lister = incoming.lister.take();
-        let cancel = incoming.lister_cancel.clone();
-        let (in_sel, in_top) = (std::mem::take(&mut incoming.selected), incoming.top);
-        let out_browser = std::mem::replace(&mut a.view.browser, browser);
-        let out_lister = std::mem::replace(&mut a.view.lister, lister);
-        let out_cancel = std::mem::replace(&mut a.view.lister_cancel, cancel);
-        let outgoing = &mut a.tabs.items_mut()[from];
-        (outgoing.browser, outgoing.lister, outgoing.lister_cancel) =
-            (Some(out_browser), out_lister, out_cancel);
-        (outgoing.selected, outgoing.top) = (selected, top);
-        a.tabs.select(to);
-        Some((in_sel, in_top))
-    })
-    .flatten();
-    let Some((sel, top)) = restored else { return };
-    unsafe { SendMessageW(strip, TCM_SETCURSEL, Some(WPARAM(to)), None) };
-    refresh(&sel, true);
-    unsafe {
-        // Put the tab's old first visible row back at the top.
-        let per_page = SendMessageW(list, LVM_GETCOUNTPERPAGE, None, None).0.max(1) as usize;
-        let count = SendMessageW(list, LVM_GETITEMCOUNT, None, None).0.max(0) as usize;
-        if count > 0 {
-            let last = (top + per_page - 1).min(count - 1);
-            SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(last)), Some(LPARAM(0)));
-            SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(top.min(count - 1))), Some(LPARAM(0)));
+    let Some((from, ids, lists)) = with_app(|a| {
+        if to == a.tabs.active() || to >= a.tabs.len() {
+            return None;
         }
-    }
-    if with_app(|a| a.view.browser.dir().is_some()) == Some(true) {
-        watch_current();
-    }
-    update_sort_arrows();
-    update_chrome();
-    // Catch up on changes made while the tab was in the background.
-    if let Some(job) = with_app(|a| a.view.browser.on_dir_changed()).flatten() {
-        spawn_list(job);
-    }
-}
-
-/// True if `generation` belongs to a tab other than the active one.
-pub(super) fn is_background(generation: u64) -> bool {
-    with_app(|a| a.tabs.items()[a.tabs.active()].id != tab_of_generation(generation)) == Some(true)
-}
-
-/// A listing finished for a background tab: store it there; the tab shows it when selected.
-pub(super) fn route_listed(generation: u64, result: std::io::Result<(Snapshot, Vec<u32>)>) {
-    let Some((strip, labelled)) = with_app(|a| {
-        let id = tab_of_generation(generation);
-        let index = a.tabs.items().iter().position(|t| t.id == id)?;
-        let slot = &mut a.tabs.items_mut()[index];
-        let browser = slot.browser.as_mut()?;
-        // A vanished folder is handled when the tab is next shown.
-        if browser.on_listed(generation, result, &[]) != Applied::Stale {
-            slot.lister = None;
-        }
-        Some((a.tab_strip, (index, label_for(slot.browser.as_ref()?))))
+        let views = std::iter::once(&a.view).chain(a.other.iter());
+        Some((
+            a.tabs.active(),
+            views.clone().map(|v| v.id).collect::<Vec<_>>(),
+            views.flat_map(|v| [v.list, v.label]).collect::<Vec<_>>(),
+        ))
     })
     .flatten() else {
         return;
     };
-    set_label(strip, labelled.0, &labelled.1);
+    for id in ids {
+        super::stop_watching_view(id);
+    }
+    for list in lists {
+        unsafe {
+            SendMessageW(list, LVM_CANCELEDITLABEL, None, None);
+            let _ = ShowWindow(list, SW_HIDE);
+        }
+    }
+    let Some((hwnd, strip, palette, list, ids)) = with_app(|a| {
+        let mut incoming = a.tabs.items_mut()[to].workspace.take()?;
+        std::mem::swap(&mut a.view, &mut incoming.view);
+        std::mem::swap(&mut a.other, &mut incoming.other);
+        std::mem::swap(&mut a.split_view, &mut incoming.split);
+        std::mem::swap(&mut a.right_active, &mut incoming.right_active);
+        std::mem::swap(&mut a.pane_ratio, &mut incoming.ratio);
+        a.tabs.items_mut()[from].workspace = Some(incoming);
+        a.tabs.select(to);
+        let mut ids = vec![a.view.id];
+        if a.split_view
+            && let Some(other) = &a.other
+        {
+            ids.push(other.id);
+        }
+        Some((a.hwnd, a.tab_strip, a.palette, a.view.list, ids))
+    })
+    .flatten() else {
+        return;
+    };
+    unsafe {
+        SendMessageW(strip, TCM_SETCURSEL, Some(WPARAM(to)), None);
+    }
+    super::preview::invalidate();
+    super::dark::apply(hwnd, palette);
+    super::layout(hwnd);
+    for id in ids {
+        super::watch_view(id);
+        if let Some(job) = super::with_view(id, |v| v.browser.on_dir_changed()).flatten() {
+            super::spawn_list(job);
+        }
+    }
+    super::update_sort_arrows();
+    super::update_chrome();
+    unsafe {
+        let _ = SetFocus(Some(list));
+    }
 }
 
 /// Notifications from the tab strip.
