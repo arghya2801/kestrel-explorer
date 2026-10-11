@@ -1073,6 +1073,7 @@ fn apply(ev: Event) {
                 Some(Applied::Gone(job)) => spawn_list(job),
                 _ => {}
             }
+            start_queued_lists();
             tabbar::update_label_for(id);
             panes::update_labels();
             if let Some(job) = with_view(id, |v| v.browser.follow_up()).flatten() {
@@ -1133,9 +1134,6 @@ fn apply(ev: Event) {
 
 /// Runs a browser navigation (`Browser::back`, `up`, ...) and lists its target.
 fn run(nav: impl FnOnce(&mut Browser) -> Option<ListJob>) {
-    if with_app(|a| a.live_listers.load(Ordering::SeqCst) >= MAX_LISTERS) == Some(true) {
-        return set_status("Too many folders still loading (network?). Wait a moment and try again.");
-    }
     if let Some(job) = with_app(|a| nav(&mut a.view.browser)).flatten() {
         spawn_list(job);
     }
@@ -1145,8 +1143,35 @@ fn go(dir: PathBuf) {
     run(|b| Some(b.go(dir)));
 }
 
+fn start_queued_lists() {
+    loop {
+        let job = with_app(|a| {
+            if a.live_listers.load(Ordering::SeqCst) >= MAX_LISTERS {
+                return None;
+            }
+            let id = a.views().find(|v| v.queued_list.is_some())?.id;
+            a.view_mut(id)?.queued_list.take()
+        })
+        .flatten();
+        let Some(job) = job else { break };
+        let id = crate::tabs::tab_of_generation(job.generation);
+        if with_view(id, |v| v.browser.generation() == job.generation) == Some(true) {
+            spawn_list(job);
+        }
+    }
+}
+
 fn spawn_list(job: ListJob) {
     let id = crate::tabs::tab_of_generation(job.generation);
+    if with_app(|a| a.live_listers.load(Ordering::SeqCst) >= MAX_LISTERS) == Some(true) {
+        with_view(id, |v| {
+            v.lister_cancel.store(true, Ordering::SeqCst);
+            v.queued_list = Some(job);
+        });
+        update_chrome();
+        return;
+    }
+    with_view(id, |v| v.queued_list = None);
     // A new listing supersedes any search still running.
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let Some((events, live)) = with_app(|a| {
@@ -1187,6 +1212,7 @@ fn spawn_list(job: ListJob) {
             })
         })
         .unwrap_or_else(|| Err(io::Error::other("internal error while listing")));
+        drop(_done);
         events.send(Event::Listed { generation, result });
     });
     if worker.is_none() {
@@ -2020,4 +2046,48 @@ fn view_visible(id: u64) -> bool {
 /// Active folder list, also used by the window tests and stress runner.
 pub fn active_list() -> Option<HWND> {
     with_app(|a| a.view.list)
+}
+
+#[cfg(test)]
+mod listing_queue_tests {
+    use super::*;
+
+    #[test]
+    fn busy_listings_keep_the_latest_request_and_discard_canceled_ones() {
+        init_process().unwrap();
+        let folder = std::env::temp_dir();
+        let hwnd = create_main_window(&folder, &Settings::default()).unwrap();
+        if let Some(worker) = with_app(|a| a.view.lister.take()).flatten() {
+            worker.join().unwrap();
+        }
+        with_app(|a| a.live_listers.store(MAX_LISTERS, Ordering::SeqCst));
+        go(folder.join("older"));
+        go(folder.join("latest"));
+        assert_eq!(
+            with_app(|a| a.view.queued_list.as_ref().map(|j| j.dir.clone())).flatten(),
+            Some(folder.join("latest"))
+        );
+        assert_eq!(
+            with_app(|a| a.view.browser.requested_location().map(|l| l.dir)).flatten(),
+            Some(folder.join("latest"))
+        );
+        with_app(|a| {
+            a.view.browser.cancel();
+            a.live_listers.store(0, Ordering::SeqCst);
+        });
+        start_queued_lists();
+        assert!(with_app(|a| a.view.queued_list.is_none()).unwrap());
+        assert_eq!(with_app(|a| a.live_listers.load(Ordering::SeqCst)), Some(0));
+        with_app(|a| a.live_listers.store(MAX_LISTERS, Ordering::SeqCst));
+        go(folder);
+        with_app(|a| a.live_listers.store(0, Ordering::SeqCst));
+        start_queued_lists();
+        assert!(with_app(|a| a.view.queued_list.is_none() && a.view.lister.is_some()).unwrap());
+        if let Some(worker) = with_app(|a| a.view.lister.take()).flatten() {
+            worker.join().unwrap();
+        }
+        unsafe {
+            DestroyWindow(hwnd).unwrap();
+        }
+    }
 }
