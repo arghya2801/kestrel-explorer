@@ -1879,6 +1879,10 @@ fn render_review_windows() {
         assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()).len() == 4));
         pump_until(Duration::from_millis(250), || false);
         capture(hwnd, &out.join(format!("{name}-main.bmp")));
+        command(hwnd, ui::toolbar::GRID);
+        pump_until(Duration::from_millis(500), || false);
+        capture(hwnd, &out.join(format!("{name}-grid.bmp")));
+        command(hwnd, ui::toolbar::DETAILS);
         command(hwnd, ui::toolbar::SETTINGS);
         let settings = unsafe { FindWindowW(w!("KestrelSettings"), None) }.unwrap();
         let pages = unsafe { GetDlgItem(Some(settings), 5) }.unwrap();

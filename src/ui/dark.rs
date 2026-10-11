@@ -146,6 +146,7 @@ unsafe extern "system" fn header_text(
         let palette = crate::crash::guard(|| with_app(|a| a.palette)).flatten();
         if nm.hdr.code == NM_CUSTOMDRAW
             && nm.hdr.hwndFrom.0 as isize == header
+            && !unsafe { GetWindowTheme(nm.hdr.hwndFrom) }.is_invalid()
             && palette.is_some_and(|p| p.dark)
         {
             return match nm.dwDrawStage {

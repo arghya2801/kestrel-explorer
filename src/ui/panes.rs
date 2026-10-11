@@ -15,6 +15,7 @@ use std::thread::JoinHandle;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::HFONT;
 use windows::Win32::System::Ole::{IDropTarget, RegisterDragDrop, RevokeDragDrop};
+use windows::Win32::System::SystemServices::{SS_NOPREFIX, SS_PATHELLIPSIS};
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -102,7 +103,14 @@ pub(super) unsafe fn create(
             };
             SendMessageW(list, LVM_INSERTCOLUMNW, Some(WPARAM(i)), Some(LPARAM(&col as *const _ as isize)));
         }
-        let label = match child(parent, w!("STATIC"), w!(""), WINDOW_STYLE(0), WINDOW_EX_STYLE(0), 0) {
+        let label = match child(
+            parent,
+            w!("STATIC"),
+            w!(""),
+            WINDOW_STYLE(SS_PATHELLIPSIS.0 | SS_NOPREFIX.0),
+            WINDOW_EX_STYLE(0),
+            0,
+        ) {
             Ok(label) => label,
             Err(e) => {
                 let _ = DestroyWindow(list);
