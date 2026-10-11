@@ -27,13 +27,22 @@
 | Restore 50,001 selected names in 100,001 items | 26.44 ms in a release logic test |
 | Last-visible icon behind 250 executable requests | 7.52 s before viewport cancellation; 11.56 ms after |
 | Applicable regression suite | 131 unit tests and 43 window tests passed |
-| Expanded 600-second stress | Running; final result pending |
+| Expanded 600-second stress | 7,942 actions; 210,141 file changes; worst interval 1.585 s |
+| Resource change versus warm-up layout | Handles -44, GDI +7, USER -5; focused GDI follow-up below |
 
 These are measurements on one Windows desktop. No controlled cold-cache run has been made.
 The startup comparison immediately before optimization measured 114 to 126 ms warm.
 Moving drag-target creation and registration after first paint removed an 18 to 23 ms startup stage.
 Preview control creation measured 2 to 4 ms and theme application 0 to 1 ms, so both stayed in place.
 DLL delay-loading was not justified by the measurements.
+
+
+A 120-second follow-up used the same light theme and settled grid state at each resource sample.
+It completed 1,483 actions and 42,405 file changes. Samples of handles/GDI/USER were
+(528,80,58), (525,80,58), (528,79,58), and final (523,79,56), giving changes -5/-1/-2.
+No sustained resource growth was observed. This supports state variation as the explanation for
+the earlier +7 GDI result, rather than a demonstrated leak. Worst interval was 1.542 seconds.
+The stress runner now records repeated comparable samples; no application code changed for this follow-up.
 
 The icon diagnostic copies the same executable 250 times and warms the final icon in both variants.
 The expanded stress runner mixes navigation, search/filter, tabs, split panes, preview/grid,

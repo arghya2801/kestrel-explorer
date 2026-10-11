@@ -70,8 +70,20 @@ Selection restoration for 100,001 items and 50,001 selected names took **26.44 m
 The 250-executable icon probe improved from **7.52 s** behind obsolete requests to **11.56 ms**
 with viewport cancellation. Both measurements are diagnostic samples, not timing guarantees.
 
-The final expanded 600-second stress result will be recorded here when the running test completes.
-Raw local artifacts are under target/startup-final.log, target/stress-final.log,
+The quiet expanded 600-second run completed **7,942 UI actions and 210,141 file changes** without
+application errors. The worst measured loop/action interval was **1.585 seconds**. Its largest
+individually logged action was a **1.560-second Settings/theme cycle**, with 78 ms of UI-thread CPU time.
+Resources versus the warm-up layout were **handles -44, GDI +7, USER -5**. The GDI difference prompted
+a focused follow-up with a fixed theme and settled thumbnail state.
+
+A 120-second follow-up used the same light theme and settled grid state at each resource sample.
+It completed 1,483 actions and 42,405 file changes. Samples of handles/GDI/USER were
+(528,80,58), (525,80,58), (528,79,58), and final (523,79,56), giving changes -5/-1/-2.
+No sustained resource growth was observed. This supports state variation as the explanation for
+the earlier +7 GDI result, rather than a demonstrated leak. Worst interval was 1.542 seconds.
+The stress runner now records repeated comparable samples; no application code changed for this follow-up.
+
+Raw local artifacts are under target/startup-final.log, target/stress-final.log, target/stress-resource.log,
 target/stress-final-data/Kestrel/log.txt and target/ui-review.
 
 ## Remaining release checks and known limits
@@ -82,7 +94,9 @@ target/stress-final-data/Kestrel/log.txt and target/ui-review.
 3. Re-run opt-in SMB and clipboard tests on a suitable desktop before release sign-off.
 4. The historical 5.4-second stall remains unexplained. It occurred during the first old stress run
    with concurrent builds/launches. Read the watchdog dump under %LOCALAPPDATA%\Kestrel\crashes if it recurs.
-5. Tag a verified milestone after the manual checks. Version metadata alone is not release sign-off.
+5. Settings/theme cycles reached about 1.56 seconds under continuous stress. Profile them further if
+   comparable pauses occur during ordinary use; this is separate from the historical stall.
+6. Tag a verified milestone after the manual checks. Version metadata alone is not release sign-off.
 
 Native menus remain light. Shortcut-arrow overlays remain deferred because installed overlay
 handlers can be slow. Network discovery depends on Windows services; typed UNC paths remain usable.

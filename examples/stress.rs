@@ -156,18 +156,27 @@ fn normalize(hwnd: HWND, edit: HWND, strip: HWND, root: &std::path::Path) {
         command(hwnd, ui::toolbar::SPLIT);
     }
     for _ in 0..2 {
-        command(hwnd, ui::toolbar::GRID);
-        command(hwnd, ui::toolbar::DETAILS);
         unsafe {
             let _ = SetWindowTextW(edit, &HSTRING::from(root.as_os_str()));
         }
         press(edit, VK_RETURN, false, false);
+        command(hwnd, ui::toolbar::GRID);
+        pump_for(Duration::from_millis(250));
+        command(hwnd, ui::toolbar::DETAILS);
         press(ui::active_list().unwrap(), VK_F6, false, false);
     }
     if let Ok(pane) = unsafe { FindWindowExW(Some(hwnd), None, w!("KestrelPreview"), None) }
         && unsafe { IsWindowVisible(pane) }.as_bool()
     {
         command(hwnd, ui::toolbar::PREVIEW);
+    }
+    command(hwnd, ui::toolbar::SETTINGS);
+    if let Some(dialog) = own_windows().into_iter().find(|h| class_of(*h) == "KestrelSettings") {
+        unsafe {
+            let theme = GetDlgItem(Some(dialog), 10).unwrap();
+            SendMessageW(theme, CB_SETCURSEL, Some(WPARAM(1)), None);
+        }
+        command(dialog, IDOK.0 as usize);
     }
     pump_for(Duration::from_secs(2));
 }
@@ -222,6 +231,8 @@ fn main() {
     let mut next_action = start;
     let mut next_report = start;
     let mut baseline = None;
+    let normalize_interval = Duration::from_secs((seconds / 4).clamp(5, 60));
+    let mut next_normalize = normalize_interval;
     let mut worst_gap = Duration::ZERO;
     let mut last = Instant::now();
     let mut actions = 0u64;
@@ -381,11 +392,13 @@ fn main() {
         }
         if now >= next_report {
             next_report = now + Duration::from_secs(10);
-            if start.elapsed() > Duration::from_secs((seconds / 4).clamp(5, 60)) && baseline.is_none() {
+            if start.elapsed() >= next_normalize {
                 normalize(hwnd, edit, strip, &root);
-                baseline = Some(counts());
+                let sample = counts();
+                baseline.get_or_insert(sample);
+                next_normalize = start.elapsed() + normalize_interval;
                 last = Instant::now();
-                println!("Normalized baseline: {:?}", baseline.unwrap());
+                println!("Normalized sample: {sample:?}");
             }
             let c = counts();
             println!(
@@ -403,6 +416,7 @@ fn main() {
     let churned = churn.join().unwrap();
     normalize(hwnd, edit, strip, &root);
     let end = counts();
+    println!("Normalized final: {end:?}");
     unsafe { DestroyWindow(hwnd) }.unwrap();
     let b = baseline.unwrap_or(end);
     println!("\n{actions} UI actions, {churned} file changes in {seconds}s");

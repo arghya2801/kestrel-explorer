@@ -167,13 +167,13 @@ Use existing workers and Windows integrations rather than adding a dependency fo
 - [x] Report environment-dependent exclusions explicitly; do not report a partially run suite as fully green.
 - [x] Expand the stress harness to include filter/search, tab switches, split-pane navigation, preview toggles,
       settings/theme changes, and secondary-window creation/closure.
-- [ ] Run the expanded 600-second release stress test and record resource counts and worst stall.
+- [x] Run the expanded 600-second release stress test and record resource counts and worst stall.
 - [x] Check startup, executable size, and memory after UI additions. Compare measurements taken under similar conditions.
 - [x] Exercise dead network shares, large folders, rapid refresh/navigation, unavailable startup locations,
       and closing windows during copies.
 - [x] Check keyboard commands, focus order, narrow windows and both themes.
 - [ ] Verify physical high-DPI and changed-monitor behavior. Window-bound clamping has a logic test.
-- [ ] Update README, ROADMAP, HANDOFF, and this checklist to match what actually shipped.
+- [x] Update README, ROADMAP, HANDOFF, and this checklist to match the implemented build.
 - [x] Update package, lockfile and Windows resource versions together to 1.1.0.
 - [ ] Tag a verified release milestone after the remaining manual checks.
 
@@ -240,3 +240,28 @@ The expanded 30-second stress smoke test completed 373 actions / 10,870 file cha
 resource growth was handles -1, GDI -1, USER -1. Largest logged action was 614 ms. The harness now
 limits each message-drain batch so incoming test actions cannot starve behind worker messages.
 The historical 5.4-second finding remains open; this harness issue does not establish its cause.
+
+2026-10-11 final release verification: 131 unit tests and 43 window tests passed. One unit and
+one window SMB test were ignored; one unit and two window clipboard-writing tests were excluded.
+The opt-in executable-icon and visual-render diagnostics passed separately. Both-theme captures
+and the actual release dark/grid capture were inspected; long pane labels and dark header contrast
+were corrected. Clippy across all targets, formatting and the release build passed.
+
+Version metadata is aligned at 1.1.0. The final executable is 1,089,024 bytes. Seven quiet launches
+measured 102, 99, 114, 98, 134, 95 and 91 ms to first paint, median 99 ms. First-paint working set
+was 15,568 to 15,668 KiB, roughly 15.2 to 15.3 MiB; this is not steady-state memory.
+The startup samples above are superseded by these final measurements.
+
+The quiet expanded 600-second run completed 7,942 UI actions and 210,141 file changes without
+application errors. Reported worst loop/action interval was 1.585 seconds; the largest individually
+logged action was a 1.560-second Settings/theme cycle with 78 ms of UI-thread CPU time.
+Resources compared with the warm-up layout were handles -44, GDI +7, USER -5.
+The historical 5.4-second stall did not recur and remains unexplained.
+The +7 GDI difference prompted a focused follow-up with fixed theme and settled thumbnail state.
+
+A 120-second follow-up used the same light theme and settled grid state at each resource sample.
+It completed 1,483 actions and 42,405 file changes. Samples of handles/GDI/USER were
+(528,80,58), (525,80,58), (528,79,58), and final (523,79,56), giving changes -5/-1/-2.
+No sustained resource growth was observed. This supports state variation as the explanation for
+the earlier +7 GDI result, rather than a demonstrated leak. Worst interval was 1.542 seconds.
+The stress runner now records repeated comparable samples; no application code changed for this follow-up.
