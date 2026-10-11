@@ -1,5 +1,8 @@
 # Kestrel roadmap
 
+[PLAN.md](PLAN.md) tracks the next implementation steps, including the toolbar, Settings,
+two-pane navigation, and shortcut guide. The measurements below describe v1.0.
+
 v1 goal: Kestrel, a small, fast Windows file explorer that never crashes and never shows "Not Responding".
 Each stage ends with something runnable, its tests green, and a commit per step.
 
@@ -49,16 +52,20 @@ Notes from building it:
   launches ran alongside. Not reproduced in six later runs (about 27 minutes, one of them
   during a release build). The hang watchdog writes a minidump if it ever happens again.
 
-## After v1, in order
+## Post-v1 status
 
-1. Drag and drop with other apps (OLE, both directions).
-2. Full shell context menu, hosted in a helper process so a buggy extension can't take us down.
-3. Filter the current folder as you type (in memory, instant), then recursive search on a worker.
-4. Tabs.
-5. Dark mode.
-6. Preview pane and thumbnails, out of process for the same reason as 2.
-7. Dual pane.
-8. Browsing network computers and their shares.
+| Item | Status |
+|---|---|
+| Drag and drop with other apps | Built |
+| Full shell context menu in a helper process | Built |
+| Current-folder filter and recursive search | Built |
+| Tabs | Built |
+| Dark mode | Built; native menus remain light |
+| Preview pane and preview thumbnails | Built; file-list thumbnail grid pending |
+| Side-by-side windows | Built; two folder panes inside one window pending |
+| Network computers and shares | Typed server paths work; sidebar Network node pending |
+
+See [PLAN.md](PLAN.md) for the remaining work and release checks.
 
 Not planned: plugins, cloud-drive integrations, built-in archive browsing,
 an in-process Properties dialog (Show in Explorer covers it).

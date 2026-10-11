@@ -101,5 +101,5 @@ cargo run --release --example stress -- 600                  # 10 minutes of chu
 | `src/ui.rs`, `src/ui/` | The window: list, sidebar, tabs, preview pane, menus, dark mode |
 | `res/make_icon.py` | Draws the app icon |
 
-[ROADMAP.md](ROADMAP.md) has the design decisions and measurements; [HANDOFF.md](HANDOFF.md)
-lists what's left.
+[ROADMAP.md](ROADMAP.md) has the design decisions and historical measurements.
+[HANDOFF.md](HANDOFF.md) records known gaps; [PLAN.md](PLAN.md) organizes the remaining work and planned features.

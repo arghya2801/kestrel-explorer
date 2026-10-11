@@ -1,8 +1,15 @@
 # Kestrel handoff: remaining work
 
-State as of 2026-10-10. All of ROADMAP.md is built: v1.0.0 (tagged) plus every post-v1 item
-(drag and drop, full shell menu in a helper process, filter and search, tabs, dark mode,
-preview pane, side-by-side windows, network shares). 123 unit tests and 32 window tests pass.
+State reviewed 2026-10-11. v1.0.0 is tagged; post-v1 features include drag and drop,
+full shell menus in a helper process, filter/search, tabs, dark mode, previews, side-by-side
+windows, and network shares. Two folder panes in one window and a thumbnail grid remain pending.
+
+[PLAN.md](PLAN.md) is the consolidated implementation plan, including the requested toolbar,
+Settings dialog, two-pane navigation, and in-app shortcut guide.
+
+The review found 124 unit test declarations and 32 window tests. Formatting and Clippy passed.
+Of 123 unit tests run, 122 passed; the localhost-share test failed with Access is denied.
+The real-clipboard test was skipped. Window tests were not rerun during this review.
 
 The app was renamed from "File Explorer Pro" to **Kestrel**: crate and exe `kestrel`, settings and
 logs in `%LOCALAPPDATA%\Kestrel` (old settings are copied over once). The repo folder is still
@@ -49,13 +56,16 @@ The log line "startup (ms after process start)" shows each stage.
 - Windows opened with Ctrl+N don't save their own settings (only the first window does).
 - Preview pane width is fixed at a third of the space; no splitter for it.
 - No large-icon / thumbnail grid view in the list (details view only).
+- Sidebar children are capped at 5,000; there is no paging or Load more action.
+- Per-file icon requests use FIFO ordering; scrolling away does not cancel off-screen requests.
 
 ## Open findings
 
 - One 5.4 s UI stall in the very first stress run (while a release build and app launches ran
   alongside). Not reproduced in six later runs. The hang watchdog writes a minidump to
   `%LOCALAPPDATA%\Kestrel\crashes` if it recurs; read its UI-thread stack.
-- Test flakiness that comes from the machine, not the app:
+- Environment-dependent test limits:
+  - The localhost-share unit test expects C$ and currently fails with Access is denied in this environment.
   - Clipboard tests fail with "clipboard is busy" while a clipboard manager (e.g. Ditto)
     holds the clipboard open.
   - Focus-dependent window tests take a shared lock and retry, but heavy desktop activity can still
