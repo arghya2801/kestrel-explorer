@@ -146,20 +146,58 @@ unsafe extern "system" fn header_text(
         let palette = crate::crash::guard(|| with_app(|a| a.palette)).flatten();
         if nm.hdr.code == NM_CUSTOMDRAW
             && nm.hdr.hwndFrom.0 as isize == header
-            && !unsafe { GetWindowTheme(nm.hdr.hwndFrom) }.is_invalid()
             && palette.is_some_and(|p| p.dark)
         {
             return match nm.dwDrawStage {
                 CDDS_PREPAINT => LRESULT(CDRF_NOTIFYITEMDRAW as isize),
                 CDDS_ITEMPREPAINT => {
-                    unsafe { SetTextColor(nm.hdc, COLORREF(palette.unwrap().text)) };
-                    LRESULT(CDRF_DODEFAULT as isize)
+                    unsafe { paint_header(nm, palette.unwrap()) };
+                    LRESULT(CDRF_SKIPDEFAULT as isize)
                 }
                 _ => LRESULT(CDRF_DODEFAULT as isize),
             };
         }
     }
     unsafe { DefSubclassProc(hwnd, msg, wp, lp) }
+}
+
+unsafe fn paint_header(nm: &NMCUSTOMDRAW, palette: Palette) {
+    unsafe {
+        let mut text = [0u16; 260];
+        let mut item = HDITEMW {
+            mask: HDI_TEXT | HDI_FORMAT,
+            pszText: PWSTR(text.as_mut_ptr()),
+            cchTextMax: text.len() as i32,
+            ..Default::default()
+        };
+        SendMessageW(
+            nm.hdr.hwndFrom,
+            HDM_GETITEMW,
+            Some(WPARAM(nm.dwItemSpec)),
+            Some(LPARAM(&mut item as *mut _ as isize)),
+        );
+        if let Some(brush) = with_app(|a| a.brushes.as_ref().map(|b| b.chrome)).flatten() {
+            FillRect(nm.hdc, &nm.rc, brush);
+        }
+        SetTextColor(nm.hdc, COLORREF(palette.text));
+        SetBkMode(nm.hdc, TRANSPARENT);
+        let padding = super::scale(nm.hdr.hwndFrom, 6);
+        let mut rect = RECT { left: nm.rc.left + padding, right: nm.rc.right - padding, ..nm.rc };
+        if item.fmt.0 & (HDF_SORTUP.0 | HDF_SORTDOWN.0) != 0 {
+            let mut arrow_rect = RECT { left: rect.right - padding * 2, ..rect };
+            let mut arrow = [if item.fmt.0 & HDF_SORTUP.0 != 0 { 0x25b4 } else { 0x25be }];
+            DrawTextW(nm.hdc, &mut arrow, &mut arrow_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            rect.right = arrow_rect.left - padding;
+        }
+        let len = text.iter().position(|&c| c == 0).unwrap_or(0);
+        let align = if item.fmt.0 & HDF_RIGHT.0 != 0 { DT_RIGHT } else { DT_LEFT };
+        DrawTextW(
+            nm.hdc,
+            &mut text[..len],
+            &mut rect,
+            align | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+    }
 }
 
 /// Paints the tab strip and status bar ourselves in dark mode; light mode is untouched.
