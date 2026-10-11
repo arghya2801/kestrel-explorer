@@ -125,7 +125,7 @@ event callers and routing, tests/window.rs, relevant logic tests.
 - [ ] Save and restore secondary-window state through one coordinated writer; retain every window's state instead of letting the last writer win.
 - [ ] Restore missing folders gracefully and fit window bounds to the current monitors.
 - [ ] Give the preview pane a draggable divider and persist its width.
-- [ ] Fix repeated Back presses during a load; check the same situation for Forward and cancellation.
+- [x] Fix repeated Back presses during a load; check the same situation for Forward and cancellation.
 
 Pass condition: restart restores the session, secondary windows retain their settings, sidebar state matches the active folder,
 and fast navigation or hidden-item changes do not apply stale results.

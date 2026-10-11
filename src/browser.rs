@@ -65,8 +65,8 @@ pub enum Applied {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Nav {
     Go,
-    Back,
-    Forward,
+    Back(usize),
+    Forward(usize),
     Refresh,
     /// Refresh because the folder changed on disk: no "Loading" status.
     Changed,
@@ -185,15 +185,34 @@ impl Browser {
         self.start(at, nav)
     }
 
-    // ponytail: pressing Back twice while the first is still loading goes back one step, not two.
     pub fn back(&mut self) -> Option<ListJob> {
-        let at = self.back.last()?.clone();
-        Some(self.start(at, Nav::Back))
+        self.history(-1)
     }
 
     pub fn forward(&mut self) -> Option<ListJob> {
-        let at = self.forward.last()?.clone();
-        Some(self.start(at, Nav::Forward))
+        self.history(1)
+    }
+
+    fn history_offset(&self) -> isize {
+        match self.loading.as_ref().map(|p| p.nav) {
+            Some(Nav::Back(n)) => -(n as isize),
+            Some(Nav::Forward(n)) => n as isize,
+            _ => 0,
+        }
+    }
+
+    fn history(&mut self, step: isize) -> Option<ListJob> {
+        let offset = self.history_offset() + step;
+        let (at, nav) = if offset < 0 {
+            let n = offset.unsigned_abs();
+            (self.back.get(self.back.len().checked_sub(n)?)?.clone(), Nav::Back(n))
+        } else if offset > 0 {
+            let n = offset as usize;
+            (self.forward.get(self.forward.len().checked_sub(n)?)?.clone(), Nav::Forward(n))
+        } else {
+            (self.location()?, Nav::Refresh)
+        };
+        Some(self.start(at, nav))
     }
 
     /// Up one folder; from search results, up to the folder that was searched.
@@ -239,10 +258,10 @@ impl Browser {
     }
 
     pub fn can_back(&self) -> bool {
-        !self.back.is_empty()
+        self.history_offset() > -(self.back.len() as isize)
     }
     pub fn can_forward(&self) -> bool {
-        !self.forward.is_empty()
+        self.history_offset() < self.forward.len() as isize
     }
     pub fn can_up(&self) -> bool {
         self.dir().and_then(crate::network::up_from).is_some()
@@ -302,19 +321,29 @@ impl Browser {
         self.shown_query = at.query;
         let same_dir = same_place;
 
-        if let Some(prev) = old_at.filter(|_| !same_dir) {
+        if let Some(prev) = old_at.filter(|_| !same_dir || matches!(nav, Nav::Back(_) | Nav::Forward(_))) {
             match nav {
                 Nav::Go | Nav::Escape => {
                     self.back.push(prev);
                     self.forward.clear();
                 }
-                Nav::Back => {
-                    self.back.pop();
+                Nav::Back(n) => {
                     self.forward.push(prev);
+                    for _ in 1..n {
+                        if let Some(at) = self.back.pop() {
+                            self.forward.push(at);
+                        }
+                    }
+                    self.back.pop();
                 }
-                Nav::Forward => {
-                    self.forward.pop();
+                Nav::Forward(n) => {
                     self.back.push(prev);
+                    for _ in 1..n {
+                        if let Some(at) = self.forward.pop() {
+                            self.back.push(at);
+                        }
+                    }
+                    self.forward.pop();
                 }
                 Nav::Refresh | Nav::Changed => {}
             }
@@ -574,14 +603,53 @@ mod tests {
     }
 
     #[test]
+    fn repeated_history_navigation_keeps_every_intermediate_entry() {
+        let mut b = Browser::default();
+        for dir in [r"C:\a", r"C:\b", r"C:\c", r"C:\d"] {
+            visit(&mut b, dir, &[]);
+        }
+        let old = b.back().unwrap();
+        let latest = b.back().unwrap();
+        assert_eq!(latest.dir, Path::new(r"C:\b"));
+        assert_eq!(b.on_listed(old.generation, listed(r"C:\c", &[]), &[]), Applied::Stale);
+        b.on_listed(latest.generation, listed(r"C:\b", &[]), &[]);
+        assert_eq!(b.forward().unwrap().dir, Path::new(r"C:\c"));
+        let latest = b.forward().unwrap();
+        assert_eq!(latest.dir, Path::new(r"C:\d"));
+        b.on_listed(latest.generation, listed(r"C:\d", &[]), &[]);
+        assert_eq!(b.back().unwrap().dir, Path::new(r"C:\c"));
+        assert_eq!(b.back().unwrap().dir, Path::new(r"C:\b"));
+        assert!(b.cancel());
+        assert_eq!(b.back().unwrap().dir, Path::new(r"C:\c"));
+        let reverse = b.forward().unwrap();
+        assert_eq!(reverse.dir, Path::new(r"C:\d"));
+        b.on_listed(reverse.generation, listed(r"C:\d", &[]), &[]);
+        assert!(!b.can_forward());
+    }
+
+    #[test]
+    fn history_can_skip_to_an_earlier_visit_of_the_same_folder() {
+        let mut b = Browser::default();
+        for dir in [r"C:\a", r"C:\b", r"C:\a"] {
+            visit(&mut b, dir, &[]);
+        }
+        b.back().unwrap();
+        let back = b.back().unwrap();
+        assert!(!b.can_back());
+        assert!(b.back().is_none());
+        b.on_listed(back.generation, listed(r"C:\a", &[]), &[]);
+        assert!(!b.can_back());
+        assert_eq!(b.forward().unwrap().dir, Path::new(r"C:\b"));
+    }
+    #[test]
     fn failed_back_leaves_history_alone() {
         let mut b = Browser::default();
         visit(&mut b, r"C:\a", &[]);
         visit(&mut b, r"C:\b", &[]);
         let job = b.back().unwrap();
         b.on_listed(job.generation, Err(io::ErrorKind::NotFound.into()), &[]);
-        assert_eq!(b.back().unwrap().dir, Path::new(r"C:\a"));
         assert!(!b.can_forward());
+        assert_eq!(b.back().unwrap().dir, Path::new(r"C:\a"));
     }
 
     #[test]

@@ -49,7 +49,6 @@ The log line "startup (ms after process start)" shows each stage.
 - Sidebar doesn't follow the current folder, and doesn't refresh when Ctrl+H toggles hidden items.
 - Shortcut arrow overlays on icons are skipped on purpose (overlay handlers are slow); revisit only
   if done off the UI thread.
-- Pressing Back twice while the first is still loading goes back one step (`browser.rs`, ponytail note).
 - Re-selecting after "select all" in 100k+ folders is one message per row (`ui.rs` refresh, ponytail note).
 - Menus stay light in dark mode (dark menus need undocumented uxtheme ordinals; deliberately avoided).
 - Open tabs aren't remembered between runs; only the active folder is.
