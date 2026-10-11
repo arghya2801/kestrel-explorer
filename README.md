@@ -118,3 +118,9 @@ Startup settings can restore tabs and windows. Secondary windows still open when
 window closes are restored with it; close a secondary window first to leave it out of the next session.
 A command-line folder opens directly instead of restoring a saved session. Theme changes apply to
 all open windows; sorting, filters and layout apply to the current view/window.
+
+Use **View → Thumbnail grid** for image browsing, or choose Details for columns. **More** includes
+pin/unpin, recent folders, parent folders, Open terminal here (Windows PowerShell), and File operations.
+Click an address breadcrumb to visit an ancestor; use **Edit** or **Ctrl+L** to type a path.
+File operations shows running jobs and recent results for this session; Windows provides progress
+and cancellation dialogs.

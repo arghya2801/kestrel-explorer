@@ -1660,3 +1660,56 @@ fn thumbnail_grid_loads_images_and_switches_back_to_details() {
     close(hwnd);
     assert!(ui::take_final_settings().unwrap().grid);
 }
+
+#[test]
+fn pins_breadcrumbs_and_address_editing_work_together() {
+    let _desktop = desktop();
+    let t = TempDir::new("places");
+    std::fs::create_dir_all(t.0.join("one").join("two")).unwrap();
+    std::fs::write(t.0.join("one").join("two").join("marker.txt"), "").unwrap();
+    let hwnd = open(&t.0.join("one").join("two"));
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["marker.txt"]));
+    command(hwnd, ui::toolbar::PIN);
+    let tree = tree_of(hwnd);
+    let quick = tv_children(tree, 0)[0].1;
+    assert!(
+        tv_children(tree, quick).iter().any(|(p, _)| p == &t.0.join("one").join("two").display().to_string())
+    );
+    command(hwnd, ui::toolbar::PIN);
+    let quick = tv_children(tree, 0)[0].1;
+    assert!(
+        !tv_children(tree, quick)
+            .iter()
+            .any(|(p, _)| p == &t.0.join("one").join("two").display().to_string())
+    );
+    let parent = (400..405)
+        .find(|&id| unsafe { GetDlgItem(Some(hwnd), id) }.ok().is_some_and(|h| window_text_of(h) == "one ›"))
+        .unwrap();
+    command(hwnd, parent as usize);
+    assert!(pump_until(WAIT, || rows(list) == ["two"]));
+    command(hwnd, 399);
+    let address = find(hwnd, w!("Edit"));
+    assert!(unsafe { GetWindowLongPtrW(address, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0);
+    navigate_to(hwnd, &t.0);
+    assert!(pump_until(WAIT, || rows(list) == ["one"]));
+    close(hwnd);
+    let saved = ui::take_final_settings().unwrap();
+    assert_eq!(saved.recent.first(), Some(&t.0));
+    assert!(saved.pins.is_empty());
+    assert!(pump_until(WAIT, || ui::running_operations() == 0));
+}
+
+#[test]
+fn operation_status_shows_destination_and_completion() {
+    let t = TempDir::new("operation-history");
+    kestrel::ops::run(&kestrel::ops::Op::NewFolder { dir: t.0.clone() }, kestrel::ops::Mode::Silent).unwrap();
+    let hwnd = open(&t.0);
+    command(hwnd, ui::toolbar::OPERATIONS);
+    let dialog = unsafe { FindWindowW(w!("KestrelOperations"), None) }.unwrap();
+    let edit = unsafe { GetDlgItem(Some(dialog), 30) }.unwrap();
+    let text = window_text_of(edit);
+    assert!(text.contains("Completed") && text.contains(&t.0.display().to_string()), "{text}");
+    command(dialog, IDCANCEL.0 as usize);
+    close(hwnd);
+}

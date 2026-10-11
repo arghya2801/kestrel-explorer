@@ -25,10 +25,16 @@ fn main() {
         if settings.restore_session && !explicit { kestrel::session::restored() } else { Vec::new() };
     if !windows.is_empty() {
         let theme = settings.theme;
+        let pins = settings.pins.clone();
+        let recent = settings.recent.clone();
         settings = windows.remove(0);
         settings.theme = theme;
+        settings.pins = pins.clone();
+        settings.recent = recent.clone();
         for window in &mut windows {
             window.theme = theme;
+            window.pins = pins.clone();
+            window.recent = recent.clone();
         }
     } else {
         settings.tabs.clear();

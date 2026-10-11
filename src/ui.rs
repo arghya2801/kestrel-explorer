@@ -46,6 +46,7 @@ use crate::theme::{Palette, ThemeChoice, system_prefers_dark};
 use crate::watch::Watcher;
 use crate::{crash, format, shell};
 
+mod breadcrumbs;
 mod commands;
 mod dark;
 mod dialogs;
@@ -153,12 +154,17 @@ struct App {
     preview_width: Option<i32>,
     drag_kind: SplitKind,
     address: HWND,
+    address_edit_button: HWND,
+    address_editing: bool,
+    breadcrumbs: Vec<(HWND, PathBuf)>,
     filter: HWND,
     syncing_filter: bool,
     buttons: [HWND; 3],
     toolbar: Vec<HWND>,
     startup_override: Option<Option<PathBuf>>,
     restore_session: bool,
+    pins: Vec<PathBuf>,
+    recent: Vec<PathBuf>,
     status: HWND,
     font: HFONT,
     events: Arc<Events<Event>>,
@@ -219,6 +225,8 @@ impl App {
         controls.extend(self.views().filter(|v| v.id != self.view.id).map(|v| v.list));
         controls.extend(self.views().map(|v| v.label));
         controls.extend(&self.toolbar);
+        controls.push(self.address_edit_button);
+        controls.extend(self.breadcrumbs.iter().map(|p| p.0));
         controls.extend(preview::controls(&self.preview));
         controls
     }
@@ -412,6 +420,9 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         set_font(&toolbar_buttons, font);
 
         startup_mark("controls");
+        let address_edit_button =
+            child(hwnd, w!("BUTTON"), w!("Edit"), WS_TABSTOP, WINDOW_EX_STYLE(0), breadcrumbs::EDIT)?;
+        set_font(&[address_edit_button], font);
         APP.with(|cell| {
             *cell.borrow_mut() = Some(App {
                 hwnd,
@@ -423,10 +434,15 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 preview_width: settings.preview_width,
                 drag_kind: SplitKind::Sidebar,
                 address,
+                address_edit_button,
+                address_editing: false,
+                breadcrumbs: Vec::new(),
                 buttons,
                 toolbar: toolbar_buttons,
                 startup_override: None,
                 restore_session: settings.restore_session,
+                pins: settings.pins.clone(),
+                recent: settings.recent.clone(),
                 status,
                 font,
                 events,
@@ -508,7 +524,11 @@ fn on_key(msg: &MSG) -> bool {
         }
         return true;
     }
-    if ![list, address, tree, filter].contains(&msg.hwnd) && !toolbar::owns(msg.hwnd) {
+    if ![list, address, tree, filter].contains(&msg.hwnd)
+        && !toolbar::owns(msg.hwnd)
+        && !breadcrumbs::owns(msg.hwnd)
+        && with_app(|a| a.address_edit_button) != Some(msg.hwnd)
+    {
         return false;
     }
     let key = VIRTUAL_KEY(msg.wParam.0 as u16);
@@ -571,6 +591,8 @@ fn on_key(msg: &MSG) -> bool {
             match parse_location(&text, current.as_deref()) {
                 Some(dir) => {
                     go(dir);
+                    with_app(|a| a.address_editing = false);
+                    breadcrumbs::layout();
                     unsafe {
                         let _ = SetFocus(Some(list));
                     }
@@ -579,6 +601,8 @@ fn on_key(msg: &MSG) -> bool {
             }
         }
         VK_ESCAPE if in_address => {
+            with_app(|a| a.address_editing = false);
+            breadcrumbs::layout();
             show_location();
             unsafe {
                 let _ = SetFocus(Some(list));
@@ -607,7 +631,11 @@ fn on_key(msg: &MSG) -> bool {
             let at = order.iter().position(|&h| h == msg.hwnd).unwrap_or(0);
             let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
             let next = if shift { (at + order.len() - 1) % order.len() } else { (at + 1) % order.len() };
-            let _ = SetFocus(Some(order[next]));
+            if order[next] == address {
+                focus_address();
+            } else {
+                let _ = SetFocus(Some(order[next]));
+            }
         },
         _ => return false,
     }
@@ -622,6 +650,16 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
             WM_APP_PREFERENCES => {
+                if let Some(pins) = crate::session::pins() {
+                    let changed = with_app(|a| {
+                        let changed = a.pins != pins;
+                        a.pins = pins;
+                        changed
+                    });
+                    if changed == Some(true) {
+                        tree::reload();
+                    }
+                }
                 if let Some(theme) = crate::session::theme() {
                     with_app(|a| a.theme = theme);
                     dark::apply(hwnd, Palette::new(theme.is_dark(system_prefers_dark())));
@@ -657,9 +695,14 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     update_chrome();
                     return LRESULT(0);
                 }
-                let from_button =
-                    with_app(|a| a.buttons.iter().chain(a.toolbar.iter()).any(|b| b.0 as isize == from))
-                        == Some(true);
+                let from_button = with_app(|a| {
+                    a.buttons
+                        .iter()
+                        .chain(a.toolbar.iter())
+                        .chain(std::iter::once(&a.address_edit_button))
+                        .any(|b| b.0 as isize == from)
+                        || a.breadcrumbs.iter().any(|p| p.0.0 as isize == from)
+                }) == Some(true);
                 let ours = (from == 0 && code == 0) || (from_button && code == BN_CLICKED as usize);
                 if !ours {
                     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -668,10 +711,11 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     ID_BACK if from_button => run(Browser::back),
                     ID_FORWARD if from_button => run(Browser::forward),
                     ID_UP if from_button => run(Browser::up),
-                    id if (from == 0 || from_button) && (toolbar::execute(id) || commands::run(id)) => {}
+                    id if (from == 0 || from_button)
+                        && (breadcrumbs::execute(id) || toolbar::execute(id) || commands::run(id)) => {}
                     _ => return DefWindowProcW(hwnd, msg, wp, lp),
                 }
-                if !matches!(id, toolbar::SETTINGS | toolbar::SHORTCUTS | toolbar::HELP)
+                if !matches!(id, toolbar::SETTINGS | toolbar::SHORTCUTS | toolbar::HELP | breadcrumbs::EDIT)
                     && let Some(list) = with_app(|a| a.view.list)
                 {
                     let _ = SetFocus(Some(list));
@@ -974,6 +1018,11 @@ fn apply(ev: Event) {
             });
             match applied {
                 Some(Applied::Shown { select, new_folder }) => {
+                    if new_folder
+                        && let Some(dir) = with_view(id, |v| v.browser.dir().map(PathBuf::from)).flatten()
+                    {
+                        with_app(|a| crate::settings::remember(&mut a.recent, dir));
+                    }
                     refresh_view(id, &select, new_folder, focus.as_deref());
                     if new_folder && view_visible(id) {
                         watch_view(id);
@@ -1198,6 +1247,8 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
                 .unwrap_or_else(|| a.view.browser.dir().map(Path::to_path_buf)),
             theme: a.theme,
             restore_session: a.restore_session,
+            pins: a.pins.clone(),
+            recent: a.recent.clone(),
             ..Default::default()
         };
         (a.view.list, s)
@@ -1616,6 +1667,7 @@ fn update_chrome() {
     panes::update_labels();
     tree::sync();
     show_location();
+    breadcrumbs::update();
     tabbar::update_label();
     if let Some(text) = with_app(|a| a.view.browser.status()) {
         set_status(&text);
@@ -1636,6 +1688,8 @@ fn show_location() {
 }
 
 fn focus_address() {
+    with_app(|a| a.address_editing = true);
+    breadcrumbs::layout();
     let Some(address) = with_app(|a| a.address) else { return };
     unsafe {
         let _ = SetFocus(Some(address));
@@ -1736,6 +1790,7 @@ fn layout(hwnd: HWND) {
         }
     }
     panes::layout_labels(hwnd);
+    breadcrumbs::layout();
     if preview::is_visible() {
         preview::resize();
     }
@@ -1903,6 +1958,10 @@ fn apply_settings(hwnd: HWND, settings: Settings) {
     grid::set(settings.grid);
     update_sort_arrows();
     layout(hwnd);
+    save_preferences(settings);
+}
+
+fn save_preferences(settings: Settings) {
     let Some(events) = with_app(|a| a.events.clone()) else { return };
     for other in crate::session::preferences(settings) {
         unsafe {

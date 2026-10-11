@@ -24,6 +24,11 @@ pub const SETTINGS: usize = 212;
 pub const SPLIT: usize = 213;
 pub const DETAILS: usize = 214;
 pub const GRID: usize = 215;
+pub const PIN: usize = 216;
+pub const RECENT: usize = 217;
+pub const PARENTS: usize = 218;
+pub const TERMINAL: usize = 219;
+pub const OPERATIONS: usize = 220;
 
 const BUTTONS: &[(usize, &str, i32)] = &[
     (commands::CMD_NEW_FOLDER, "New folder", 94),
@@ -105,6 +110,40 @@ pub(super) fn update() {
 pub(super) fn execute(id: usize) -> bool {
     let Some(hwnd) = with_app(|a| a.hwnd) else { return false };
     match id {
+        PIN => {
+            with_app(|a| {
+                if let Some(dir) = a
+                    .view
+                    .browser
+                    .dir()
+                    .map(std::path::PathBuf::from)
+                    .filter(|p| crate::settings::rememberable(p))
+                {
+                    if a.pins.contains(&dir) {
+                        a.pins.retain(|p| p != &dir);
+                    } else {
+                        a.pins.push(dir);
+                    }
+                }
+            });
+            super::tree::reload();
+            if let Some(s) = super::current_settings(hwnd) {
+                super::save_preferences(s);
+            }
+        }
+        RECENT | PARENTS => locations(hwnd, id == RECENT),
+        TERMINAL => {
+            if let Some((dir, events)) =
+                with_app(|a| a.view.browser.dir().map(|p| (p.to_path_buf(), a.events.clone()))).flatten()
+            {
+                super::spawn("terminal", move || {
+                    if let Err(e) = crate::shell::terminal(&dir) {
+                        events.send(super::Event::Message(format!("Couldn't open terminal: {e}")));
+                    }
+                });
+            }
+        }
+        OPERATIONS => dialogs::operations(hwnd),
         DETAILS | GRID => super::grid::set(id == GRID),
         SPLIT => super::panes::toggle(),
         REFRESH => run(Browser::refresh),
@@ -181,6 +220,14 @@ fn popup(hwnd: HWND, kind: usize) {
                 for &(id, label, _) in BUTTONS.iter().filter(|b| !matches!(b.0, MORE | SETTINGS | HELP)) {
                     add(id, label, false);
                 }
+                let pinned =
+                    with_app(|a| a.view.browser.dir().is_some_and(|p| a.pins.iter().any(|pin| pin == p)))
+                        .unwrap_or(false);
+                add(PIN, if pinned { "Unpin current folder" } else { "Pin current folder" }, pinned);
+                add(RECENT, "Recent folders", false);
+                add(PARENTS, "Parent folders", false);
+                add(TERMINAL, "Open terminal here", false);
+                add(OPERATIONS, "File operations", false);
                 add(commands::CMD_COPY_PATH, "Copy as path\tCtrl+Shift+C", false);
                 add(commands::CMD_SELECT_ALL, "Select all\tCtrl+A", false);
                 add(commands::CMD_SHOW_IN_EXPLORER, "Show in Explorer", false);
@@ -194,6 +241,42 @@ fn popup(hwnd: HWND, kind: usize) {
         let _ = DestroyMenu(menu);
         if id != 0 {
             let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(id), LPARAM(0));
+        }
+    }
+}
+
+fn locations(hwnd: HWND, recent: bool) {
+    let paths = with_app(|a| {
+        if recent {
+            a.recent.clone()
+        } else {
+            a.view
+                .browser
+                .dir()
+                .map(|p| p.ancestors().map(std::path::PathBuf::from).collect())
+                .unwrap_or_default()
+        }
+    })
+    .unwrap_or_default();
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        for (i, path) in paths.iter().enumerate() {
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                i + 1,
+                &HSTRING::from(path.display().to_string().replace('&', "&&")),
+            );
+        }
+        if paths.is_empty() {
+            let _ = AppendMenuW(menu, MF_GRAYED, 0, w!("No recent folders"));
+        }
+        let mut point = windows::Win32::Foundation::POINT::default();
+        let _ = GetCursorPos(&mut point);
+        let selected = TrackPopupMenu(menu, TPM_RETURNCMD, point.x, point.y, None, hwnd, None).0 as usize;
+        let _ = DestroyMenu(menu);
+        if let Some(path) = selected.checked_sub(1).and_then(|i| paths.get(i)) {
+            super::go(path.clone());
         }
     }
 }

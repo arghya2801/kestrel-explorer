@@ -41,7 +41,19 @@ thread_local! { static WINDOWS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::n
 struct Dialog {
     owner: HWND,
     guide: bool,
+    operations: bool,
+    font: HFONT,
     fields: Vec<(HWND, HWND, usize)>,
+}
+
+impl Drop for Dialog {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(
+                self.font.0,
+            ));
+        }
+    }
 }
 
 const GUIDE: &str = "Navigation\r\n\
@@ -83,14 +95,26 @@ Text boxes keep their normal editing shortcuts. File commands do not delete, cut
 Close this guide with Esc or the Close button.";
 
 pub(super) fn shortcuts(owner: HWND) {
-    open(owner, true);
+    open(owner, 1);
 }
 pub(super) fn settings(owner: HWND) {
-    open(owner, false);
+    open(owner, 0);
 }
 
-fn open(owner: HWND, guide: bool) {
-    let class = if guide { w!("KestrelShortcuts") } else { w!("KestrelSettings") };
+pub(super) fn operations(owner: HWND) {
+    open(owner, 2);
+}
+
+fn open(owner: HWND, kind: u8) {
+    let guide = kind != 0;
+    let operations = kind == 2;
+    let class = if operations {
+        w!("KestrelOperations")
+    } else if guide {
+        w!("KestrelShortcuts")
+    } else {
+        w!("KestrelSettings")
+    };
     let existing = WINDOWS.with(|all| {
         all.borrow().iter().copied().find(|&h| unsafe {
             let mut name = [0u16; 64];
@@ -104,12 +128,12 @@ fn open(owner: HWND, guide: bool) {
         }
         return;
     }
-    if let Err(e) = unsafe { create(owner, guide, class) } {
+    if let Err(e) = unsafe { create(owner, guide, class, operations) } {
         super::set_status(&format!("Couldn't open dialog: {e}"));
     }
 }
 
-unsafe fn create(owner: HWND, guide: bool, class: PCWSTR) -> windows::core::Result<()> {
+unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> windows::core::Result<()> {
     unsafe {
         let instance = GetModuleHandleW(None)?.into();
         let wc = WNDCLASSEXW {
@@ -123,7 +147,13 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR) -> windows::core::Resu
         RegisterClassExW(&wc);
         let mut r = RECT::default();
         GetWindowRect(owner, &mut r)?;
-        let title = if guide { w!("Keyboard shortcuts - Kestrel") } else { w!("Settings - Kestrel") };
+        let title = if operations {
+            w!("File operations - Kestrel")
+        } else if guide {
+            w!("Keyboard shortcuts - Kestrel")
+        } else {
+            w!("Settings - Kestrel")
+        };
         let hwnd = CreateWindowExW(
             WS_EX_CONTROLPARENT,
             class,
@@ -139,12 +169,13 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR) -> windows::core::Resu
             None,
         )?;
         let result = (|| -> windows::core::Result<Dialog> {
-            let mut data = Dialog { owner, guide, fields: Vec::new() };
+            let mut data =
+                Dialog { owner, guide, operations, font: super::message_font(hwnd), fields: Vec::new() };
             if guide {
                 child(
                     hwnd,
                     w!("EDIT"),
-                    &HSTRING::from(GUIDE),
+                    &HSTRING::from(if operations { crate::activity::text() } else { GUIDE.to_owned() }),
                     WS_TABSTOP
                         | WS_VSCROLL
                         | WINDOW_STYLE((ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32),
@@ -262,7 +293,8 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR) -> windows::core::Resu
         };
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(Box::new(data)) as isize);
         WINDOWS.with(|all| all.borrow_mut().push(hwnd));
-        if let Some(font) = super::with_app(|a| a.font) {
+        if let Some(data) = (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Dialog).as_ref() {
+            let font = data.font;
             let mut c = GetWindow(hwnd, GW_CHILD).unwrap_or_default();
             while !c.is_invalid() {
                 set_font(&[c], HFONT(font.0));
@@ -273,6 +305,9 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR) -> windows::core::Resu
             fill(hwnd, &s);
         }
         layout(hwnd);
+        if operations {
+            SetTimer(Some(hwnd), 1, 500, None);
+        }
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetFocus(GetDlgItem(Some(hwnd), if guide { 30 } else { PAGES as i32 }).ok());
         Ok(())
@@ -408,7 +443,7 @@ fn read(hwnd: HWND) -> std::result::Result<Settings, String> {
             number(HEIGHT, "Height", 240, 16384)?,
         )),
         maximized: checked(MAXIMIZED),
-        ..Default::default()
+        ..unsafe { GetWindow(hwnd, GW_OWNER) }.ok().and_then(super::current_settings).unwrap_or_default()
     })
 }
 
@@ -494,6 +529,42 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
                     layout(hwnd);
                 }
             }
+            WM_TIMER => {
+                let data = (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Dialog).as_ref();
+                if data.is_some_and(|d| d.operations) {
+                    let text = crate::activity::text();
+                    if window_text(field(hwnd, 30)) != text {
+                        let _ = SetWindowTextW(field(hwnd, 30), &HSTRING::from(text));
+                    }
+                }
+                return LRESULT(0);
+            }
+            WM_DPICHANGED => {
+                let rect = &*(lp.0 as *const RECT);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                if let Some(data) = (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Dialog).as_mut() {
+                    let font = super::message_font(hwnd);
+                    let old = std::mem::replace(&mut data.font, font);
+                    let mut child = GetWindow(hwnd, GW_CHILD).unwrap_or_default();
+                    while !child.is_invalid() {
+                        set_font(&[child], font);
+                        child = GetWindow(child, GW_HWNDNEXT).unwrap_or_default();
+                    }
+                    let _ = windows::Win32::Graphics::Gdi::DeleteObject(
+                        windows::Win32::Graphics::Gdi::HGDIOBJ(old.0),
+                    );
+                }
+                layout(hwnd);
+                return LRESULT(0);
+            }
             WM_SIZE => {
                 layout(hwnd);
                 return LRESULT(0);
@@ -501,7 +572,7 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
             WM_GETMINMAXINFO => {
                 let info = &mut *(lp.0 as *mut MINMAXINFO);
                 info.ptMinTrackSize.x = scale(hwnd, 560);
-                info.ptMinTrackSize.y = scale(hwnd, 450);
+                info.ptMinTrackSize.y = scale(hwnd, 520);
                 return LRESULT(0);
             }
             WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {

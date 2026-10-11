@@ -28,6 +28,8 @@ pub struct Settings {
     pub restore_session: bool,
     pub tabs: Vec<SavedTab>,
     pub active_tab: usize,
+    pub pins: Vec<PathBuf>,
+    pub recent: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -49,6 +51,8 @@ impl Default for Settings {
             restore_session: true,
             tabs: Vec::new(),
             active_tab: 0,
+            pins: Vec::new(),
+            recent: Vec::new(),
         }
     }
 }
@@ -108,6 +112,18 @@ impl Settings {
                 "split" => s.split = value.parse().ok().filter(|&w: &i32| w > 0),
                 "theme" => s.theme = ThemeChoice::parse(value).unwrap_or(ThemeChoice::System),
                 "restore_session" => s.restore_session = flag(value).unwrap_or(true),
+                "pin" => {
+                    if let Some(p) = decode_path(value).filter(|p| rememberable(p)) {
+                        s.pins.push(p);
+                    }
+                }
+                "recent" => {
+                    if let Some(p) = decode_path(value).filter(|p| rememberable(p))
+                        && s.recent.len() < 20
+                    {
+                        s.recent.push(p);
+                    }
+                }
                 "tab" => {
                     if let Some(tab) = SavedTab::parse(value) {
                         s.tabs.push(tab);
@@ -148,6 +164,12 @@ impl Settings {
             out += &format!("last_folder={}\n", p.display());
         }
         out += &format!("restore_session={}\n", self.restore_session);
+        for p in self.pins.iter().filter(|p| rememberable(p)) {
+            out += &format!("pin={}\n", encode_path(p));
+        }
+        for p in self.recent.iter().filter(|p| rememberable(p)).take(20) {
+            out += &format!("recent={}\n", encode_path(p));
+        }
         out += &format!("active_tab={}\n", self.active_tab);
         for tab in &self.tabs {
             out += &format!("tab={}\n", tab.text());
@@ -203,6 +225,25 @@ pub fn fit_window(
     (x.clamp(l, r - w), y.clamp(t, b - h), w, h)
 }
 
+pub fn rememberable(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    if text.contains("://") || text.contains(['\r', '\n', '\0']) {
+        return false;
+    }
+    if let Some(rest) = text.strip_prefix(r"\\") {
+        return !rest.split('\\').next().unwrap_or_default().contains('@');
+    }
+    path.is_absolute()
+}
+pub fn remember(recent: &mut Vec<PathBuf>, path: PathBuf) {
+    if !rememberable(&path) {
+        return;
+    }
+    recent.retain(|p| !p.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy()));
+    recent.insert(0, path);
+    recent.truncate(20);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,8 +273,26 @@ mod tests {
                 ratio: 600,
             }],
             active_tab: 0,
+            pins: vec![PathBuf::from(r"C:\pinned,=Ü")],
+            recent: vec![PathBuf::from(r"D:\recent")],
         };
         assert_eq!(Settings::parse(&s.to_text()), s);
+    }
+
+    #[test]
+    fn recent_locations_are_bounded_deduplicated_and_credential_free() {
+        let mut paths = Vec::new();
+        for i in 0..25 {
+            remember(&mut paths, PathBuf::from(format!(r"C:\folder-{i}")));
+        }
+        assert_eq!(paths.len(), 20);
+        remember(&mut paths, PathBuf::from(r"c:\FOLDER-24"));
+        assert_eq!(paths.len(), 20);
+        for path in [r"\\user:password@server\share", "https://user:pass@example.com", "relative"] {
+            remember(&mut paths, PathBuf::from(path));
+        }
+        assert_eq!(paths.len(), 20);
+        assert_eq!(paths[0], PathBuf::from(r"c:\FOLDER-24"));
     }
 
     #[test]

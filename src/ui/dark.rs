@@ -50,7 +50,12 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
             a.status,
             a.address,
             a.filter,
-            a.buttons.into_iter().chain(a.toolbar.iter().copied()).collect::<Vec<_>>(),
+            a.buttons
+                .into_iter()
+                .chain(a.toolbar.iter().copied())
+                .chain(std::iter::once(a.address_edit_button))
+                .chain(a.breadcrumbs.iter().map(|p| p.0))
+                .collect::<Vec<_>>(),
         )
     }) else {
         return;

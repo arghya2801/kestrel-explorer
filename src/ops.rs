@@ -76,6 +76,25 @@ const NO_SINK: Option<&IFileOperationProgressSink> = None;
 /// Runs `op` to completion. Returns the name of the item to select afterwards
 /// (new or renamed), or `None`. Cancelled by the user counts as success.
 pub fn run(op: &Op, mode: Mode) -> Result<Option<String>, String> {
+    let label = match op {
+        Op::Copy { paths, dest } => format!("Copy {} items to {}", paths.len(), dest.display()),
+        Op::Move { paths, dest } => format!("Move {} items to {}", paths.len(), dest.display()),
+        Op::Delete { paths, recycle } => format!(
+            "{} {} items\r\n{}",
+            if *recycle { "Recycle" } else { "Delete permanently" },
+            paths.len(),
+            paths.first().map(|p| p.display().to_string()).unwrap_or_default()
+        ),
+        Op::Rename { path, name } => format!("Rename {} to {name}", path.display()),
+        Op::NewFolder { dir } => format!("New folder in {}", dir.display()),
+    };
+    let job = crate::activity::Job::start(label);
+    let result = run_inner(op, mode);
+    job.finish(&result);
+    result
+}
+
+fn run_inner(op: &Op, mode: Mode) -> Result<Option<String>, String> {
     let _com = Com::init();
     let fail = |what: &str, e: windows::core::Error| format!("Couldn't {what}: {}", e.message());
     unsafe {

@@ -55,6 +55,9 @@ pub(crate) fn preferences(settings: Settings) -> Vec<isize> {
     s.preferences = Some(settings);
     s.windows.iter().map(|(h, _)| *h).collect()
 }
+pub(crate) fn pins() -> Option<Vec<std::path::PathBuf>> {
+    SESSION.lock().unwrap_or_else(|e| e.into_inner()).preferences.as_ref().map(|s| s.pins.clone())
+}
 pub(crate) fn theme() -> Option<crate::theme::ThemeChoice> {
     SESSION.lock().unwrap_or_else(|e| e.into_inner()).preferences.as_ref().map(|s| s.theme)
 }
@@ -71,6 +74,12 @@ pub fn finish() -> std::io::Result<()> {
         return Ok(());
     }
     if let Some(p) = s.preferences.as_ref().or_else(|| s.windows.first().map(|w| &w.1)) {
+        let mut p = p.clone();
+        for (_, window) in s.windows.iter().rev() {
+            for path in window.recent.iter().rev() {
+                crate::settings::remember(&mut p.recent, path.clone());
+            }
+        }
         p.save_to(&Settings::file())?;
     }
     let mut text = String::new();

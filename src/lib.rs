@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod browser;
 pub mod clip;
 pub mod crash;

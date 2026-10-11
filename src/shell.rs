@@ -85,6 +85,19 @@ pub fn shortcut_target(lnk: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Launch an interactive terminal with the directory passed as process state, never as shell code.
+pub fn terminal(dir: &Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    let system = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    let executable = PathBuf::from(system).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    std::process::Command::new(executable)
+        .arg("-NoExit")
+        .current_dir(dir)
+        .creation_flags(windows::Win32::System::Threading::CREATE_NEW_CONSOLE.0)
+        .spawn()?;
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) fn create_shortcut(lnk: &Path, target: &Path) {
     let _com = Com::init();

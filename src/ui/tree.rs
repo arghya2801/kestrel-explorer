@@ -51,6 +51,10 @@ pub(super) fn populate() -> usize {
         let node = insert(Some(quick), name, Some(path.clone()), true);
         with_app(|a| a.view.icons.request_node((a.tree_epoch << 32) | node, path));
     }
+    for path in with_app(|a| a.pins.clone()).unwrap_or_default() {
+        let node = insert(Some(quick), &path.display().to_string(), Some(path.clone()), true);
+        with_app(|a| a.view.icons.request_node((a.tree_epoch << 32) | node, path));
+    }
     let pc = insert(None, "This PC", None, true);
     add_drives(pc);
     for group in [quick, pc] {
@@ -336,6 +340,11 @@ fn show_page(node: usize) {
         with_app(|a| a.nodes[more].more = true);
     }
     expand(node);
+}
+
+pub(super) fn reload() {
+    with_app(|a| a.tree_hidden = !a.view.browser.show_hidden);
+    sync();
 }
 
 /// Rebuild once when the active view's hidden setting changes; old worker results carry an epoch.

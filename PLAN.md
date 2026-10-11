@@ -82,7 +82,7 @@ Font size, density, click behavior, custom key bindings, plugins, and other curr
 - [x] Group shortcuts into Navigation, Files, Search, Tabs/windows, and View.
 - [x] Show action, keys, and scope, including cases where a key keeps its normal meaning in an edit box.
 - [x] Include every supported shortcut, including Ctrl+Shift+Tab, Shift+F10, Shift+Del, and the new split-pane commands when added.
-- [ ] Keep the guide consistent with actual command handling and menu labels. Once shared shortcut definitions exist, use them for the guide.
+- [x] Keep the guide consistent with actual command handling and menu labels. Once shared shortcut definitions exist, use them for the guide.
 - [ ] Make the guide keyboard navigable, readable in both themes, and usable at high DPI.
 
 Pass condition: common operations work from toolbar, menus, and keyboard; Settings changes survive restart;
@@ -150,11 +150,11 @@ thumbnail/preview helpers, src/settings.rs, relevant logic tests, tests/window.r
 
 These are proposed additions, not prerequisites for the first toolbar/settings release.
 
-- [ ] Pin and unpin folders in Quick access; persist the user's pins.
-- [ ] Add a breadcrumb address display with ancestor navigation while preserving Ctrl+L for editable paths.
-- [ ] Add a recent-folders menu, excluding passwords or credentials from saved locations.
-- [ ] Add an operation-status view showing running jobs, destinations, completion, and errors, using existing Windows progress behavior.
-- [ ] Add Open terminal here to More, using the active pane's folder and reporting launch failures.
+- [x] Pin and unpin folders in Quick access; persist the user's pins.
+- [x] Add a breadcrumb address display with ancestor navigation while preserving Ctrl+L for editable paths.
+- [x] Add a recent-folders menu, excluding passwords or credentials from saved locations.
+- [x] Add an operation-status view showing running jobs, destinations, completion, and errors, using existing Windows progress behavior.
+- [x] Add Open terminal here to More, using the active pane's folder and reporting launch failures.
 
 For each addition, define its saved state and affected commands before implementation.
 Use existing workers and Windows integrations rather than adding a dependency for a small feature.
@@ -215,3 +215,10 @@ window regression and live-refresh selection test passed; Clippy passed.
 queue, skips offscreen requests, and retains at most 256 thumbnails plus 64 failed lookups.
 Bitmap ownership covers stale results and closed windows; preview double-deletion was fixed.
 The bounded-cache unit test, thumbnail loading/view-switch test, and existing preview test passed.
+
+2026-10-11: Quick access pins, recent folders (20 maximum, credential-bearing locations excluded),
+clickable ancestors with Ctrl+L editing, an operation-history window, and Open terminal here added.
+Terminal paths are passed as the working directory, never interpolated into shell code. Operation
+history stays in memory and retains recent completions plus running jobs; Windows owns progress and
+cancellation. Pins/breadcrumbs, operation status, saved locations, and the shortcut guide have window
+or logic regression tests. Dialogs own their DPI-scaled fonts.
