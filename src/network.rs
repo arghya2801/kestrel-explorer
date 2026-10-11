@@ -54,6 +54,13 @@ pub fn list_shares(server: &str) -> io::Result<Snapshot> {
         return Err(io::Error::from_raw_os_error(rc as i32));
     }
     let mut snap = Snapshot::new(PathBuf::from(format!(r"\\{server}")));
+    if read == 0 {
+        free(buf);
+        return Ok(snap);
+    }
+    if buf.is_null() {
+        return Err(io::Error::other("Windows returned a missing share buffer"));
+    }
     let items = unsafe { std::slice::from_raw_parts(buf as *const SHARE_INFO_1, read as usize) };
     for item in items {
         if item.shi1_type.0 & STYPE_MASK.0 != STYPE_DISKTREE.0 || item.shi1_netname.is_null() {
@@ -98,6 +105,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires localhost SMB access and a C$ administrative share"]
     fn this_computers_disk_shares_are_listed() {
         let all = list_shares("localhost").unwrap();
         let names: Vec<String> = (0..all.len()).map(|i| all.name_string(i)).collect();

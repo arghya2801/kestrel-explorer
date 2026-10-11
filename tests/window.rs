@@ -1218,6 +1218,7 @@ fn ctrl_n_opens_a_second_window_side_by_side() {
 // ---- network ----
 
 #[test]
+#[ignore = "requires localhost SMB access and a readable C$ administrative share"]
 fn a_computer_lists_its_shares_and_up_returns_to_them() {
     let t = TempDir::new("net");
     let hwnd = open(&t.0);
