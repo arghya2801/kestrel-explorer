@@ -8,20 +8,38 @@ use std::sync::{Mutex, PoisonError};
 pub struct Events<T> {
     queue: Mutex<Vec<T>>,
     pending: AtomicBool,
+    closed: AtomicBool,
     /// Wakes the UI thread; returns false if the wake could not be delivered.
     wake: Box<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl<T> Events<T> {
     pub fn new(wake: impl Fn() -> bool + Send + Sync + 'static) -> Self {
-        Events { queue: Mutex::new(Vec::new()), pending: AtomicBool::new(false), wake: Box::new(wake) }
+        Events {
+            queue: Mutex::new(Vec::new()),
+            pending: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            wake: Box::new(wake),
+        }
     }
 
     pub fn send(&self, ev: T) {
-        self.queue.lock().unwrap_or_else(PoisonError::into_inner).push(ev);
+        {
+            let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+            if self.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            queue.push(ev);
+        }
         if !self.pending.swap(true, Ordering::SeqCst) && !(self.wake)() {
             self.pending.store(false, Ordering::SeqCst);
         }
+    }
+
+    pub fn close(&self) {
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        self.closed.store(true, Ordering::SeqCst);
+        queue.clear();
     }
 
     /// Takes everything queued. Clears `pending` first so a concurrent send wakes again.
@@ -92,5 +110,16 @@ mod tests {
         let mut got = ev.drain();
         got.sort();
         assert_eq!(got, (0..400).collect::<Vec<_>>());
+    }
+    #[test]
+    fn closing_discards_queued_and_late_resources() {
+        let resource = Arc::new(());
+        let events = Events::new(|| true);
+        events.send(resource.clone());
+        assert_eq!(Arc::strong_count(&resource), 2);
+        events.close();
+        events.send(resource.clone());
+        assert!(events.drain().is_empty());
+        assert_eq!(Arc::strong_count(&resource), 1);
     }
 }

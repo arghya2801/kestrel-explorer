@@ -19,6 +19,7 @@ pub struct Settings {
     pub show_hidden: bool,
     pub split: Option<i32>,
     pub preview: bool,
+    pub grid: bool,
     pub dual_pane: bool,
     pub pane_ratio: i32,
     pub preview_width: Option<i32>,
@@ -39,6 +40,7 @@ impl Default for Settings {
             show_hidden: false,
             split: None,
             preview: false,
+            grid: false,
             dual_pane: false,
             pane_ratio: 500,
             preview_width: None,
@@ -93,6 +95,7 @@ impl Settings {
                     }
                 }
                 "show_hidden" => s.show_hidden = flag(value).unwrap_or(false),
+                "grid" => s.grid = flag(value).unwrap_or(false),
                 "preview" => s.preview = flag(value).unwrap_or(false),
                 "dual_pane" => s.dual_pane = flag(value).unwrap_or(false),
                 "pane_ratio" => {
@@ -132,7 +135,7 @@ impl Settings {
         let key = KEYS.iter().find(|(k, _)| *k == self.sort.key).map_or("Name", |k| k.1);
         out += &format!("sort={key},{}\n", self.sort.descending);
         out += &format!("show_hidden={}\n", self.show_hidden);
-        out += &format!("preview={}\n", self.preview);
+        out += &format!("preview={}\ngrid={}\n", self.preview, self.grid);
         out += &format!("dual_pane={}\npane_ratio={}\n", self.dual_pane, self.pane_ratio);
         if let Some(width) = self.preview_width {
             out += &format!("preview_width={width}\n");
@@ -214,6 +217,7 @@ mod tests {
             show_hidden: true,
             split: Some(260),
             preview: true,
+            grid: true,
             dual_pane: true,
             pane_ratio: 650,
             preview_width: Some(350),

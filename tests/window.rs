@@ -1628,3 +1628,35 @@ fn refresh_preserves_bulk_selection_and_focused_row() {
     assert_eq!(unsafe { SendMessageW(list, LVM_GETSELECTEDCOUNT, None, None).0 }, 65);
     close(hwnd);
 }
+
+#[test]
+fn thumbnail_grid_loads_images_and_switches_back_to_details() {
+    let t = TempDir::new("grid");
+    let mut bmp = vec![0u8; 70];
+    bmp[..2].copy_from_slice(b"BM");
+    bmp[2..6].copy_from_slice(&70u32.to_le_bytes());
+    bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
+    bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+    bmp[18..22].copy_from_slice(&2i32.to_le_bytes());
+    bmp[22..26].copy_from_slice(&2i32.to_le_bytes());
+    bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
+    bmp[28..30].copy_from_slice(&24u16.to_le_bytes());
+    bmp[54..].fill(180);
+    std::fs::write(t.0.join("photo.bmp"), bmp).unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["photo.bmp"]));
+    command(hwnd, ui::toolbar::GRID);
+    assert_eq!(unsafe { GetWindowLongPtrW(list, GWL_STYLE) as u32 } & LVS_TYPEMASK, LVS_ICON);
+    assert!(pump_until(WAIT, || item_image(list, 0) > 0), "thumbnail was not loaded");
+    for _ in 0..10 {
+        command(hwnd, ui::toolbar::DETAILS);
+        command(hwnd, ui::toolbar::GRID);
+    }
+    command(hwnd, ui::toolbar::DETAILS);
+    assert_eq!(unsafe { GetWindowLongPtrW(list, GWL_STYLE) as u32 } & LVS_TYPEMASK, LVS_REPORT);
+    assert_eq!(cell(list, 0, 0), "photo.bmp");
+    command(hwnd, ui::toolbar::GRID);
+    close(hwnd);
+    assert!(ui::take_final_settings().unwrap().grid);
+}

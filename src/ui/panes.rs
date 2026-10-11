@@ -30,6 +30,7 @@ pub(super) struct FolderView {
     pub lister: Option<JoinHandle<()>>,
     pub lister_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub icons: Icons,
+    pub grid: super::grid::Grid,
     pub watcher: Option<(u64, Watcher)>,
     pub device_note: Option<(isize, isize)>,
     pub edit_pending: Option<String>,
@@ -105,6 +106,18 @@ pub(super) unsafe fn create(
             }
         };
         super::set_font(&[list, label], font);
+        let mut grid = super::grid::Grid::new(settings.grid, id, events.clone());
+        if grid.enabled {
+            grid.ensure();
+            SendMessageW(
+                list,
+                LVM_SETIMAGELIST,
+                Some(WPARAM(LVSIL_NORMAL as usize)),
+                Some(LPARAM(grid.images.0)),
+            );
+            let style = GetWindowLongPtrW(list, GWL_STYLE) as u32;
+            SetWindowLongPtrW(list, GWL_STYLE, ((style & !LVS_TYPEMASK) | LVS_ICON) as isize);
+        }
         let (tx, rx) = mpsc::channel();
         let mut icons = Icons::new(tx, 0);
         if let Err(e) = icons::spawn_worker(rx, icons.latest.clone(), move |done| {
@@ -134,6 +147,7 @@ pub(super) unsafe fn create(
             lister: None,
             lister_cancel: Arc::default(),
             icons,
+            grid,
             watcher: None,
             device_note: None,
             edit_pending: None,
@@ -155,6 +169,7 @@ pub(super) fn toggle() {
             a.hwnd,
             a.other.is_some(),
             Settings {
+                grid: a.view.grid.enabled,
                 sort: a.view.browser.sort,
                 show_hidden: a.view.browser.show_hidden,
                 ..Default::default()

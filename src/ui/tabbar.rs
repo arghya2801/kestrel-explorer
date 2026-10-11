@@ -83,6 +83,7 @@ pub(super) fn new_tab(dir: Option<PathBuf>) {
             a.hwnd,
             id,
             Settings {
+                grid: a.view.grid.enabled,
                 sort: a.view.browser.sort,
                 show_hidden: a.view.browser.show_hidden,
                 ..Default::default()

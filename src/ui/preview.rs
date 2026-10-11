@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
-use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP, HDC, HGDIOBJ};
+use windows::Win32::Graphics::Gdi::{DeleteObject, HDC, HGDIOBJ};
 use windows::Win32::System::Com::{CLSCTX_LOCAL_SERVER, CoCreateInstance, STGM_READ, STGM_SHARE_DENY_NONE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemServices::{SS_BITMAP, SS_CENTER, SS_CENTERIMAGE};
@@ -21,6 +21,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{GUID, HSTRING, Interface, PCWSTR, w};
 
+use super::grid::Bitmap;
 use super::{Event, child, spawn, with_app};
 use crate::preview::{handler_for, is_text, read_text};
 
@@ -39,7 +40,7 @@ pub(super) struct Pane {
     host: HWND,
     token: u64,
     worker: Option<(Sender<Cmd>, u32)>,
-    bitmap: Option<HBITMAP>,
+    bitmap: Option<Bitmap>,
 }
 
 enum Cmd {
@@ -52,7 +53,7 @@ enum Cmd {
 pub(super) enum Shown {
     Text(String),
     Handler,
-    Image(isize),
+    Image(Bitmap),
     Nothing(&'static str),
 }
 
@@ -116,12 +117,18 @@ pub(super) fn restore(main: HWND, visible: bool) {
 
 /// Stops the preview thread (the window is closing).
 pub(super) fn shutdown() {
-    if let Some((bitmap, worker)) = with_app(|a| (a.preview.bitmap.take(), a.preview.worker.take())) {
-        if let Some(b) = bitmap {
+    if let Some((bitmap, worker, image)) =
+        with_app(|a| (a.preview.bitmap.take(), a.preview.worker.take(), a.preview.image))
+    {
+        let old = unsafe {
+            SendMessageW(image, STM_SETIMAGE, Some(WPARAM(IMAGE_BITMAP.0 as usize)), Some(LPARAM(0)))
+        };
+        if old.0 != 0 && bitmap.as_ref().is_none_or(|b| b.0 != old.0) {
             unsafe {
-                let _ = DeleteObject(HGDIOBJ(b.0));
+                let _ = DeleteObject(HGDIOBJ(old.0 as _));
             }
         }
+        drop(bitmap);
         if let Some((tx, thread)) = worker {
             let _ = tx.send(Cmd::Clear);
             unsafe {
@@ -230,11 +237,6 @@ pub(super) fn finish(token: u64, shown: Shown) {
         return;
     };
     if token != current {
-        if let Shown::Image(b) = shown {
-            unsafe {
-                let _ = DeleteObject(HGDIOBJ(b as _));
-            }
-        }
         return;
     }
     match shown {
@@ -247,21 +249,16 @@ pub(super) fn finish(token: u64, shown: Shown) {
         Shown::Handler => {}
         Shown::Image(b) => {
             let old = unsafe {
-                SendMessageW(image, STM_SETIMAGE, Some(WPARAM(IMAGE_BITMAP.0 as usize)), Some(LPARAM(b)))
+                SendMessageW(image, STM_SETIMAGE, Some(WPARAM(IMAGE_BITMAP.0 as usize)), Some(LPARAM(b.0)))
             };
-            if old.0 != 0 {
+            let previous = with_app(|a| a.preview.bitmap.replace(b)).flatten();
+            if old.0 != 0 && previous.as_ref().is_none_or(|p| p.0 != old.0) {
                 unsafe {
                     let _ = DeleteObject(HGDIOBJ(old.0 as _));
                 }
             }
-            with_app(|a| {
-                if let Some(prev) = a.preview.bitmap.replace(HBITMAP(b as _)) {
-                    unsafe {
-                        let _ = DeleteObject(HGDIOBJ(prev.0));
-                    }
-                }
-                show_only(&a.preview, image, None)
-            });
+            drop(previous);
+            with_app(|a| show_only(&a.preview, image, None));
         }
         Shown::Nothing(m) => {
             with_app(|a| show_only(&a.preview, message, Some(m)));
@@ -370,13 +367,13 @@ fn start_handler(clsid: &GUID, path: &Path, host: HWND, rect: &RECT) -> Option<I
 }
 
 /// A real thumbnail (not just the type's icon), rendered by Windows' thumbnail cache.
-fn thumbnail(path: &Path) -> Option<isize> {
+fn thumbnail(path: &Path) -> Option<Bitmap> {
     unsafe {
         let factory: IShellItemImageFactory =
             SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
         let bmp =
             factory.GetImage(SIZE { cx: 512, cy: 512 }, SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK).ok()?;
-        Some(bmp.0 as isize)
+        Some(Bitmap(bmp.0 as isize))
     }
 }
 

@@ -30,6 +30,7 @@ const WIDTH: usize = 23;
 const HEIGHT: usize = 24;
 const MAXIMIZED: usize = 25;
 const ERROR: usize = 26;
+const GRID: usize = 31;
 const SESSION: usize = 30;
 const DUAL: usize = 27;
 const RATIO: usize = 28;
@@ -181,6 +182,7 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR) -> windows::core::Resu
                     (0, DUAL, "Two folder panes", None, true),
                     (0, RATIO, "Left pane percentage", None, false),
                     (0, PREVIEW_WIDTH, "Preview width", None, false),
+                    (1, GRID, "Thumbnail grid view", None, true),
                     (1, HIDDEN, "Show &hidden items", None, true),
                     (1, SORT, "&Sort by", Some("Name|Date modified|Type|Size"), false),
                     (1, DESCENDING, "&Descending", None, true),
@@ -327,6 +329,7 @@ fn fill(hwnd: HWND, s: &Settings) {
     text(RATIO, (s.pane_ratio / 10).to_string());
     text(PREVIEW_WIDTH, s.preview_width.unwrap_or(320).to_string());
     check(HIDDEN, s.show_hidden);
+    check(GRID, s.grid);
     select(
         SORT,
         match s.sort.key {
@@ -379,6 +382,7 @@ fn read(hwnd: HWND) -> std::result::Result<Settings, String> {
         },
         split: Some(number(SIDEBAR, "Sidebar width", 120, 4000)?),
         preview: checked(PREVIEW),
+        grid: checked(GRID),
         dual_pane: checked(DUAL),
         restore_session: checked(SESSION),
         pane_ratio: number(RATIO, "Left pane percentage", 10, 90)? * 10,

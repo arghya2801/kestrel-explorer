@@ -22,6 +22,8 @@ pub const HELP: usize = 210;
 pub const SHORTCUTS: usize = 211;
 pub const SETTINGS: usize = 212;
 pub const SPLIT: usize = 213;
+pub const DETAILS: usize = 214;
+pub const GRID: usize = 215;
 
 const BUTTONS: &[(usize, &str, i32)] = &[
     (commands::CMD_NEW_FOLDER, "New folder", 94),
@@ -103,6 +105,7 @@ pub(super) fn update() {
 pub(super) fn execute(id: usize) -> bool {
     let Some(hwnd) = with_app(|a| a.hwnd) else { return false };
     match id {
+        DETAILS | GRID => super::grid::set(id == GRID),
         SPLIT => super::panes::toggle(),
         REFRESH => run(Browser::refresh),
         HIDDEN => {
@@ -152,6 +155,9 @@ fn popup(hwnd: HWND, kind: usize) {
         };
         match kind {
             VIEW => {
+                let grid = with_app(|a| a.view.grid.enabled).unwrap_or(false);
+                add(DETAILS, "Details", !grid);
+                add(GRID, "Thumbnail grid", grid);
                 let Some((sort, hidden, preview)) = with_app(|a| {
                     (a.view.browser.sort, a.view.browser.show_hidden, preview::is_visible_in(a))
                 }) else {

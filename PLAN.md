@@ -138,8 +138,8 @@ src/settings.rs, src/main.rs, navigation/settings tests, tests/window.rs.
 - [x] Measure selection restoration in 100k+ item folders and replace avoidable per-row work while preserving selection and focus.
 - [x] Replace the silent 5,000-child sidebar cap with incremental loading or a visible Load more action.
 - [ ] Measure icon lag while scrolling executable-heavy folders; discard requests for rows no longer needed if lag is confirmed.
-- [ ] Add large-icon/thumbnail grid view as an explicit later feature, selectable through View and Settings.
-- [ ] Request thumbnails only for needed rows, load them off the UI thread, bound retained image resources, and discard stale results.
+- [x] Add large-icon/thumbnail grid view as an explicit later feature, selectable through View and Settings.
+- [x] Request thumbnails only for needed rows, load them off the UI thread, bound retained image resources, and discard stale results.
 
 Pass condition: large folders remain responsive, all sidebar children can be reached, and repeated view changes do not leak image resources.
 
@@ -210,3 +210,8 @@ to succeed; typed UNC navigation stays available.
 order) restored selection in 26.44 ms in the release logic test. Bulk native selection is batched,
 notifications are suppressed during restoration, and keyboard focus is retained. The bulk-selection
 window regression and live-refresh selection test passed; Clippy passed.
+
+2026-10-11: View and Settings now offer thumbnail grid mode. Each view has a 64-request worker
+queue, skips offscreen requests, and retains at most 256 thumbnails plus 64 failed lookups.
+Bitmap ownership covers stale results and closed windows; preview double-deletion was fixed.
+The bounded-cache unit test, thumbnail loading/view-switch test, and existing preview test passed.

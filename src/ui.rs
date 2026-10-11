@@ -50,6 +50,7 @@ mod commands;
 mod dark;
 mod dialogs;
 mod drag;
+mod grid;
 mod panes;
 mod preview;
 mod tabbar;
@@ -77,6 +78,13 @@ const COLUMNS: [(PCWSTR, i32, SortKey); 4] = [
 ];
 
 enum Event {
+    Thumbnail {
+        view: u64,
+        generation: u64,
+        entry: u32,
+        attempted: bool,
+        image: Option<grid::Bitmap>,
+    },
     Listed {
         generation: u64,
         result: io::Result<(Snapshot, Vec<u32>)>,
@@ -447,6 +455,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         layout(hwnd);
         update_sort_arrows();
         preview::restore(hwnd, settings.preview);
+        grid::set(settings.grid);
         let _ = SetFocus(Some(list));
         go(start.to_path_buf());
         if settings.dual_pane && settings.tabs.is_empty() {
@@ -790,6 +799,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_DESTROY => {
+                with_app(|a| a.events.close());
                 let _ = windows::Win32::System::DataExchange::RemoveClipboardFormatListener(hwnd);
                 preview::shutdown();
                 if let Some(list) = with_app(|a| a.view.list) {
@@ -818,9 +828,14 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
         return unsafe { tree::on_notify(hdr, lp) };
     }
     let view = with_app(|a| a.views().find(|v| v.list == hdr.hwndFrom).map(|v| v.id)).flatten()?;
+    if hdr.code == LVN_ODCACHEHINT {
+        let hint = unsafe { &*(lp.0 as *const NMLVCACHEHINT) };
+        with_view(view, |v| v.grid.hint(hint.iFrom.max(0) as usize, hint.iTo.max(0) as usize));
+        return Some(LRESULT(0));
+    }
     if hdr.code == LVN_GETDISPINFOW {
         let item = unsafe { &mut (*(lp.0 as *mut NMLVDISPINFOW)).item };
-        with_view(view, |v| fill(&v.browser, &mut v.icons, v.drop_row, item));
+        with_view(view, |v| fill(&v.browser, &mut v.icons, &mut v.grid, v.drop_row, item));
         return Some(LRESULT(0));
     }
     if matches!(
@@ -840,11 +855,6 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
     }
     unsafe {
         match hdr.code {
-            LVN_GETDISPINFOW => {
-                let item = &mut (*(lp.0 as *mut NMLVDISPINFOW)).item;
-                with_app(|a| fill(&a.view.browser, &mut a.view.icons, a.view.drop_row, item));
-                Some(LRESULT(0))
-            }
             LVN_ODFINDITEMW => {
                 let find = &*(lp.0 as *const NMLVFINDITEMW);
                 if !find.lvfi.flags.contains(LVFI_STRING) || find.lvfi.psz.is_null() {
@@ -900,7 +910,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
 }
 
 /// Answers the list's request for a row's text and/or icon.
-fn fill(b: &Browser, icons: &mut Icons, drop_row: Option<usize>, item: &mut LVITEMW) {
+fn fill(b: &Browser, icons: &mut Icons, grid: &mut grid::Grid, drop_row: Option<usize>, item: &mut LVITEMW) {
     let (Some(s), Ok(row)) = (b.snapshot(), usize::try_from(item.iItem)) else { return write(item, &[]) };
     let Some(&entry) = b.order.get(row) else { return write(item, &[]) };
     let i = entry as usize;
@@ -909,7 +919,11 @@ fn fill(b: &Browser, icons: &mut Icons, drop_row: Option<usize>, item: &mut LVIT
         item.stateMask.0 |= LVIS_DROPHILITED.0;
     }
     if item.mask.contains(LVIF_IMAGE) {
-        item.iImage = icons.icon(b.shown_generation(), entry, s.name(i), s.is_dir(i), &s.dir);
+        item.iImage = if grid.enabled {
+            grid.icon(b.shown_generation(), entry, row, b.path_at(row).map(|p| p.0).unwrap_or_default())
+        } else {
+            icons.icon(b.shown_generation(), entry, s.name(i), s.is_dir(i), &s.dir)
+        };
     }
     let wide = |t: String| t.encode_utf16().collect::<Vec<_>>();
     match COLUMNS.get(item.iSubItem as usize).map(|c| c.2) {
@@ -938,6 +952,15 @@ fn write(item: &mut LVITEMW, text: &[u16]) {
 
 fn apply(ev: Event) {
     match ev {
+        Event::Thumbnail { view, generation, entry, attempted, image } => {
+            if let Some((list, true)) =
+                with_view(view, |v| (v.list, v.grid.finish(generation, entry, attempted, image)))
+            {
+                unsafe {
+                    let _ = InvalidateRect(Some(list), None, false);
+                }
+            }
+        }
         Event::Listed { generation, result } => {
             let id = crate::tabs::tab_of_generation(generation);
             let sel = selected_rows_for(id);
@@ -1161,6 +1184,7 @@ fn capture_settings(hwnd: HWND) {
 fn current_settings(hwnd: HWND) -> Option<Settings> {
     let (list, mut s) = with_app(|a| {
         let s = Settings {
+            grid: a.view.grid.enabled,
             sort: a.view.browser.sort,
             show_hidden: a.view.browser.show_hidden,
             split: Some(a.split),
@@ -1876,6 +1900,7 @@ fn apply_settings(hwnd: HWND, settings: Settings) {
     if let Some(job) = job {
         spawn_sort(job);
     }
+    grid::set(settings.grid);
     update_sort_arrows();
     layout(hwnd);
     let Some(events) = with_app(|a| a.events.clone()) else { return };
