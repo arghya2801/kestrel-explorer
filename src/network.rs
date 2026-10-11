@@ -82,6 +82,51 @@ pub fn list_location(dir: &Path) -> io::Result<Snapshot> {
     }
 }
 
+/// Network browser discovery can be unavailable; callers must keep typed UNC paths usable.
+/// https://learn.microsoft.com/windows/win32/api/lmserver/nf-lmserver-netserverenum
+pub fn computers() -> io::Result<Vec<String>> {
+    use windows::Win32::NetworkManagement::NetManagement::*;
+    use windows::core::PCWSTR;
+    let mut buffer = std::ptr::null_mut();
+    let (mut read, mut total) = (0, 0);
+    let rc = unsafe {
+        NetServerEnum(
+            PCWSTR::null(),
+            100,
+            &mut buffer,
+            u32::MAX,
+            &mut read,
+            &mut total,
+            SV_TYPE_WORKSTATION | SV_TYPE_SERVER,
+            PCWSTR::null(),
+            None,
+        )
+    };
+    let result = if rc != 0 {
+        Err(io::Error::from_raw_os_error(rc as i32))
+    } else if read == 0 {
+        Ok(Vec::new())
+    } else if buffer.is_null() {
+        Err(io::Error::other("Windows returned a missing computer buffer"))
+    } else {
+        let entries = unsafe { std::slice::from_raw_parts(buffer as *const SERVER_INFO_100, read as usize) };
+        let mut names: Vec<_> = entries
+            .iter()
+            .filter(|e| !e.sv100_name.is_null())
+            .filter_map(|e| unsafe { e.sv100_name.to_string().ok() })
+            .collect();
+        names.sort_unstable_by_key(|n| n.to_lowercase());
+        names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        Ok(names)
+    };
+    if !buffer.is_null() {
+        unsafe {
+            NetApiBufferFree(Some(buffer as *const _));
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

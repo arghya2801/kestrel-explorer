@@ -386,7 +386,7 @@ fn sidebar_lists_quick_access_and_drives_with_labels() {
     let hwnd = open(&t.0);
     let tree = tree_of(hwnd);
     let roots: Vec<String> = tv_children(tree, 0).into_iter().map(|r| r.0).collect();
-    assert_eq!(roots, ["Quick access", "This PC"]);
+    assert_eq!(roots, ["Quick access", "This PC", "Network"]);
     let quick = tv_children(tree, 0)[0].1;
     assert_eq!(tv_children(tree, quick)[0].0, "Desktop");
     let c = system_drive_node(tree);
@@ -406,7 +406,6 @@ fn expanding_a_drive_loads_folders_and_clicking_one_shows_it() {
     let tree = tree_of(hwnd);
     let list = list_of(hwnd);
     let c = system_drive_node(tree);
-    assert!(tv_children(tree, c).is_empty(), "loaded before expanding");
 
     unsafe { SendMessageW(tree, TVM_EXPAND, Some(WPARAM(TVE_EXPAND.0 as usize)), Some(LPARAM(c))) };
     let windows = || tv_children(tree, c).into_iter().find(|(t, _)| t.eq_ignore_ascii_case("Windows"));
@@ -1519,4 +1518,82 @@ fn session_restores_tabs_and_both_folders() {
     assert_eq!(saved.tabs[0].other, Some(t.0.join("one")));
     assert_eq!(saved.tabs[0].ratio, 620);
     assert_eq!(Settings::parse(&saved.to_text()).tabs, saved.tabs);
+}
+
+#[test]
+fn sidebar_follows_navigation_and_reloads_hidden_children() {
+    let t = TempDir::new("sidebar-sync");
+    std::fs::create_dir(t.0.join("visible")).unwrap();
+    std::fs::create_dir(t.0.join("hidden")).unwrap();
+    unsafe {
+        windows::Win32::Storage::FileSystem::SetFileAttributesW(
+            &HSTRING::from(t.0.join("hidden").as_os_str()),
+            windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN,
+        )
+        .unwrap();
+    }
+    let hwnd = open(&t.0);
+    let tree = tree_of(hwnd);
+    let selected = || tv_next(tree, TVGN_CARET, 0);
+    let name = t.0.file_name().unwrap().to_string_lossy().to_string();
+    assert!(
+        pump_until(WAIT, || tv_item(tree, selected()).0 == name),
+        "target {} selected {:?} children {:?}",
+        t.0.display(),
+        tv_item(tree, selected()),
+        tv_children(tree, selected())
+    );
+    unsafe {
+        SendMessageW(tree, TVM_EXPAND, Some(WPARAM(TVE_EXPAND.0 as usize)), Some(LPARAM(selected())));
+    }
+    assert!(pump_until(WAIT, || tv_children(tree, selected()).iter().any(|n| n.0 == "visible")));
+    assert!(!tv_children(tree, selected()).iter().any(|n| n.0 == "hidden"));
+    command(hwnd, ui::toolbar::HIDDEN);
+    assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()) == ["hidden", "visible"]));
+    assert!(
+        pump_until(WAIT, || tv_item(tree, selected()).0 == name),
+        "target {} selected {:?} children {:?}",
+        t.0.display(),
+        tv_item(tree, selected()),
+        tv_children(tree, selected())
+    );
+    unsafe {
+        SendMessageW(tree, TVM_EXPAND, Some(WPARAM(TVE_EXPAND.0 as usize)), Some(LPARAM(selected())));
+    }
+    assert!(pump_until(WAIT, || tv_children(tree, selected()).iter().any(|n| n.0 == "hidden")));
+    close(hwnd);
+}
+
+#[test]
+fn sidebar_offers_all_children_after_load_more() {
+    let t = TempDir::new("sidebar-page");
+    for i in 0..5002 {
+        std::fs::create_dir(t.0.join(format!("child-{i:04}"))).unwrap();
+    }
+    let hwnd = open(&t.0);
+    let tree = tree_of(hwnd);
+    let name = t.0.file_name().unwrap().to_string_lossy().to_string();
+    let selected = || tv_next(tree, TVGN_CARET, 0);
+    assert!(
+        pump_until(WAIT, || tv_item(tree, selected()).0 == name),
+        "target {} selected {:?} children {:?}",
+        t.0.display(),
+        tv_item(tree, selected()),
+        tv_children(tree, selected())
+    );
+    let parent = selected();
+    unsafe {
+        SendMessageW(tree, TVM_EXPAND, Some(WPARAM(TVE_EXPAND.0 as usize)), Some(LPARAM(parent)));
+    }
+    assert!(pump_until(WAIT, || tv_children(tree, parent).len() == 5001));
+    let more = tv_children(tree, parent).last().unwrap().1;
+    assert!(tv_item(tree, more).0.starts_with("Load more"));
+    let mut nm =
+        NMTREEVIEWW { hdr: hdr(tree, TVN_SELCHANGEDW), action: TVC_BYKEYBOARD, ..Default::default() };
+    nm.itemNew.hItem = HTREEITEM(more);
+    nm.itemNew.lParam = LPARAM(tv_item(tree, more).1);
+    notify(hwnd, nm);
+    assert_eq!(tv_children(tree, parent).len(), 5002);
+    assert_eq!(tv_children(tree, parent).last().unwrap().0, "child-5001");
+    close(hwnd);
 }

@@ -164,6 +164,8 @@ struct App {
     live_listers: Arc<AtomicUsize>,
     tree: HWND,
     nodes: Vec<tree::Node>,
+    tree_epoch: usize,
+    tree_hidden: bool,
     split: i32,
     drag_offset: Option<i32>,
     watch_ids: u64,
@@ -432,6 +434,8 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 live_listers: Arc::new(AtomicUsize::new(0)),
                 tree,
                 nodes: Vec::new(),
+                tree_epoch: 0,
+                tree_hidden: settings.show_hidden,
                 split: settings.split.unwrap_or_else(|| scale(hwnd, 240)),
                 drag_offset: None,
                 watch_ids: 0,
@@ -1132,6 +1136,7 @@ fn late_init() {
     let this_pc = tree::populate();
     startup_mark("sidebar");
     with_app(|a| a.this_pc = this_pc);
+    tree::sync();
     for list in lists {
         unsafe {
             let _ = InvalidateRect(Some(list), None, false);
@@ -1545,6 +1550,7 @@ fn update_chrome() {
     }
     toolbar::update();
     panes::update_labels();
+    tree::sync();
     show_location();
     tabbar::update_label();
     if let Some(text) = with_app(|a| a.view.browser.status()) {

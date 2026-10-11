@@ -118,9 +118,9 @@ event callers and routing, tests/window.rs, relevant logic tests.
 
 ## 4. Finish navigation, persistence, and layout gaps
 
-- [ ] Sidebar follows the active pane's folder.
-- [ ] Hidden-item changes invalidate and reload affected sidebar children.
-- [ ] Add a Network node. Network enumeration must run on workers; typed server paths remain usable when discovery is unavailable.
+- [x] Sidebar follows the active pane's folder.
+- [x] Hidden-item changes invalidate and reload affected sidebar children.
+- [x] Add a Network node. Network enumeration must run on workers; typed server paths remain usable when discovery is unavailable.
 - [x] Restore open tabs, active tab, split layout, and each pane's folder.
 - [x] Save and restore secondary-window state through one coordinated writer; retain every window's state instead of letting the last writer win.
 - [x] Restore missing folders gracefully and fit window bounds to the current monitors.
@@ -136,7 +136,7 @@ src/settings.rs, src/main.rs, navigation/settings tests, tests/window.rs.
 ## 5. Remove large-folder limits and add the missing view
 
 - [ ] Measure selection restoration in 100k+ item folders and replace avoidable per-row work while preserving selection and focus.
-- [ ] Replace the silent 5,000-child sidebar cap with incremental loading or a visible Load more action.
+- [x] Replace the silent 5,000-child sidebar cap with incremental loading or a visible Load more action.
 - [ ] Measure icon lag while scrolling executable-heavy folders; discard requests for rows no longer needed if lag is confirmed.
 - [ ] Add large-icon/thumbnail grid view as an explicit later feature, selectable through View and Settings.
 - [ ] Request thumbnails only for needed rows, load them off the UI thread, bound retained image resources, and discard stale results.
@@ -199,3 +199,9 @@ The primary window owns the final save; secondary windows open when it closes ar
 A secondary window closed earlier is treated as intentionally closed. Theme applies across open
 windows; view settings stay local. Settings round-trip tests and the new window restoration test
 passed; Clippy passed. The Startup page can disable session restoration.
+
+2026-10-11: sidebar follows active navigation (including paths through hidden ancestors), reloads on
+hidden-item changes, exposes network discovery, and pages beyond 5,000 children. Stale tree results
+are rejected after rebuilds. The new 5,002-child window test and hidden-folder synchronization test
+passed; Clippy passed. Network discovery depends on Windows network services and is not assumed
+to succeed; typed UNC navigation stays available.
