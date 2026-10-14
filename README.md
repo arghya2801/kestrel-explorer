@@ -141,4 +141,3 @@ The ignored executable-icon and visual-capture diagnostics can be run separately
 | src/ui.rs, src/ui/ | Window, panes, tabs, sidebar, toolbar, dialogs, thumbnails and previews |
 | res/make_icon.py | Application icon |
 
-[PLAN.md](PLAN.md) tracks implementation and verification.

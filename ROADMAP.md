@@ -1,6 +1,5 @@
 # Kestrel roadmap
 
-[PLAN.md](PLAN.md) contains the implementation checklist.
 [HANDOFF.md](HANDOFF.md) records validation commands and remaining release checks.
 
 ## Built through 1.1.0
@@ -78,43 +77,46 @@ Historical samples used different feature sets and workload conditions.
 
 ## Road to 2.0 (final product)
 
-Review of 2026-10-14. Clippy and formatting pass; no application panics outside tests.
-Items are ordered by priority inside each phase. Discuss before starting a phase.
+Review of 2026-10-14; work through 2026-10-15 on branch roadmap-2.0.
+Items are ordered by priority inside each phase.
 
 ### 1.1.x: ship what exists
 
 - [x] GitHub release job: a `v*` tag checks the version, lints, runs unit tests, builds,
-      and publishes the exe, symbols zip and SHA256SUMS (.github/workflows/release.yml)
-- [ ] CI on push/PR: the same fmt/clippy/unit-test steps, so main stays releasable
-- [ ] Save the session on Windows sign-out/restart. `WM_QUERYENDSESSION`/`WM_ENDSESSION` are not
-      handled, so an update reboot or log-off loses tabs and the last folder
-- [ ] Save the session periodically or on change, so a crash or kill keeps the tabs
+      and publishes the exe, symbols zip and SHA256SUMS (.github/workflows/ci.yml)
+- [x] CI on push to main and on PRs: the same fmt/clippy/unit-test/build steps
+- [x] Save the session on Windows sign-out/restart (`WM_QUERYENDSESSION`/`WM_ENDSESSION`)
+- [x] Checkpoint the session every 30 seconds, so a crash or kill keeps the tabs
 - [ ] Finish the manual checks: cold-cache startup, physical high-DPI/monitors, SMB and clipboard
-- [ ] Tag v1.1.0 through the release job
+- [ ] Tag a release through the job. The features below suggest 1.2.0 rather than 1.1.0
 
 ### 1.2: everyday-use gaps versus Explorer
 
-- [ ] Status bar: selection count and total size, free space on the current drive
-- [ ] Ctrl+Z / Ctrl+Y undo and redo of the last file operation (the shell already records undo)
-- [ ] Alt+Enter opens Properties without going through the full menu
-- [ ] Ctrl+mouse wheel and View options for icon/thumbnail sizes
-- [ ] Additional details columns (created date, attributes) chosen from the header menu
-- [ ] Type-to-select feedback and visible focus outline in both themes
-- [ ] Dark context menus and dropdowns, if a documented API allows it; light menus remain the fallback
-- [ ] Profile the 1.5-second Settings/theme switch seen under stress
+- [x] Status bar: selection count and file size, free space on the current drive
+- [x] Ctrl+Z / Ctrl+Y undo and redo of file operations, including Recycle Bin restore
+- [x] Alt+Enter and a context-menu item open Properties through the shell helper.
+      The helper was missing OLE initialization, so Properties from the full menu failed too
+- [x] Four thumbnail sizes in View, Ctrl+mouse wheel zoom, DPI-scaled thumbnails
+- [x] Date created and Attributes columns, shown or hidden from the header's right-click menu
+- [x] Settings/theme stall profiled: identical before and after this work, mostly waiting on
+      other windows' threads under synthetic load (HANDOFF item 5)
+- Dropped: type-to-select feedback and focus outlines. Windows already provides both; no defect found
+- Dropped: dark context menus. No documented API exists; the existing decision to keep native
+  light menus stands
 
 ### 1.3: distribution and trust
 
-- [ ] Code signing in the release job, so SmartScreen stops warning on download
-- [ ] winget manifest (and optionally Scoop) pointing at the release assets
-- [ ] Optional "Open folders with Kestrel" registration, reversible from Settings
-- [ ] Update check against GitHub releases: notify only, never auto-install
-- [ ] Portable mode: settings beside the executable when a marker file exists
+- [x] Code signing step in the release job, active once `SIGNING_PFX`/`SIGNING_PASSWORD` secrets exist
+- [ ] Buy or set up a signing certificate (or Azure Trusted Signing): an owner decision
+- [ ] winget manifest pointing at the release assets, after the first published release
+- [x] Optional "Open in Kestrel" on folder and drive menus, per user, from Settings > Startup
+- [x] Help > Check for updates opens the releases page; nothing is sent until the user asks
+- [x] Portable mode: a `portable` file beside kestrel.exe keeps data in KestrelData there
 
 ### 2.0: power features
 
 - [ ] Folder size calculation on demand (cancellable worker, like search)
-- [ ] Search by content and by size/date filters; reuse the search worker
+- [ ] Search by size/date filters, then by content; reuse the search worker
 - [ ] Batch rename with preview
 - [ ] Synchronized navigation and folder compare between split panes
 - [ ] Archive browsing (zip first, through the shell namespace)
@@ -123,7 +125,7 @@ Items are ordered by priority inside each phase. Discuss before starting a phase
 
 ### Housekeeping
 
-- [ ] Fold PLAN.md into git history; its checklist is complete. Keep HANDOFF.md for release checks only
-- [ ] Measurements appear in README, ROADMAP and HANDOFF; keep one copy here
+- [x] PLAN.md removed; its completed checklist stays in git history
+- [x] Measurements kept here only; HANDOFF.md now holds validation, release steps and limits
 
 Plugins and cloud-drive integrations remain out of scope.
