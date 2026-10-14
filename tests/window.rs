@@ -1900,3 +1900,20 @@ fn render_review_windows() {
         close(hwnd);
     }
 }
+
+#[test]
+fn sign_out_saves_the_open_windows() {
+    let data = kestrel::crash::data_dir();
+    assert!(
+        data.starts_with(env!("CARGO_TARGET_TMPDIR").trim_end_matches("tmp")),
+        "set LOCALAPPDATA as in HANDOFF.md"
+    );
+    let t = TempDir::new("sign-out");
+    kestrel::session::begin();
+    let hwnd = open(&t.0);
+    let _ = std::fs::remove_file(data.join("session.txt"));
+    unsafe { SendMessageW(hwnd, WM_QUERYENDSESSION, None, None) };
+    let saved = kestrel::session::restored();
+    close(hwnd);
+    assert!(saved.iter().any(|s| s.last_folder.as_deref() == Some(t.0.as_path())), "{saved:?}");
+}

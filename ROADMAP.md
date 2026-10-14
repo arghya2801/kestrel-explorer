@@ -76,13 +76,54 @@ Historical samples used different feature sets and workload conditions.
 - Native menus remain light; undocumented uxtheme ordinals are not used.
 - Shortcut-arrow overlays remain deferred because installed handlers can be slow.
 
-## Remaining release work
+## Road to 2.0 (final product)
 
-- Controlled cold-cache startup measurement
-- Physical high-DPI and changed-monitor checks
-- Opt-in SMB and real-clipboard tests on a suitable desktop
-- Investigation of the historical stall if it recurs, using the watchdog dump
-- Release tag after verification
+Review of 2026-10-14. Clippy and formatting pass; no application panics outside tests.
+Items are ordered by priority inside each phase. Discuss before starting a phase.
 
-Plugins, cloud-drive integrations, archive browsing, custom key bindings and an in-process
-Properties dialog remain outside this plan.
+### 1.1.x: ship what exists
+
+- [x] GitHub release job: a `v*` tag checks the version, lints, runs unit tests, builds,
+      and publishes the exe, symbols zip and SHA256SUMS (.github/workflows/release.yml)
+- [ ] CI on push/PR: the same fmt/clippy/unit-test steps, so main stays releasable
+- [ ] Save the session on Windows sign-out/restart. `WM_QUERYENDSESSION`/`WM_ENDSESSION` are not
+      handled, so an update reboot or log-off loses tabs and the last folder
+- [ ] Save the session periodically or on change, so a crash or kill keeps the tabs
+- [ ] Finish the manual checks: cold-cache startup, physical high-DPI/monitors, SMB and clipboard
+- [ ] Tag v1.1.0 through the release job
+
+### 1.2: everyday-use gaps versus Explorer
+
+- [ ] Status bar: selection count and total size, free space on the current drive
+- [ ] Ctrl+Z / Ctrl+Y undo and redo of the last file operation (the shell already records undo)
+- [ ] Alt+Enter opens Properties without going through the full menu
+- [ ] Ctrl+mouse wheel and View options for icon/thumbnail sizes
+- [ ] Additional details columns (created date, attributes) chosen from the header menu
+- [ ] Type-to-select feedback and visible focus outline in both themes
+- [ ] Dark context menus and dropdowns, if a documented API allows it; light menus remain the fallback
+- [ ] Profile the 1.5-second Settings/theme switch seen under stress
+
+### 1.3: distribution and trust
+
+- [ ] Code signing in the release job, so SmartScreen stops warning on download
+- [ ] winget manifest (and optionally Scoop) pointing at the release assets
+- [ ] Optional "Open folders with Kestrel" registration, reversible from Settings
+- [ ] Update check against GitHub releases: notify only, never auto-install
+- [ ] Portable mode: settings beside the executable when a marker file exists
+
+### 2.0: power features
+
+- [ ] Folder size calculation on demand (cancellable worker, like search)
+- [ ] Search by content and by size/date filters; reuse the search worker
+- [ ] Batch rename with preview
+- [ ] Synchronized navigation and folder compare between split panes
+- [ ] Archive browsing (zip first, through the shell namespace)
+- [ ] Custom key bindings, sharing the shortcut table the guide already uses
+- [ ] Accessibility pass: screen-reader names for custom-drawn controls, high-contrast theme
+
+### Housekeeping
+
+- [ ] Fold PLAN.md into git history; its checklist is complete. Keep HANDOFF.md for release checks only
+- [ ] Measurements appear in README, ROADMAP and HANDOFF; keep one copy here
+
+Plugins and cloud-drive integrations remain out of scope.

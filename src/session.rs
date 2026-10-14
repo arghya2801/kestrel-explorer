@@ -9,6 +9,7 @@ struct Session {
     primary: isize,
     closing_primary: bool,
     preferences: Option<Settings>,
+    written: String,
 }
 static SESSION: Mutex<Session> = Mutex::new(Session {
     enabled: false,
@@ -16,6 +17,7 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
     primary: 0,
     closing_primary: false,
     preferences: None,
+    written: String::new(),
 });
 
 pub fn begin() {
@@ -50,6 +52,13 @@ pub(crate) fn closing(hwnd: isize, settings: Settings) {
         *saved = settings;
     }
 }
+/// Refreshes an open window's record, so a checkpoint or forced shutdown keeps its current state.
+pub(crate) fn update(hwnd: isize, settings: Settings) {
+    let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, saved)) = s.windows.iter_mut().find(|(h, _)| *h == hwnd) {
+        *saved = settings;
+    }
+}
 pub(crate) fn preferences(settings: Settings) -> Vec<isize> {
     let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
     s.preferences = Some(settings);
@@ -69,7 +78,7 @@ pub(crate) fn flush_preferences() -> std::io::Result<()> {
     Ok(())
 }
 pub fn finish() -> std::io::Result<()> {
-    let s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
     if !s.enabled {
         return Ok(());
     }
@@ -82,10 +91,22 @@ pub fn finish() -> std::io::Result<()> {
         }
         p.save_to(&Settings::file())?;
     }
+    write_windows(&mut s)
+}
+/// Writes the open windows to session.txt, so a crash or kill restores them on the next launch.
+pub(crate) fn checkpoint() -> std::io::Result<()> {
+    let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    if !s.enabled { Ok(()) } else { write_windows(&mut s) }
+}
+fn write_windows(s: &mut Session) -> std::io::Result<()> {
     let mut text = String::new();
     for (_, window) in &s.windows {
-        text += "[window]\n";
+        text += "[window]
+";
         text += &window.to_text();
+    }
+    if text == s.written {
+        return Ok(());
     }
     let path = crate::crash::data_dir().join("session.txt");
     std::fs::create_dir_all(path.parent().unwrap())?;
@@ -95,7 +116,9 @@ pub fn finish() -> std::io::Result<()> {
     file.write_all(text.as_bytes())?;
     file.sync_all()?;
     drop(file);
-    std::fs::rename(tmp, path)
+    std::fs::rename(tmp, path)?;
+    s.written = text;
+    Ok(())
 }
 
 #[cfg(test)]

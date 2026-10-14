@@ -66,6 +66,8 @@ const CLASS: PCWSTR = w!("Kestrel");
 const WM_APP_EVENTS: u32 = WM_APP + 1;
 const WM_APP_LATE_INIT: u32 = WM_APP + 2;
 const WM_APP_PREFERENCES: u32 = WM_APP + 3;
+/// Checkpoints the session to disk; preview owns timer 7.
+const TIMER_SESSION: usize = 8;
 const ID_BACK: usize = 1;
 const ID_FORWARD: usize = 2;
 const ID_UP: usize = 3;
@@ -486,6 +488,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
             tabbar::restore(settings);
         }
         crate::session::register(hwnd.0 as isize, settings.clone());
+        SetTimer(Some(hwnd), TIMER_SESSION, 30_000, None);
         // Icons and the sidebar wait until the window has painted once.
         startup_mark("before theme");
         dark::apply(hwnd, Palette::new(settings.theme.is_dark(system_prefers_dark())));
@@ -851,6 +854,19 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 LRESULT(1)
             }
             WM_TIMER if preview::on_timer(hwnd, wp.0) => LRESULT(0),
+            WM_TIMER if wp.0 == TIMER_SESSION => {
+                save_session(hwnd, false);
+                LRESULT(0)
+            }
+            // Sign-out and restart end the process without a normal exit: save now.
+            WM_QUERYENDSESSION => {
+                save_session(hwnd, false);
+                LRESULT(1)
+            }
+            WM_ENDSESSION if wp.0 != 0 => {
+                save_session(hwnd, true);
+                LRESULT(0)
+            }
             WM_PAINT => {
                 log_first_paint();
                 DefWindowProcW(hwnd, msg, wp, lp)
@@ -1271,6 +1287,17 @@ fn capture_settings(hwnd: HWND) {
     if let Some(s) = current_settings(hwnd) {
         crate::session::closing(hwnd.0 as isize, s.clone());
         FINAL_SETTINGS.with(|f| *f.borrow_mut() = Some(s));
+    }
+}
+
+/// Records the open window's state and writes the session; `all` also saves preferences.
+fn save_session(hwnd: HWND, all: bool) {
+    if let Some(s) = current_settings(hwnd) {
+        crate::session::update(hwnd.0 as isize, s);
+    }
+    let saved = if all { crate::session::finish() } else { crate::session::checkpoint() };
+    if let Err(e) = saved {
+        crash::log(&format!("Session not saved: {e}"));
     }
 }
 
