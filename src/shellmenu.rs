@@ -12,8 +12,9 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, IContextMenu,
-    IContextMenu2, IContextMenu3, ILFindLastID, ILFree, IShellFolder, SHBindToParent, SHParseDisplayName,
+    CMF_EXPLORE, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, GCS_VERBW,
+    IContextMenu, IContextMenu2, IContextMenu3, ILFindLastID, ILFree, IShellFolder, SHBindToParent,
+    SHParseDisplayName,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, HSTRING, Interface, PCSTR, PCWSTR, Result, w};
@@ -23,12 +24,16 @@ use crate::crash;
 pub const MENU_FLAG: &str = "--shell-menu";
 /// Prints the menu's items instead of showing it (used by tests).
 pub const LIST_FLAG: &str = "--shell-menu-list";
+/// Opens the Properties sheet instead of the menu (Alt+Enter); same arguments as `MENU_FLAG`.
+pub const PROPERTIES_FLAG: &str = "--shell-properties";
 const FIRST_ID: u32 = 1;
 /// Not in this version of the bindings; same value as SEE_MASK_UNICODE.
 const CMIC_MASK_UNICODE: u32 = 0x4000;
 const LAST_ID: u32 = 0x7FFF;
 /// The helper never lingers longer than this, whatever a command left open.
 const MAX_LINGER: Duration = Duration::from_secs(3600);
+/// How long a chosen command gets to open its first window.
+const FIRST_WINDOW_GRACE: Duration = Duration::from_secs(5);
 
 pub fn helper_args(x: i32, y: i32, paths: &[PathBuf]) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![MENU_FLAG.into(), x.to_string().into(), y.to_string().into()];
@@ -48,12 +53,16 @@ pub fn parse_helper_args(args: &[OsString]) -> Option<(i32, i32, Vec<PathBuf>)> 
 }
 
 /// Shows the full menu for `paths` at screen point (x, y) in a helper process. Doesn't wait.
-pub fn launch(x: i32, y: i32, paths: &[PathBuf]) -> std::io::Result<()> {
+pub fn launch(x: i32, y: i32, paths: &[PathBuf], properties: bool) -> std::io::Result<()> {
     // The helper must be allowed to come to the front, or its menu won't close properly.
     unsafe {
         let _ = AllowSetForegroundWindow(ASFW_ANY);
     }
-    std::process::Command::new(std::env::current_exe()?).args(helper_args(x, y, paths)).spawn().map(drop)
+    let mut args = helper_args(x, y, paths);
+    if properties {
+        args[0] = PROPERTIES_FLAG.into();
+    }
+    std::process::Command::new(std::env::current_exe()?).args(args).spawn().map(drop)
 }
 
 /// Item ID lists, freed on drop.
@@ -158,8 +167,13 @@ pub fn run_helper(args: &[OsString]) -> i32 {
             }
         };
     }
-    let Some((x, y, paths)) = parse_helper_args(args) else { return 2 };
-    match crash::guard(|| show(x, y, &paths)) {
+    let properties = args.first().is_some_and(|a| a == PROPERTIES_FLAG);
+    let mut args = args.to_vec();
+    if properties {
+        args[0] = MENU_FLAG.into();
+    }
+    let Some((x, y, paths)) = parse_helper_args(&args) else { return 2 };
+    match crash::guard(|| show(x, y, &paths, properties)) {
         Some(Ok(())) => 0,
         Some(Err(e)) => {
             crash::log(&format!("shell menu failed: {e}"));
@@ -169,8 +183,10 @@ pub fn run_helper(args: &[OsString]) -> i32 {
     }
 }
 
-fn show(x: i32, y: i32, paths: &[PathBuf]) -> Result<()> {
+fn show(x: i32, y: i32, paths: &[PathBuf], properties: bool) -> Result<()> {
     unsafe {
+        // Property sheets and many handlers need an STA thread; without it Properties fails with E_FAIL.
+        windows::Win32::System::Ole::OleInitialize(None)?;
         let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?.into();
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -198,10 +214,15 @@ fn show(x: i32, y: i32, paths: &[PathBuf]) -> Result<()> {
         let menu = build(paths, host)?;
         HANDLER.with(|h| *h.borrow_mut() = Some((menu.cm.cast().ok(), menu.cm.cast().ok())));
         let _ = SetForegroundWindow(host);
-        let cmd = TrackPopupMenuEx(menu.menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, x, y, host, None).0;
-        let _ = PostMessageW(Some(host), WM_NULL, WPARAM(0), LPARAM(0)); // lets the menu close cleanly
-        if cmd >= FIRST_ID as i32 {
-            let verb = (cmd as u32 - FIRST_ID) as usize;
+        let cmd = if properties {
+            verb_id(&menu, "properties")
+        } else {
+            let cmd = TrackPopupMenuEx(menu.menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, x, y, host, None).0;
+            let _ = PostMessageW(Some(host), WM_NULL, WPARAM(0), LPARAM(0)); // lets the menu close cleanly
+            (cmd >= FIRST_ID as i32).then_some(cmd as u32)
+        };
+        if let Some(cmd) = cmd {
+            let verb = (cmd - FIRST_ID) as usize;
             let info = CMINVOKECOMMANDINFOEX {
                 cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
                 fMask: CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE,
@@ -223,11 +244,32 @@ fn show(x: i32, y: i32, paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+/// The id of the top-level item with this canonical verb, such as "properties".
+fn verb_id(menu: &Menu, verb: &str) -> Option<u32> {
+    let count = unsafe { GetMenuItemCount(Some(menu.menu)) }.max(0);
+    (0..count).find_map(|i| {
+        let id = unsafe { GetMenuItemID(menu.menu, i) };
+        if !(FIRST_ID..=LAST_ID).contains(&id) {
+            return None;
+        }
+        let mut buf = [0u16; 64];
+        let name = windows::core::PSTR(buf.as_mut_ptr().cast());
+        unsafe {
+            menu.cm.GetCommandString((id - FIRST_ID) as usize, GCS_VERBW, None, name, buf.len() as u32)
+        }
+        .ok()?;
+        let len = buf.iter().position(|&c| c == 0)?;
+        String::from_utf16_lossy(&buf[..len]).eq_ignore_ascii_case(verb).then_some(id)
+    })
+}
+
 /// Pumps messages until no visible window of this process is left (or an hour passes).
 fn linger(host: HWND) {
     let start = Instant::now();
-    let mut quiet_checks = 0;
-    while start.elapsed() < MAX_LINGER && quiet_checks < 2 {
+    let (mut quiet_checks, mut seen) = (0, false);
+    // Properties opens its sheet on another thread, often more than a second later.
+    while start.elapsed() < MAX_LINGER && (quiet_checks < 2 || !seen && start.elapsed() < FIRST_WINDOW_GRACE)
+    {
         let until = Instant::now() + Duration::from_millis(500);
         let mut msg = MSG::default();
         while Instant::now() < until {
@@ -239,7 +281,9 @@ fn linger(host: HWND) {
             }
             std::thread::sleep(Duration::from_millis(15));
         }
-        quiet_checks = if has_visible_windows(host) { 0 } else { quiet_checks + 1 };
+        let visible = has_visible_windows(host);
+        seen |= visible;
+        quiet_checks = if visible { 0 } else { quiet_checks + 1 };
     }
 }
 
@@ -295,6 +339,10 @@ mod tests {
         let _ole = crate::shell::Com::init();
         let items = menu_items(&[d.join("x.txt")]).unwrap();
         assert!(items.len() >= 3, "{items:?}");
+        let menu = build(&[d.join("x.txt")], HWND::default()).unwrap();
+        assert!(verb_id(&menu, "properties").is_some(), "Alt+Enter finds Properties");
+        assert_eq!(verb_id(&menu, "no-such-verb"), None);
+        drop(menu);
         std::fs::remove_dir_all(d).unwrap();
     }
 }

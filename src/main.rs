@@ -11,7 +11,10 @@ use windows::Win32::UI::WindowsAndMessaging::{SW_SHOW, SW_SHOWMAXIMIZED, ShowWin
 fn main() {
     // Started as the helper that shows Windows' full right-click menu?
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.first().is_some_and(|a| a == shellmenu::MENU_FLAG || a == shellmenu::LIST_FLAG) {
+    if args.first().is_some_and(|a| {
+        [shellmenu::MENU_FLAG, shellmenu::LIST_FLAG, shellmenu::PROPERTIES_FLAG]
+            .contains(&a.to_str().unwrap_or(""))
+    }) {
         crash::install();
         std::process::exit(shellmenu::run_helper(&args));
     }

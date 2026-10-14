@@ -73,7 +73,8 @@ F2    Rename\r\n\
 Delete    Recycle\r\n\
 Shift+Delete    Delete permanently\r\n\
 Shift+F10 / Menu key    Context menu\r\n\
-Shift+right-click    Full Windows context menu\r\n\r\n\
+Shift+right-click    Full Windows context menu\r\n\
+Alt+Enter    Properties\r\n\r\n\
 Search\r\n\
 Ctrl+F    Focus the filter\r\n\
 Enter in the filter    Search subfolders\r\n\

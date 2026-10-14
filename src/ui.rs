@@ -553,6 +553,7 @@ fn on_key(msg: &MSG) -> bool {
             VK_UP => run(Browser::up),
             VK_D => focus_address(),
             VK_P => preview::toggle(with_app(|a| a.hwnd).unwrap_or_default()),
+            VK_RETURN if in_list => _ = commands::run(commands::CMD_PROPERTIES),
             _ => return false,
         }
         return true;
@@ -960,6 +961,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
                     return Some(LRESULT(0));
                 }
                 toolbar::update();
+                show_status();
                 if let Some(main) = with_app(|a| a.hwnd) {
                     preview::selection_changed(main);
                 }
@@ -1220,7 +1222,10 @@ fn spawn_list(job: ListJob) {
                     };
                     search::search(&dir, q, show_hidden, &|| cancel.load(Ordering::SeqCst), &mut progress)
                 }
-                None => crate::network::list_location(&dir),
+                None => crate::network::list_location(&dir).map(|mut s| {
+                    s.free = crate::listing::free_space(&dir);
+                    s
+                }),
             };
             snap.map(|s| {
                 let order = filter_order(&s, &sorted_order(&s, sort, show_hidden), &filter);
@@ -1754,7 +1759,12 @@ fn update_chrome() {
     show_location();
     breadcrumbs::update();
     tabbar::update_label();
-    if let Some(text) = with_app(|a| a.view.browser.status()) {
+    show_status();
+}
+
+fn show_status() {
+    let rows = selected_rows();
+    if let Some(text) = with_app(|a| a.view.browser.status_line(&rows)) {
         set_status(&text);
     }
 }

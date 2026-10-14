@@ -562,7 +562,8 @@ fn changes_on_disk_show_up_and_keep_the_selection() {
     std::fs::rename(t.0.join("b.txt"), t.0.join("z.txt")).unwrap();
     assert!(pump_until(WAIT, || rows(list) == ["0new.txt", "c.txt", "z.txt"]), "{:?}", rows(list));
     assert_eq!(selected(list), ["c.txt"]);
-    assert_eq!(status_text(hwnd), "3 items");
+    assert!(status_text(hwnd).starts_with("3 items    1 selected, "), "{}", status_text(hwnd));
+    assert!(status_text(hwnd).ends_with(" free"), "{}", status_text(hwnd));
     close(hwnd);
 }
 
@@ -571,7 +572,7 @@ fn a_burst_of_new_files_all_arrives() {
     let t = TempDir::new("burst");
     let hwnd = open(&t.0);
     let list = list_of(hwnd);
-    assert!(pump_until(WAIT, || status_text(hwnd) == "0 items"));
+    assert!(pump_until(WAIT, || status_text(hwnd).starts_with("0 items")));
     pump_until(Duration::from_millis(300), || false);
     let dir = t.0.clone();
     let writer = std::thread::spawn(move || {
@@ -592,7 +593,7 @@ fn deleting_the_open_folder_moves_to_its_parent() {
     std::fs::write(t.0.join("keep.txt"), "").unwrap();
     let hwnd = open(&doomed);
     let list = list_of(hwnd);
-    assert!(pump_until(WAIT, || status_text(hwnd) == "0 items"));
+    assert!(pump_until(WAIT, || status_text(hwnd).starts_with("0 items")));
     pump_until(Duration::from_millis(300), || false);
 
     std::fs::remove_dir_all(t.0.join("doomed")).expect("watching must not block deletion");
@@ -725,7 +726,7 @@ fn copy_and_cut_then_paste_into_another_folder() {
     select_row(list, 1);
     command(hwnd, ui::CMD_COPY);
     activate(hwnd, list, 0);
-    assert!(pump_until(WAIT, || status_text(hwnd) == "0 items"));
+    assert!(pump_until(WAIT, || status_text(hwnd).starts_with("0 items")));
     command(hwnd, ui::CMD_PASTE);
     assert!(pump_until(WAIT, || rows(list) == ["a.txt"]), "{:?} / {}", rows(list), status_text(hwnd));
     assert!(t.0.join("a.txt").exists(), "copy keeps the original");
@@ -946,7 +947,7 @@ fn typing_in_the_filter_narrows_and_enter_searches_subfolders() {
 
     type_into(filter, "APP");
     assert!(pump_until(WAIT, || rows(list) == ["apple.txt"]), "{:?}", rows(list));
-    assert_eq!(status_text(hwnd), "1 of 3 items");
+    assert!(status_text(hwnd).starts_with("1 of 3 items"), "{}", status_text(hwnd));
 
     key(filter, VK_RETURN);
     assert!(pump_until(WAIT, || rows(list).len() == 2), "{:?} / {}", rows(list), status_text(hwnd));
@@ -1350,6 +1351,8 @@ fn focus_pane(hwnd: HWND, list: HWND) {
 }
 fn navigate_to(hwnd: HWND, path: &Path) {
     let address = find(hwnd, w!("Edit"));
+    // As a user would: unfocused, the address shows the current folder again on the next refresh.
+    unsafe { SetFocus(Some(address)) }.ok();
     type_into(address, &path.display().to_string());
     key(address, VK_RETURN);
 }
@@ -1374,7 +1377,14 @@ fn split_panes_navigate_independently_and_survive_tab_switches() {
     assert_eq!(rows(left), ["left", "right"]);
     focus_pane(hwnd, left);
     navigate_to(hwnd, &t.0.join("left"));
-    assert!(pump_until(WAIT, || rows(left) == ["left.txt"]));
+    assert!(
+        pump_until(WAIT, || rows(left) == ["left.txt"]),
+        "left {:?} right {:?} active {} status {}",
+        rows(left),
+        rows(right),
+        ui::active_list() == Some(left),
+        status_text(hwnd)
+    );
     assert_eq!(rows(right), ["right.txt"]);
     ctrl_key(left, VK_T, false);
     assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
@@ -1624,7 +1634,7 @@ fn refresh_preserves_bulk_selection_and_focused_row() {
     );
     command(hwnd, ui::CMD_SELECT_ALL);
     command(hwnd, ui::toolbar::REFRESH);
-    assert!(pump_until(WAIT, || status_text(hwnd) == "65 items"));
+    assert!(pump_until(WAIT, || status_text(hwnd).starts_with("65 items")));
     assert_eq!(unsafe { SendMessageW(list, LVM_GETSELECTEDCOUNT, None, None).0 }, 65);
     close(hwnd);
 }
@@ -1786,7 +1796,7 @@ fn closing_a_window_does_not_interrupt_its_copy() {
     std::fs::write(source.0.join("payload.bin"), &bytes).unwrap();
     let hwnd = open(&t.0);
     let list = list_of(hwnd);
-    assert!(pump_until(WAIT, || status_text(hwnd) == "0 items"));
+    assert!(pump_until(WAIT, || status_text(hwnd).starts_with("0 items")));
     let mut rect = windows::Win32::Foundation::RECT::default();
     unsafe {
         GetWindowRect(list, &mut rect).unwrap();

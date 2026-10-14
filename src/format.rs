@@ -3,13 +3,20 @@
 use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
 use windows::Win32::Globalization::{DATE_SHORTDATE, GetDateFormatEx, GetTimeFormatEx, TIME_NOSECONDS};
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-use windows::Win32::UI::Shell::StrFormatKBSizeW;
+use windows::Win32::UI::Shell::{StrFormatByteSizeW, StrFormatKBSizeW};
 use windows::core::PCWSTR;
 
 /// Explorer's size column: whole KB, rounded up, locale digit grouping.
 pub fn size(bytes: u64) -> String {
     let mut buf = [0u16; 64];
     unsafe { StrFormatKBSizeW(bytes as i64, &mut buf) };
+    from_wide_z(&buf)
+}
+
+/// Status-bar size: "1.50 MB", like Explorer's selection total.
+pub fn bytes(bytes: u64) -> String {
+    let mut buf = [0u16; 64];
+    unsafe { StrFormatByteSizeW(bytes as i64, &mut buf) };
     from_wide_z(&buf)
 }
 

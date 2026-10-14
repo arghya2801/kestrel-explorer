@@ -83,6 +83,7 @@ Press **F1**, or choose **Help > Keyboard shortcuts**, for the in-app guide.
 | Tab / Shift+Tab | Next / previous control |
 | Shift+F10, Menu key | Context menu |
 | Shift+right-click | Full Windows context menu |
+| Alt+Enter | Properties |
 
 Text boxes keep their normal editing shortcuts.
 

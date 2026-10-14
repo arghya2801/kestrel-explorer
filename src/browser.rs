@@ -475,6 +475,30 @@ impl Browser {
         Some((s.dir.join(s.name_string(i)), s.is_dir(i)))
     }
 
+    /// `status` plus the selection's count and file size, and the drive's free space.
+    pub fn status_line(&self, selected: &[usize]) -> String {
+        let mut text = self.status();
+        let Some(s) = self.snapshot() else { return text };
+        if self.error.is_some() || self.loading.as_ref().is_some_and(|p| p.nav != Nav::Changed) {
+            return text;
+        }
+        if !selected.is_empty() {
+            let (mut files, mut bytes) = (0, 0);
+            for i in self.entries_at(selected).map(|i| i as usize).filter(|&i| !s.is_dir(i)) {
+                files += 1;
+                bytes += s.entries[i].size;
+            }
+            text += &format!("    {} selected", selected.len());
+            if files > 0 {
+                text += &format!(", {}", crate::format::bytes(bytes));
+            }
+        }
+        if let Some(free) = s.free {
+            text += &format!("    {} free", crate::format::bytes(free));
+        }
+        text
+    }
+
     pub fn status(&self) -> String {
         if let Some(p) = &self.loading
             && p.nav != Nav::Changed
@@ -785,6 +809,23 @@ mod tests {
         assert_eq!(b.find_prefix(3, &w("b")), Some(1));
         assert_eq!(b.find_prefix(0, &w("BL")), Some(2));
         assert_eq!(b.find_prefix(0, &w("z")), None);
+    }
+
+    #[test]
+    fn status_adds_selection_size_and_free_space() {
+        let mut b = Browser::default();
+        let job = b.go(r"C:".into());
+        let mut s = Snapshot::new(r"C:".into());
+        s.add(&w("dir"), windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY.0, 0, 0);
+        s.add(&w("f"), 0, 2048, 0);
+        s.free = Some(1024);
+        b.on_listed(job.generation, Ok((s, vec![0, 1])), &[]);
+        assert_eq!(b.status_line(&[]), format!("2 items    {} free", crate::format::bytes(1024)));
+        assert_eq!(
+            b.status_line(&[0]),
+            format!("2 items    1 selected    {} free", crate::format::bytes(1024))
+        );
+        assert!(b.status_line(&[0, 1]).contains(&format!("2 selected, {}", crate::format::bytes(2048))));
     }
 
     #[test]

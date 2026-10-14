@@ -28,11 +28,13 @@ pub struct Snapshot {
     pub dir: PathBuf,
     pub entries: Vec<Entry>,
     names: Vec<u16>,
+    /// Free bytes on the folder's volume, looked up by the listing worker.
+    pub free: Option<u64>,
 }
 
 impl Snapshot {
     pub fn new(dir: PathBuf) -> Self {
-        Snapshot { dir, entries: Vec::new(), names: Vec::new() }
+        Snapshot { dir, entries: Vec::new(), names: Vec::new(), free: None }
     }
     pub fn add(&mut self, name: &[u16], attrs: u32, size: u64, modified: u64) {
         self.entries.push(Entry {
@@ -63,6 +65,15 @@ impl Snapshot {
     pub fn is_hidden(&self, i: usize) -> bool {
         self.entries[i].attrs & FILE_ATTRIBUTE_HIDDEN.0 != 0
     }
+}
+
+/// Bytes free to this user on `dir`'s volume. Blocks on slow shares: call from a worker.
+pub fn free_space(dir: &Path) -> Option<u64> {
+    let mut free = 0u64;
+    let path = windows::core::HSTRING::from(dir.as_os_str());
+    unsafe { windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(&path, Some(&mut free), None, None) }
+        .ok()
+        .map(|_| free)
 }
 
 /// `\\?\`-prefixed form of an absolute path, so >MAX_PATH paths work without
