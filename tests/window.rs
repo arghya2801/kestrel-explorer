@@ -720,6 +720,24 @@ fn a_zip_opens_as_a_folder_and_up_leaves_it() {
 }
 
 #[test]
+fn unlabeled_controls_have_screen_reader_names() {
+    use windows::Win32::UI::Accessibility::{AccessibleObjectFromWindow, IAccessible};
+    use windows::core::Interface;
+    let t = TempDir::new("a11y");
+    let hwnd = open(&t.0); // returns after late init has run
+    let name = |control: HWND| unsafe {
+        let mut object = std::ptr::null_mut();
+        AccessibleObjectFromWindow(control, OBJID_CLIENT.0 as u32, &IAccessible::IID, &mut object).unwrap();
+        let object = IAccessible::from_raw(object);
+        object.get_accName(&windows::Win32::System::Variant::VARIANT::from(0i32)).unwrap().to_string()
+    };
+    assert_eq!(name(find(hwnd, w!("Edit"))), "Address");
+    assert_eq!(name(list_of(hwnd)), "Files");
+    assert_eq!(name(tree_of(hwnd)), "Folders");
+    close(hwnd);
+}
+
+#[test]
 fn calculate_folder_sizes_fills_the_size_column() {
     let t = TempDir::new("sizes");
     std::fs::create_dir_all(t.0.join("sub").join("deep")).unwrap();

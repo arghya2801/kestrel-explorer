@@ -126,6 +126,10 @@ pub(super) unsafe fn create(
         };
         super::set_font(&[list, label], font);
         super::startup_mark("list columns");
+        // The first window's lists get their names in late_init, after first paint.
+        if with_app(|_| ()).is_some() {
+            super::set_accessible_name(list, w!("Files"));
+        }
         let mut grid = super::grid::Grid::new(settings.grid, settings.thumb_size, id, events.clone());
         if grid.enabled {
             grid.ensure(windows::Win32::UI::HiDpi::GetDpiForWindow(list));

@@ -829,7 +829,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 } else {
                     PCWSTR(lp.0 as *const u16).to_string().unwrap_or_default()
                 };
-                if area == "ImmersiveColorSet"
+                if (area == "ImmersiveColorSet" || wp.0 == SPI_SETHIGHCONTRAST.0 as usize)
                     && let Some(choice) = with_app(|a| a.theme)
                 {
                     dark::apply(hwnd, Palette::new(choice.is_dark(system_prefers_dark())));
@@ -1377,6 +1377,17 @@ fn late_init() {
         return;
     };
     panes::enable_drop();
+    // Names for screen readers; after first paint because it loads oleacc.
+    if let Some((address, filter, strip)) = with_app(|a| (a.address, a.filter, a.tab_strip)) {
+        for (control, name) in
+            [(address, w!("Address")), (filter, w!("Filter")), (tree, w!("Folders")), (strip, w!("Tabs"))]
+        {
+            set_accessible_name(control, name);
+        }
+        for &list in &lists {
+            set_accessible_name(list, w!("Files"));
+        }
+    }
     let (image_list, folder_icon) = icons::system_image_list().unwrap_or_default();
     startup_mark("image list");
     if !image_list.is_invalid() {
@@ -1408,6 +1419,19 @@ fn late_init() {
     for list in lists {
         unsafe {
             let _ = InvalidateRect(Some(list), None, false);
+        }
+    }
+}
+
+/// A screen-reader name for a control that has no visible label (Dynamic Annotation).
+fn set_accessible_name(control: HWND, name: PCWSTR) {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
+    use windows::Win32::UI::Accessibility::{CLSID_AccPropServices, IAccPropServices, PROPID_ACC_NAME};
+    unsafe {
+        if let Ok(services) =
+            CoCreateInstance::<_, IAccPropServices>(&CLSID_AccPropServices, None, CLSCTX_INPROC_SERVER)
+        {
+            let _ = services.SetHwndPropStr(control, OBJID_CLIENT.0 as u32, 0, PROPID_ACC_NAME, name);
         }
     }
 }

@@ -65,12 +65,48 @@ pub struct Palette {
     pub chrome: u32,
 }
 
+/// Whether Windows' high-contrast mode is on.
+pub fn high_contrast() -> bool {
+    use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut hc = HIGHCONTRASTW { cbSize: size_of::<HIGHCONTRASTW>() as u32, ..Default::default() };
+    let got = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            hc.cbSize,
+            Some(&mut hc as *mut _ as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    got.is_ok() && hc.dwFlags.contains(HCF_HIGHCONTRASTON)
+}
+
 impl Palette {
+    /// Light or dark; in high-contrast mode, always the user's contrast colors.
     pub fn new(dark: bool) -> Palette {
+        if high_contrast() {
+            return Palette::system();
+        }
         if dark {
             Palette { dark, window: 0x00202020, text: 0x00F0F0F0, field: 0x00383838, chrome: 0x002B2B2B }
         } else {
             Palette { dark, window: 0x00FFFFFF, text: 0x00000000, field: 0x00FFFFFF, chrome: 0x00F0F0F0 }
+        }
+    }
+
+    /// Windows' own colors, as high contrast requires. Never "dark": dark control themes
+    /// would override the contrast theme.
+    pub fn system() -> Palette {
+        use windows::Win32::Graphics::Gdi::{COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor};
+        let color = |c| unsafe { GetSysColor(c) };
+        Palette {
+            dark: false,
+            window: color(COLOR_WINDOW),
+            text: color(COLOR_WINDOWTEXT),
+            field: color(COLOR_WINDOW),
+            chrome: color(COLOR_BTNFACE),
         }
     }
 }
@@ -103,6 +139,15 @@ mod tests {
         assert!(luma(d.window) < 60 && luma(d.text) > 180);
         let l = Palette::new(false);
         assert!(luma(l.window) > 200 && luma(l.text) < 60);
+    }
+
+    #[test]
+    fn system_palette_uses_windows_colors() {
+        use windows::Win32::Graphics::Gdi::{COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor};
+        let p = Palette::system();
+        assert!(!p.dark);
+        assert_eq!((p.window, p.text), unsafe { (GetSysColor(COLOR_WINDOW), GetSysColor(COLOR_WINDOWTEXT)) });
+        let _ = high_contrast();
     }
 
     #[test]
