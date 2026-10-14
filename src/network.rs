@@ -74,10 +74,11 @@ pub fn list_shares(server: &str) -> io::Result<Snapshot> {
     Ok(snap)
 }
 
-/// Lists a folder, or a computer's shares for `\\server`.
+/// Lists a folder, a computer's shares for `\\server`, or the inside of a .zip.
 pub fn list_location(dir: &Path) -> io::Result<Snapshot> {
     match server_of(dir) {
         Some(server) => list_shares(&server),
+        None if crate::shell::in_archive(dir) => crate::shell::list_archive(dir),
         None => list_dir(dir),
     }
 }

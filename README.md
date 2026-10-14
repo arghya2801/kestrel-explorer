@@ -17,7 +17,8 @@ and shell integrations. See [ROADMAP.md](ROADMAP.md) for measured startup, size 
 - A command toolbar below the address bar, with overflow commands under More
 - Details and thumbnail grid views in four sizes, hidden-item toggle, adjustable sidebar and preview widths
 - Text, image and Windows preview-handler previews
-- Copy, cut, paste, rename, recycle, permanent delete, new folder and drag/drop
+- Copy, cut, paste, rename, batch rename, recycle, permanent delete, new folder, drag/drop and undo/redo
+- .zip files open as folders through Windows' built-in zip support; copy files out as from any folder
 - Windows' full shell context menu through a separate helper process
 - Settings pages, light/dark/system themes, and an in-app keyboard shortcut guide
 - Session restoration for tabs, folder panes and window layouts

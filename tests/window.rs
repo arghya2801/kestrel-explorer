@@ -696,6 +696,30 @@ fn f2_renames_in_place_and_rejects_bad_names() {
 }
 
 #[test]
+fn a_zip_opens_as_a_folder_and_up_leaves_it() {
+    let t = TempDir::new("zip");
+    std::fs::create_dir(t.0.join("src")).unwrap();
+    std::fs::write(t.0.join("src").join("inside.txt"), "x").unwrap();
+    let made = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Compress-Archive -Path $env:FEP_SRC -DestinationPath $env:FEP_ZIP"])
+        .env("FEP_SRC", t.0.join("src").join("*"))
+        .env("FEP_ZIP", t.0.join("pack.zip"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    std::fs::remove_dir_all(t.0.join("src")).unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["pack.zip"]));
+    activate(hwnd, list, 0);
+    assert!(pump_until(WAIT, || rows(list) == ["inside.txt"]), "{:?} / {}", rows(list), status_text(hwnd));
+    assert!(status_text(hwnd).starts_with("1 item"), "{}", status_text(hwnd));
+    alt_key(list, VK_UP);
+    assert!(pump_until(WAIT, || rows(list) == ["pack.zip"]), "{:?}", rows(list));
+    close(hwnd);
+}
+
+#[test]
 fn calculate_folder_sizes_fills_the_size_column() {
     let t = TempDir::new("sizes");
     std::fs::create_dir_all(t.0.join("sub").join("deep")).unwrap();

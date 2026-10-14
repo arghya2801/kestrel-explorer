@@ -9,8 +9,8 @@ use windows::Win32::System::Com::{
     CoUninitialize, IPersistFile, STGM_READ,
 };
 use windows::Win32::UI::Shell::{
-    IShellLinkW, SEE_MASK_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW,
-    ShellLink,
+    IShellLinkW, SEE_MASK_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC,
+    SHELLEXECUTEINFOW, SHParseDisplayName, ShellExecuteExW, ShellLink,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, Interface, PCWSTR, w};
@@ -41,32 +41,106 @@ pub fn open(path: &Path, owner: HWND) -> Result<Option<PathBuf>, String> {
     {
         return Ok(Some(target));
     }
+    // A .zip opens as a folder, as in Explorer; another app is under Open with in the full menu.
+    if is_zip(path) && path.is_file() {
+        return Ok(Some(path.to_path_buf()));
+    }
     let file = HSTRING::from(path.as_os_str());
+    // Inside an archive there is no file path: open the shell item, which extracts it first.
+    let pidl = in_archive(path).then(|| unsafe {
+        let mut pidl = std::ptr::null_mut();
+        SHParseDisplayName(&file, None, &mut pidl, 0, None).ok().map(|_| pidl)
+    });
+    let pidl = pidl.flatten();
     let execute = |verb: PCWSTR, mask| {
         let mut info = SHELLEXECUTEINFOW {
             cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
             // NOASYNC: the thread ends right after this call, so it must not return early.
-            fMask: SEE_MASK_NOASYNC | mask,
+            fMask: SEE_MASK_NOASYNC
+                | mask
+                | if pidl.is_some() { SEE_MASK_INVOKEIDLIST } else { SEE_MASK_DEFAULT },
             hwnd: owner,
             lpVerb: verb,
-            lpFile: PCWSTR(file.as_ptr()),
+            lpFile: if pidl.is_some() { PCWSTR::null() } else { PCWSTR(file.as_ptr()) },
+            lpIDList: pidl.unwrap_or(std::ptr::null_mut()) as *mut _,
             nShow: SW_SHOWNORMAL.0,
             ..Default::default()
         };
         unsafe { ShellExecuteExW(&mut info) }
     };
-    // FLAG_NO_UI: errors come back to us (status bar) instead of a modal dialog.
-    let result = match execute(PCWSTR::null(), SEE_MASK_FLAG_NO_UI) {
-        // No app for this file type: Windows' "How do you want to open this file?" is the useful answer.
-        Err(e) if e.code() == ERROR_NO_ASSOCIATION.to_hresult() => execute(w!("openas"), SEE_MASK_DEFAULT),
-        r => r,
-    };
+    let result = open_with(execute);
+    if let Some(p) = pidl {
+        unsafe { windows::Win32::UI::Shell::ILFree(Some(p)) };
+    }
     match result {
         Ok(()) => Ok(None),
         // The user closed the "open with" dialog.
         Err(e) if e.code() == ERROR_CANCELLED.to_hresult() => Ok(None),
         Err(e) => Err(format!("Can't open {}: {}", path.display(), e.message())),
     }
+}
+
+fn open_with(execute: impl Fn(PCWSTR, u32) -> windows::core::Result<()>) -> windows::core::Result<()> {
+    // FLAG_NO_UI: errors come back to us (status bar) instead of a modal dialog.
+    match execute(PCWSTR::null(), SEE_MASK_FLAG_NO_UI) {
+        // No app for this file type: Windows' "How do you want to open this file?" is the useful answer.
+        Err(e) if e.code() == ERROR_NO_ASSOCIATION.to_hresult() => execute(w!("openas"), SEE_MASK_DEFAULT),
+        r => r,
+    }
+}
+
+pub fn is_zip(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+}
+
+/// Whether `path` is inside a .zip (or is one), which only the shell can list.
+/// Checks the disk: worker threads only.
+pub fn in_archive(path: &Path) -> bool {
+    path.ancestors().any(|a| is_zip(a) && a.is_file())
+}
+
+/// Lists an archive folder through the shell (Windows' built-in zip support).
+pub fn list_archive(dir: &Path) -> std::io::Result<crate::listing::Snapshot> {
+    use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+    use windows::Win32::System::SystemServices::SFGAO_FOLDER;
+    use windows::Win32::UI::Shell::{
+        BHID_EnumItems, IEnumShellItems, IShellItem, IShellItem2, SHCreateItemFromParsingName,
+        SIGDN_PARENTRELATIVEPARSING,
+    };
+    // System.Size and System.DateModified.
+    const FMTID: windows::core::GUID = windows::core::GUID::from_u128(0xb725f130_47ef_101a_a5f1_02608c9eebac);
+    const SIZE: PROPERTYKEY = PROPERTYKEY { fmtid: FMTID, pid: 12 };
+    const MODIFIED: PROPERTYKEY = PROPERTYKEY { fmtid: FMTID, pid: 14 };
+    let _com = Com::init();
+    let mut snap = crate::listing::Snapshot::new(dir.to_path_buf());
+    unsafe {
+        let folder: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(dir.as_os_str()), None)?;
+        let items: IEnumShellItems = folder.BindToHandler(None, &BHID_EnumItems)?;
+        loop {
+            let mut item = [None];
+            if items.Next(&mut item, None).is_err() {
+                break;
+            }
+            let Some(item) = item[0].take() else { break };
+            let Ok(name) = item.GetDisplayName(SIGDN_PARENTRELATIVEPARSING) else { continue };
+            let wide = name.as_wide().to_vec();
+            windows::Win32::System::Com::CoTaskMemFree(Some(name.0 as _));
+            let folder = item.GetAttributes(SFGAO_FOLDER).is_ok_and(|a| a.contains(SFGAO_FOLDER));
+            let (size, modified) = match item.cast::<IShellItem2>() {
+                Ok(i) => (
+                    i.GetUInt64(&SIZE).unwrap_or(0),
+                    i.GetFileTime(&MODIFIED)
+                        .map(|t| (t.dwHighDateTime as u64) << 32 | t.dwLowDateTime as u64)
+                        .unwrap_or(0),
+                ),
+                Err(_) => (0, 0),
+            };
+            let attrs = if folder { FILE_ATTRIBUTE_DIRECTORY.0 } else { 0 };
+            snap.add(&wide, attrs, size, modified);
+        }
+    }
+    Ok(snap)
 }
 
 pub fn is_shortcut(path: &Path) -> bool {
@@ -201,6 +275,40 @@ mod tests {
         let same = |p: PathBuf| std::fs::canonicalize(p).unwrap() == std::fs::canonicalize(&target).unwrap();
         assert!(same(shortcut_target(&lnk).unwrap()));
         assert!(same(open(&lnk, HWND::default()).unwrap().unwrap()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn zip_files_list_and_open_as_folders() {
+        let dir = std::env::temp_dir().join(format!("fep-zip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src").join("sub")).unwrap();
+        std::fs::write(dir.join("src").join("a.txt"), "hello").unwrap();
+        std::fs::write(dir.join("src").join("sub").join("b.txt"), "").unwrap();
+        let zip = dir.join("x.zip");
+        let made = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Compress-Archive -Path $env:FEP_SRC -DestinationPath $env:FEP_ZIP",
+            ])
+            .env("FEP_SRC", dir.join("src").join("*"))
+            .env("FEP_ZIP", &zip)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let s = crate::network::list_location(&zip).unwrap();
+        let mut found: Vec<_> =
+            (0..s.len()).map(|i| (s.name_string(i), s.is_dir(i), s.entries[i].size)).collect();
+        found.sort();
+        assert_eq!(found, [("a.txt".to_string(), false, 5), ("sub".to_string(), true, 0)]);
+        assert_eq!(crate::network::list_location(&zip.join("sub")).unwrap().name_string(0), "b.txt");
+        assert_eq!(open(&zip, HWND::default()), Ok(Some(zip.clone())));
+        let out = dir.join("out");
+        std::fs::create_dir(&out).unwrap();
+        let copy = crate::ops::Op::Copy { paths: vec![zip.join("a.txt")], dest: out.clone() };
+        crate::ops::run(&copy, crate::ops::Mode::Silent).unwrap();
+        assert_eq!(std::fs::read_to_string(out.join("a.txt")).unwrap(), "hello", "copied out of the zip");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
