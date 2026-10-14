@@ -44,9 +44,13 @@ fn main() {
     }
     kestrel::session::begin();
     // A folder given on the command line wins; then where the user left off; then their home.
+    // A quoted drive root ("C:\") reaches us as C:" because \" escapes the quote; paths never contain quotes.
     let start = std::env::args_os()
         .nth(1)
-        .map(PathBuf::from)
+        .map(|a| match a.to_str() {
+            Some(s) if s.ends_with('"') => PathBuf::from(s.trim_end_matches('"')),
+            _ => PathBuf::from(a),
+        })
         .or_else(|| settings.last_folder.clone())
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(r"C:\"));

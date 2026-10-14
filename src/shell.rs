@@ -98,6 +98,75 @@ pub fn terminal(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Folder, folder-background and drive menus that can offer "Open in Kestrel" (per user).
+const MENU_KEYS: [&str; 3] = [
+    r"Software\Classes\Directory\shell\Kestrel",
+    r"Software\Classes\Directory\Background\shell\Kestrel",
+    r"Software\Classes\Drive\shell\Kestrel",
+];
+
+fn menu_command() -> Option<String> {
+    Some(format!("\"{}\" \"%V\"", std::env::current_exe().ok()?.display()))
+}
+
+/// Whether the folder menus open this copy of Kestrel (a moved executable reads as off).
+pub fn folder_menu_registered() -> bool {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    let mut buf = [0u16; 1024];
+    let mut len = (buf.len() * 2) as u32;
+    let key = HSTRING::from(format!(r"{}\command", MENU_KEYS[0]));
+    let found = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            &key,
+            PCWSTR::null(),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut len),
+        )
+    };
+    let text = String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]);
+    found.is_ok() && Some(text) == menu_command()
+}
+
+/// Adds or removes "Open in Kestrel" on folder and drive menus, for this user only.
+pub fn set_folder_menu(on: bool) -> Result<(), String> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegDeleteTreeW, RegSetKeyValueW};
+    let fail = |e: windows::core::Error| format!("Couldn't change the folder menu: {}", e.message());
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let command = menu_command().unwrap_or_default();
+    for key in MENU_KEYS {
+        unsafe {
+            if !on {
+                let r = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(key));
+                if r.is_err() && r != windows::Win32::Foundation::ERROR_FILE_NOT_FOUND {
+                    return Err(fail(r.into()));
+                }
+                continue;
+            }
+            for (sub, name, value) in [
+                (key.to_string(), PCWSTR::null(), "Open in Kestrel".to_string()),
+                (key.to_string(), w!("Icon"), format!("\"{}\",0", exe.display())),
+                (format!(r"{key}\command"), PCWSTR::null(), command.clone()),
+            ] {
+                let data: Vec<u16> = value.encode_utf16().chain([0]).collect();
+                RegSetKeyValueW(
+                    HKEY_CURRENT_USER,
+                    &HSTRING::from(sub),
+                    name,
+                    REG_SZ.0,
+                    Some(data.as_ptr().cast()),
+                    (data.len() * 2) as u32,
+                )
+                .ok()
+                .map_err(fail)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) fn create_shortcut(lnk: &Path, target: &Path) {
     let _com = Com::init();
@@ -133,6 +202,21 @@ mod tests {
         assert!(same(shortcut_target(&lnk).unwrap()));
         assert!(same(open(&lnk, HWND::default()).unwrap().unwrap()));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Writes to the real per-user registry, so it only runs when asked: cargo test -- --ignored folder_menu
+    #[test]
+    #[ignore]
+    fn folder_menu_registers_and_unregisters() {
+        let before = folder_menu_registered();
+        set_folder_menu(true).unwrap();
+        assert!(folder_menu_registered());
+        set_folder_menu(false).unwrap();
+        assert!(!folder_menu_registered());
+        set_folder_menu(false).unwrap(); // removing twice is fine
+        if before {
+            set_folder_menu(true).unwrap();
+        }
     }
 
     #[test]

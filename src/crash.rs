@@ -22,9 +22,21 @@ pub fn guard<T>(f: impl FnOnce() -> T) -> Option<T> {
     panic::catch_unwind(AssertUnwindSafe(f)).ok()
 }
 
+/// Settings, session and logs: %LOCALAPPDATA%\Kestrel, or beside the executable in portable mode.
 pub fn data_dir() -> PathBuf {
+    static PORTABLE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    let portable = PORTABLE.get_or_init(|| std::env::current_exe().ok().and_then(|exe| portable_dir(&exe)));
+    if let Some(dir) = portable {
+        return dir.clone();
+    }
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("Kestrel")
+}
+
+/// Portable mode: a file named `portable` beside the executable keeps data in `KestrelData` there.
+fn portable_dir(exe: &std::path::Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    dir.join("portable").is_file().then(|| dir.join("KestrelData"))
 }
 
 /// Appends one line to the log file. Never fails loudly: logging must not crash the app.
@@ -96,6 +108,17 @@ mod tests {
     #[test]
     fn guard_turns_panic_into_none() {
         assert_eq!(guard(|| -> i32 { panic!("boom") }), None);
+    }
+
+    #[test]
+    fn a_portable_marker_keeps_data_beside_the_executable() {
+        let dir = std::env::temp_dir().join(format!("fep-portable-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("kestrel.exe");
+        assert_eq!(portable_dir(&exe), None);
+        fs::write(dir.join("portable"), "").unwrap();
+        assert_eq!(portable_dir(&exe), Some(dir.join("KestrelData")));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

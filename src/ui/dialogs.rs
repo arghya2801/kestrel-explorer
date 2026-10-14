@@ -35,6 +35,7 @@ const SESSION: usize = 30;
 const DUAL: usize = 27;
 const RATIO: usize = 28;
 const PREVIEW_WIDTH: usize = 29;
+const FOLDER_MENU: usize = 32;
 
 thread_local! { static WINDOWS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) }; }
 
@@ -232,6 +233,7 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> w
                     (1, COLUMN + 3, "Si&ze column width", None, false),
                     (2, SESSION, "Restore tabs and windows", None, true),
                     (2, FOLDER, "&Folder when not restoring", None, false),
+                    (2, FOLDER_MENU, "Add \"Open in Kestrel\" to folder menus", None, true),
                     (3, X, "Window &X", None, false),
                     (3, Y, "Window &Y", None, false),
                     (3, WIDTH, "&Width", None, false),
@@ -395,6 +397,7 @@ fn fill(hwnd: HWND, s: &Settings) {
         text(id, value.to_string());
     }
     check(MAXIMIZED, s.maximized);
+    check(FOLDER_MENU, crate::shell::folder_menu_registered());
 }
 
 fn read(hwnd: HWND) -> std::result::Result<Settings, String> {
@@ -518,7 +521,15 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
                     return LRESULT(0);
                 }
                 id if id == APPLY || id == IDOK.0 as usize => {
-                    match read(hwnd) {
+                    // A system setting rather than a preference: changed in the registry, not Settings.
+                    let menu = SendMessageW(field(hwnd, FOLDER_MENU), BM_GETCHECK, None, None).0
+                        == BST_CHECKED.0 as isize;
+                    let menu_changed = if menu != crate::shell::folder_menu_registered() {
+                        crate::shell::set_folder_menu(menu)
+                    } else {
+                        Ok(())
+                    };
+                    match read(hwnd).and_then(|s| menu_changed.map(|()| s)) {
                         Ok(s) => {
                             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Dialog;
                             if let Some(data) = ptr.as_ref() {

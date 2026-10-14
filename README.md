@@ -44,7 +44,7 @@ and cancellation dialogs.
 |---|---|
 | Appearance | Theme, sidebar width, preview visibility/width, split layout and pane ratio |
 | File list | Details/grid, hidden items, sort column/direction and the four main column widths |
-| Startup | Startup folder and session restoration |
+| Startup | Startup folder, session restoration and an optional "Open in Kestrel" folder-menu entry |
 | Window | Saved position, size and maximized state |
 
 Apply saves changes, OK applies and closes, and Cancel discards edits made since the last Apply.
@@ -52,8 +52,10 @@ Restore defaults resets preferences. Theme and pins apply across open windows; v
 changes apply to the current view/window. Unsupported preferences such as custom key bindings,
 font size and plugins are not offered.
 
-Settings and logs live in %LOCALAPPDATA%\Kestrel. Settings from the old FileExplorerPro directory
-migrate once. Session restoration runs after a normal exit. Secondary windows still open when the
+Settings and logs live in %LOCALAPPDATA%\Kestrel. For portable use, put an empty file named `portable`
+beside kestrel.exe; data then goes to a KestrelData folder there. Settings from the old FileExplorerPro
+directory migrate once. The session is saved every 30 seconds, at sign-out or restart, and on exit,
+so tabs and windows come back after a crash too. Secondary windows still open when the
 original window closes are included; close a secondary window first to omit it from the next session.
 A command-line folder bypasses restoration. Restart restores folders and layout, while navigation
 history and selections remain specific to the running session.

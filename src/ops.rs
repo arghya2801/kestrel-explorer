@@ -108,6 +108,9 @@ fn run_recorded(op: &Op, mode: Mode, fresh: bool) -> Result<Option<String>, Stri
     let (select, undo) = result?;
     let mut history = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(undo) = undo {
+        if history.undo.len() == MAX_UNDO {
+            history.undo.remove(0);
+        }
         history.undo.push((undo, op.clone()));
     }
     if fresh {
@@ -138,6 +141,7 @@ struct History {
     undo: Vec<(Op, Op)>,
     redo: Vec<Op>,
 }
+const MAX_UNDO: usize = 100;
 static HISTORY: Mutex<History> = Mutex::new(History { undo: Vec::new(), redo: Vec::new() });
 
 /// Whether Undo and Redo have anything to do.

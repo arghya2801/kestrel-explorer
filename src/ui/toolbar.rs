@@ -32,6 +32,9 @@ pub const TERMINAL: usize = 219;
 pub const OPERATIONS: usize = 220;
 /// First of the thumbnail size commands, one per `THUMB_SIZES` entry.
 pub const THUMBS: usize = 221;
+// 221..=224 are the thumbnail sizes.
+pub const UPDATES: usize = 230;
+const RELEASES: &str = "https://github.com/arghya2801/kestrel-explorer/releases/latest";
 
 const BUTTONS: &[(usize, &str, i32)] = &[
     (commands::CMD_NEW_FOLDER, "New folder", 94),
@@ -135,6 +138,17 @@ pub(super) fn execute(id: usize) -> bool {
             }
         }
         RECENT | PARENTS => locations(hwnd, id == RECENT),
+        // The releases page shows what's newer; nothing is sent until the user asks.
+        UPDATES => {
+            let events = with_app(|a| a.events.clone());
+            super::spawn("updates", move || {
+                if let Err(e) = crate::shell::open(std::path::Path::new(RELEASES), HWND::default())
+                    && let Some(events) = events
+                {
+                    events.send(super::Event::Message(e));
+                }
+            });
+        }
         TERMINAL => {
             if let Some((dir, events)) =
                 with_app(|a| a.view.browser.dir().map(|p| (p.to_path_buf(), a.events.clone()))).flatten()
@@ -224,7 +238,10 @@ fn popup(hwnd: HWND, kind: usize) {
                 add(HIDDEN, "Hidden items\tCtrl+H", hidden);
                 add(PREVIEW, "Preview pane\tAlt+P", preview);
             }
-            HELP => add(SHORTCUTS, "Keyboard shortcuts\tF1", false),
+            HELP => {
+                add(SHORTCUTS, "Keyboard shortcuts\tF1", false);
+                add(UPDATES, &format!("Check for updates (this is {})", env!("CARGO_PKG_VERSION")), false);
+            }
             _ => {
                 for &(id, label, _) in BUTTONS.iter().filter(|b| !matches!(b.0, MORE | SETTINGS | HELP)) {
                     add(id, label, false);
