@@ -20,6 +20,8 @@ pub struct Settings {
     pub split: Option<i32>,
     pub preview: bool,
     pub grid: bool,
+    /// Thumbnail edge in pixels at 100% scaling; one of `THUMB_SIZES`.
+    pub thumb_size: i32,
     pub dual_pane: bool,
     pub pane_ratio: i32,
     pub preview_width: Option<i32>,
@@ -43,6 +45,7 @@ impl Default for Settings {
             split: None,
             preview: false,
             grid: false,
+            thumb_size: 96,
             dual_pane: false,
             pane_ratio: 500,
             preview_width: None,
@@ -56,6 +59,14 @@ impl Default for Settings {
         }
     }
 }
+
+/// Thumbnail sizes offered in View and stepped through with Ctrl+mouse wheel.
+pub const THUMB_SIZES: [(i32, &str); 4] = [
+    (64, "Small thumbnails"),
+    (96, "Medium thumbnails"),
+    (160, "Large thumbnails"),
+    (256, "Extra large thumbnails"),
+];
 
 const KEYS: [(SortKey, &str); 4] = [
     (SortKey::Name, "Name"),
@@ -100,6 +111,10 @@ impl Settings {
                 }
                 "show_hidden" => s.show_hidden = flag(value).unwrap_or(false),
                 "grid" => s.grid = flag(value).unwrap_or(false),
+                "thumb_size" => {
+                    s.thumb_size =
+                        value.parse().ok().filter(|v| THUMB_SIZES.iter().any(|t| t.0 == *v)).unwrap_or(96)
+                }
                 "preview" => s.preview = flag(value).unwrap_or(false),
                 "dual_pane" => s.dual_pane = flag(value).unwrap_or(false),
                 "pane_ratio" => {
@@ -151,7 +166,7 @@ impl Settings {
         let key = KEYS.iter().find(|(k, _)| *k == self.sort.key).map_or("Name", |k| k.1);
         out += &format!("sort={key},{}\n", self.sort.descending);
         out += &format!("show_hidden={}\n", self.show_hidden);
-        out += &format!("preview={}\ngrid={}\n", self.preview, self.grid);
+        out += &format!("preview={}\ngrid={}\nthumb_size={}\n", self.preview, self.grid, self.thumb_size);
         out += &format!("dual_pane={}\npane_ratio={}\n", self.dual_pane, self.pane_ratio);
         if let Some(width) = self.preview_width {
             out += &format!("preview_width={width}\n");
@@ -259,6 +274,7 @@ mod tests {
             split: Some(260),
             preview: true,
             grid: true,
+            thumb_size: 160,
             dual_pane: true,
             pane_ratio: 650,
             preview_width: Some(350),

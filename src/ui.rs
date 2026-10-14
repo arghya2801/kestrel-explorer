@@ -517,6 +517,14 @@ pub fn translate(msg: &MSG) -> bool {
     if dialogs::translate(msg) {
         return true;
     }
+    // Ctrl+mouse wheel over the file list changes the thumbnail size.
+    if msg.message == WM_MOUSEWHEEL
+        && msg.wParam.0 & windows::Win32::System::SystemServices::MK_CONTROL.0 as usize != 0
+        && with_app(|a| a.view.list) == Some(msg.hwnd)
+    {
+        grid::zoom((msg.wParam.0 >> 16) as i16 > 0);
+        return true;
+    }
     if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
         return false;
     }
@@ -839,6 +847,10 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }) {
                     set_font(&controls, font);
                     let _ = DeleteObject(HGDIOBJ(old.0));
+                }
+                // Thumbnails re-render for the new scale. ponytail: active pane only; others on next View change.
+                if with_app(|a| a.view.grid.enabled) == Some(true) {
+                    grid::set(true);
                 }
                 layout(hwnd);
                 LRESULT(0)
@@ -1313,6 +1325,7 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
     let (list, mut s) = with_app(|a| {
         let s = Settings {
             grid: a.view.grid.enabled,
+            thumb_size: a.view.grid.size,
             sort: a.view.browser.sort,
             show_hidden: a.view.browser.show_hidden,
             split: Some(a.split),

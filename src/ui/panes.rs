@@ -120,9 +120,9 @@ pub(super) unsafe fn create(
         };
         super::set_font(&[list, label], font);
         super::startup_mark("list columns");
-        let mut grid = super::grid::Grid::new(settings.grid, id, events.clone());
+        let mut grid = super::grid::Grid::new(settings.grid, settings.thumb_size, id, events.clone());
         if grid.enabled {
-            grid.ensure();
+            grid.ensure(windows::Win32::UI::HiDpi::GetDpiForWindow(list));
             SendMessageW(
                 list,
                 LVM_SETIMAGELIST,
@@ -197,6 +197,7 @@ pub(super) fn toggle() {
             a.other.is_some(),
             Settings {
                 grid: a.view.grid.enabled,
+                thumb_size: a.view.grid.size,
                 sort: a.view.browser.sort,
                 show_hidden: a.view.browser.show_hidden,
                 ..Default::default()

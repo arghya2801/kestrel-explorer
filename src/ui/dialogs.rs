@@ -92,6 +92,7 @@ F6    Focus the other folder pane\r\n\r\n\
 View and help\r\n\
 Ctrl+H    Toggle hidden items\r\n\
 Alt+P    Toggle preview\r\n\
+Ctrl+mouse wheel    Thumbnail size; past the smallest, back to Details\r\n\
 F1    Keyboard shortcuts\r\n\r\n\
 Text boxes keep their normal editing shortcuts. File commands do not delete, cut, or copy files while you edit text.\r\n\
 Close this guide with Esc or the Close button.";

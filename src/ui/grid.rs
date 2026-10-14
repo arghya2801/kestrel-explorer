@@ -6,13 +6,13 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicI32, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
     },
 };
 use windows::Win32::{
     Foundation::SIZE,
-    Graphics::Gdi::{DeleteObject, HBITMAP, HGDIOBJ},
+    Graphics::Gdi::{BITMAP, DeleteObject, GetObjectW, HBITMAP, HGDIOBJ},
     UI::{
         Controls::*,
         Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_CROPTOSQUARE, SIIGBF_SCALEUP},
@@ -37,6 +37,10 @@ struct Request {
 }
 pub(super) struct Grid {
     pub enabled: bool,
+    /// Thumbnail edge at 100% scaling (Settings::thumb_size).
+    pub size: i32,
+    /// The image list's edge in pixels, which the worker renders at.
+    px: Arc<AtomicI32>,
     pub images: HIMAGELIST,
     generation: u64,
     latest: Arc<AtomicU64>,
@@ -59,9 +63,11 @@ impl Drop for Grid {
     }
 }
 impl Grid {
-    pub fn new(enabled: bool, view: u64, events: Arc<Events<Event>>) -> Self {
+    pub fn new(enabled: bool, size: i32, view: u64, events: Arc<Events<Event>>) -> Self {
         Self {
             enabled,
+            size,
+            px: Arc::default(),
             images: HIMAGELIST::default(),
             generation: 0,
             latest: Arc::default(),
@@ -76,17 +82,26 @@ impl Grid {
             replace: 0,
         }
     }
-    pub fn ensure(&mut self) {
+    /// Creates the image list and worker, or rebuilds the list when the size or `dpi` changed.
+    pub fn ensure(&mut self, dpi: u32) {
+        let px = self.size * dpi as i32 / 96;
+        if self.px.swap(px, Ordering::Relaxed) != px && !self.images.is_invalid() {
+            unsafe {
+                let _ = ImageList_Destroy(Some(self.images));
+            }
+            self.images = HIMAGELIST::default();
+            self.clear();
+        }
         if self.images.is_invalid() {
-            self.images = unsafe { ImageList_Create(96, 96, ILC_COLOR32, 1, 32) };
+            self.images = unsafe { ImageList_Create(px, px, ILC_COLOR32, 1, 32) };
             self.placeholder();
         }
         if self.tx.is_some() {
             return;
         }
         let (tx, rx) = mpsc::sync_channel::<Request>(64);
-        let (latest, visible, events, view) =
-            (self.latest.clone(), self.visible.clone(), self.events.clone(), self.view);
+        let (latest, visible, events, view, px) =
+            (self.latest.clone(), self.visible.clone(), self.events.clone(), self.view, self.px.clone());
         if std::thread::Builder::new()
             .name("thumbnails".into())
             .spawn(move || {
@@ -100,8 +115,9 @@ impl Grid {
                             let factory: IShellItemImageFactory =
                                 SHCreateItemFromParsingName(&HSTRING::from(job.path.as_os_str()), None)
                                     .ok()?;
+                            let px = px.load(Ordering::Relaxed);
                             factory
-                                .GetImage(SIZE { cx: 96, cy: 96 }, SIIGBF_CROPTOSQUARE | SIIGBF_SCALEUP)
+                                .GetImage(SIZE { cx: px, cy: px }, SIIGBF_CROPTOSQUARE | SIIGBF_SCALEUP)
                                 .ok()
                                 .map(|b| Bitmap(b.0 as isize))
                         })
@@ -137,11 +153,7 @@ impl Grid {
         if generation != self.generation {
             self.generation = generation;
             self.latest.store(generation, Ordering::Relaxed);
-            self.pending.clear();
-            self.cache.clear();
-            self.slots.clear();
-            self.failed.clear();
-            self.replace = 0;
+            self.clear();
             unsafe {
                 let _ = ImageList_Remove(self.images, -1);
             }
@@ -158,9 +170,32 @@ impl Grid {
         }
         0
     }
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.cache.clear();
+        self.slots.clear();
+        self.failed.clear();
+        self.replace = 0;
+    }
+    /// Retained thumbnails: up to 256, within about 32 MB at large sizes.
+    fn capacity(&self) -> usize {
+        let px = self.px.load(Ordering::Relaxed).max(1) as usize;
+        ((32 << 20) / (px * px * 4)).clamp(32, 256)
+    }
     pub fn finish(&mut self, generation: u64, entry: u32, attempted: bool, image: Option<Bitmap>) -> bool {
         if generation != self.generation {
             return false;
+        }
+        // Rendered before a size change: it would not fit the new image list.
+        if let Some(b) = &image {
+            let mut bm = BITMAP::default();
+            let got = unsafe {
+                GetObjectW(HGDIOBJ(b.0 as _), size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut _))
+            };
+            if got == 0 || bm.bmWidth != self.px.load(Ordering::Relaxed) {
+                self.pending.remove(&entry);
+                return true;
+            }
         }
         self.pending.remove(&entry);
         if !attempted {
@@ -177,7 +212,7 @@ impl Grid {
             return true;
         };
         let slot = unsafe {
-            if self.slots.len() < 256 {
+            if self.slots.len() < self.capacity() {
                 let slot = ImageList_Add(self.images, HBITMAP(image.0 as _), None);
                 if slot < 0 {
                     return false;
@@ -190,7 +225,7 @@ impl Grid {
                 if !ImageList_Replace(self.images, slot, HBITMAP(image.0 as _), None).as_bool() {
                     return false;
                 }
-                self.replace = (self.replace + 1) % 256;
+                self.replace = (self.replace + 1) % self.slots.len();
                 slot
             }
         };
@@ -199,12 +234,14 @@ impl Grid {
     }
 }
 pub(super) fn set(enabled: bool) {
-    let Some((list, images)) = super::with_app(|a| {
+    let Some(list) = super::with_app(|a| a.view.list) else { return };
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(list) };
+    let Some(images) = super::with_app(|a| {
         a.view.grid.enabled = enabled;
         if enabled {
-            a.view.grid.ensure();
+            a.view.grid.ensure(dpi);
         }
-        (a.view.list, a.view.grid.images)
+        a.view.grid.images
     }) else {
         return;
     };
@@ -212,6 +249,8 @@ pub(super) fn set(enabled: bool) {
         use windows::Win32::Foundation::{LPARAM, WPARAM};
         if enabled {
             SendMessageW(list, LVM_SETIMAGELIST, Some(WPARAM(LVSIL_NORMAL as usize)), Some(LPARAM(images.0)));
+            // Back to the default spacing, which follows the image size.
+            SendMessageW(list, LVM_SETICONSPACING, None, Some(LPARAM(-1)));
         }
         let style = GetWindowLongPtrW(list, GWL_STYLE) as u32;
         if style & LVS_TYPEMASK == if enabled { LVS_ICON } else { LVS_REPORT } {
@@ -226,13 +265,34 @@ pub(super) fn set(enabled: bool) {
     }
 }
 
+/// Shows thumbnails at `size` (see `THUMB_SIZES`).
+pub(super) fn set_size(size: i32) {
+    super::with_app(|a| a.view.grid.size = size);
+    set(true);
+}
+
+/// Ctrl+mouse wheel: larger thumbnails, or from Details into the grid; smaller ones,
+/// and from the smallest back to Details.
+pub(super) fn zoom(bigger: bool) {
+    use crate::settings::THUMB_SIZES;
+    let Some((enabled, size)) = super::with_app(|a| (a.view.grid.enabled, a.view.grid.size)) else { return };
+    let i = THUMB_SIZES.iter().position(|t| t.0 >= size).unwrap_or(THUMB_SIZES.len() - 1);
+    match (enabled, bigger) {
+        (false, true) => set_size(THUMB_SIZES[0].0),
+        (false, false) => {}
+        (true, false) if i == 0 => set(false),
+        (true, false) => set_size(THUMB_SIZES[i - 1].0),
+        (true, true) => set_size(THUMB_SIZES[(i + 1).min(THUMB_SIZES.len() - 1)].0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn thumbnail_cache_is_bounded_and_rejects_stale_results() {
-        let mut grid = Grid::new(true, 0, Arc::new(Events::new(|| true)));
-        grid.ensure();
+        let mut grid = Grid::new(true, 96, 0, Arc::new(Events::new(|| true)));
+        grid.ensure(96);
         assert!(!grid.images.is_invalid());
         for entry in 0..300 {
             let bitmap = unsafe { windows::Win32::Graphics::Gdi::CreateBitmap(96, 96, 1, 32, None) };

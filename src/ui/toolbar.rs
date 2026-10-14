@@ -6,6 +6,7 @@ use windows::core::{HSTRING, Result, w};
 
 use super::{child, commands, dialogs, preview, run, scale, spawn_sort, update_sort_arrows, with_app};
 use crate::browser::Browser;
+use crate::settings::THUMB_SIZES;
 use crate::sort::SortKey;
 
 pub const REFRESH: usize = 200;
@@ -29,6 +30,8 @@ pub const RECENT: usize = 217;
 pub const PARENTS: usize = 218;
 pub const TERMINAL: usize = 219;
 pub const OPERATIONS: usize = 220;
+/// First of the thumbnail size commands, one per `THUMB_SIZES` entry.
+pub const THUMBS: usize = 221;
 
 const BUTTONS: &[(usize, &str, i32)] = &[
     (commands::CMD_NEW_FOLDER, "New folder", 94),
@@ -145,6 +148,9 @@ pub(super) fn execute(id: usize) -> bool {
         }
         OPERATIONS => dialogs::operations(hwnd),
         DETAILS | GRID => super::grid::set(id == GRID),
+        id if (THUMBS..THUMBS + THUMB_SIZES.len()).contains(&id) => {
+            super::grid::set_size(THUMB_SIZES[id - THUMBS].0)
+        }
         SPLIT => super::panes::toggle(),
         REFRESH => run(Browser::refresh),
         HIDDEN => {
@@ -194,9 +200,12 @@ fn popup(hwnd: HWND, kind: usize) {
         };
         match kind {
             VIEW => {
-                let grid = with_app(|a| a.view.grid.enabled).unwrap_or(false);
+                let (grid, size) =
+                    with_app(|a| (a.view.grid.enabled, a.view.grid.size)).unwrap_or((false, 0));
                 add(DETAILS, "Details", !grid);
-                add(GRID, "Thumbnail grid", grid);
+                for (i, &(px, label)) in THUMB_SIZES.iter().enumerate() {
+                    add(THUMBS + i, label, grid && size == px);
+                }
                 let Some((sort, hidden, preview)) = with_app(|a| {
                     (a.view.browser.sort, a.view.browser.show_hidden, preview::is_visible_in(a))
                 }) else {

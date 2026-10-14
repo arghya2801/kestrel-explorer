@@ -15,7 +15,7 @@ and shell integrations. See [ROADMAP.md](ROADMAP.md) for measured startup, size 
 - Two independent folder panes in one window, tabs, and additional windows
 - Breadcrumb navigation, editable addresses, Quick access pins, recent folders, drives and Network
 - A command toolbar below the address bar, with overflow commands under More
-- Details and thumbnail grid views, hidden-item toggle, adjustable sidebar and preview widths
+- Details and thumbnail grid views in four sizes, hidden-item toggle, adjustable sidebar and preview widths
 - Text, image and Windows preview-handler previews
 - Copy, cut, paste, rename, recycle, permanent delete, new folder and drag/drop
 - Windows' full shell context menu through a separate helper process
@@ -30,7 +30,7 @@ Each pane keeps its folder, history, selection, sorting and filter. The shared a
 toolbar and preview follow the active pane. Each tab remembers its panes; drag the center divider
 to change their widths. Turning Split off preserves the second pane for reopening.
 
-**View** offers Details, Thumbnail grid, sorting, hidden items and preview visibility.
+**View** offers Details, four thumbnail sizes, sorting, hidden items and preview visibility.
 **More** includes pin/unpin, recent folders, parent folders, Open terminal here and File operations.
 Click a breadcrumb to visit an ancestor; use **Edit** or **Ctrl+L** to type a path.
 The terminal command opens Windows PowerShell in the active folder.
@@ -81,6 +81,7 @@ Press **F1**, or choose **Help > Keyboard shortcuts**, for the in-app guide.
 | Ctrl+N | New window, side by side |
 | Ctrl+Shift+S / F6 | Toggle split / focus the other pane |
 | Alt+P | Toggle preview |
+| Ctrl+mouse wheel | Thumbnail size; past the smallest, back to Details |
 | Tab / Shift+Tab | Next / previous control |
 | Shift+F10, Menu key | Context menu |
 | Shift+right-click | Full Windows context menu |

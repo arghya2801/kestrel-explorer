@@ -1683,9 +1683,36 @@ fn thumbnail_grid_loads_images_and_switches_back_to_details() {
     command(hwnd, ui::toolbar::DETAILS);
     assert_eq!(unsafe { GetWindowLongPtrW(list, GWL_STYLE) as u32 } & LVS_TYPEMASK, LVS_REPORT);
     assert_eq!(cell(list, 0, 0), "photo.bmp");
-    command(hwnd, ui::toolbar::GRID);
+    // Ctrl+wheel up: Details to the smallest thumbnails, then one size larger.
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(list) } as i32;
+    let image_size = || {
+        let images = HIMAGELIST(
+            unsafe { SendMessageW(list, LVM_GETIMAGELIST, Some(WPARAM(LVSIL_NORMAL as usize)), None) }.0,
+        );
+        let (mut cx, mut cy) = (0, 0);
+        unsafe { ImageList_GetIconSize(images, Some(&mut cx), Some(&mut cy)) }.unwrap();
+        cx
+    };
+    let wheel = |up: bool| unsafe {
+        let delta = if up { 120u16 } else { (-120i16) as u16 };
+        PostMessageW(Some(list), WM_MOUSEWHEEL, WPARAM(((delta as usize) << 16) | 0x8), LPARAM(0)).unwrap();
+        pump_until(Duration::from_millis(100), || false);
+    };
+    wheel(true);
+    assert_eq!(unsafe { GetWindowLongPtrW(list, GWL_STYLE) as u32 } & LVS_TYPEMASK, LVS_ICON);
+    assert_eq!(image_size(), 64 * dpi / 96);
+    wheel(true);
+    assert_eq!(image_size(), 96 * dpi / 96);
+    assert!(pump_until(WAIT, || item_image(list, 0) > 0), "thumbnail was not reloaded at the new size");
+    wheel(false);
+    wheel(false);
+    assert_eq!(unsafe { GetWindowLongPtrW(list, GWL_STYLE) as u32 } & LVS_TYPEMASK, LVS_REPORT);
+    command(hwnd, ui::toolbar::THUMBS + 2);
+    assert_eq!(image_size(), 160 * dpi / 96);
     close(hwnd);
-    assert!(ui::take_final_settings().unwrap().grid);
+    let saved = ui::take_final_settings().unwrap();
+    assert!(saved.grid);
+    assert_eq!(saved.thumb_size, 160);
 }
 
 #[test]
