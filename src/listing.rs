@@ -70,6 +70,25 @@ impl Snapshot {
     }
 }
 
+/// Entries of `a` (files only) that `b` lacks, or has with another size or modified time.
+/// Names match ignoring case, as Windows does.
+pub fn differing(a: &Snapshot, b: &Snapshot) -> Vec<u32> {
+    let theirs: std::collections::HashMap<Vec<u16>, &Entry> = (0..b.len())
+        .filter(|&i| !b.is_dir(i))
+        .map(|i| (crate::sort::fold(b.name(i)), &b.entries[i]))
+        .collect();
+    (0..a.len())
+        .filter(|&i| !a.is_dir(i))
+        .filter(|&i| {
+            let mine = &a.entries[i];
+            theirs
+                .get(&crate::sort::fold(a.name(i)))
+                .is_none_or(|t| t.size != mine.size || t.modified != mine.modified)
+        })
+        .map(|i| i as u32)
+        .collect()
+}
+
 /// Bytes free to this user on `dir`'s volume. Blocks on slow shares: call from a worker.
 pub fn free_space(dir: &Path) -> Option<u64> {
     let mut free = 0u64;
@@ -193,6 +212,27 @@ mod tests {
         let mut v: Vec<String> = (0..s.len()).map(|i| s.name_string(i)).collect();
         v.sort();
         v
+    }
+
+    #[test]
+    fn compare_finds_missing_and_changed_files_only() {
+        let snap = |items: &[(&str, u32, u64, u64)]| {
+            let mut s = Snapshot::new(PathBuf::new());
+            for &(n, attrs, size, modified) in items {
+                s.add(&n.encode_utf16().collect::<Vec<_>>(), attrs, size, modified);
+            }
+            s
+        };
+        let dir = FILE_ATTRIBUTE_DIRECTORY.0;
+        let left = snap(&[
+            ("same.txt", 0, 1, 5),
+            ("Bigger.txt", 0, 9, 5),
+            ("only-left", 0, 1, 1),
+            ("sub", dir, 0, 0),
+        ]);
+        let right = snap(&[("SAME.TXT", 0, 1, 5), ("bigger.txt", 0, 1, 5), ("only-right", 0, 1, 1)]);
+        assert_eq!(differing(&left, &right), [1, 2]);
+        assert_eq!(differing(&right, &left), [1, 2]);
     }
 
     #[test]

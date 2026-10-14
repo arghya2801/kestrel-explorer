@@ -29,6 +29,8 @@ Choose **Split** or press **Ctrl+Shift+S** for two folder panes. **F6** focuses 
 Each pane keeps its folder, history, selection, sorting and filter. The shared address bar, sidebar,
 toolbar and preview follow the active pane. Each tab remembers its panes; drag the center divider
 to change their widths. Turning Split off preserves the second pane for reopening.
+With **View > Sync pane navigation** on, entering a subfolder or going up in one pane does the same in
+the other. **View > Compare panes** selects the files each pane lacks or has with another size or date.
 
 **View** offers Details, four thumbnail sizes, sorting, hidden items and preview visibility.
 Right-click the column headers to show Date created or Attributes, or hide other columns.

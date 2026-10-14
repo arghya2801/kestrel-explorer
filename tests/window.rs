@@ -1425,6 +1425,41 @@ fn navigate_to(hwnd: HWND, path: &Path) {
 }
 
 #[test]
+fn synced_panes_follow_into_subfolders_and_compare_selects_differences() {
+    let _desktop = desktop();
+    let t = TempDir::new("sync");
+    for side in ["left", "right"] {
+        std::fs::create_dir_all(t.0.join(side).join("sub")).unwrap();
+        std::fs::write(t.0.join(side).join("sub").join("same.txt"), "x").unwrap();
+    }
+    std::fs::write(t.0.join("left").join("sub").join("new.txt"), "x").unwrap();
+    let same = std::fs::metadata(t.0.join("left").join("sub").join("same.txt")).unwrap().modified().unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(t.0.join("right").join("sub").join("same.txt"))
+        .unwrap()
+        .set_modified(same)
+        .unwrap();
+    let hwnd = open(&t.0.join("left"));
+    let left = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(left) == ["sub"]));
+    command(hwnd, ui::toolbar::SPLIT);
+    let right = lists_in(hwnd).into_iter().find(|&h| h != left).unwrap();
+    focus_pane(hwnd, right);
+    navigate_to(hwnd, &t.0.join("right"));
+    assert!(pump_until(WAIT, || rows(right) == ["sub"]));
+    command(hwnd, ui::toolbar::SYNC_PANES);
+    focus_pane(hwnd, left);
+    navigate_to(hwnd, &t.0.join("left").join("sub"));
+    assert!(pump_until(WAIT, || rows(left) == ["new.txt", "same.txt"]), "{:?}", rows(left));
+    assert!(pump_until(WAIT, || rows(right) == ["same.txt"]), "the right pane followed: {:?}", rows(right));
+    command(hwnd, ui::toolbar::COMPARE);
+    assert_eq!(selected(left), ["new.txt"]);
+    assert!(selected(right).is_empty());
+    close(hwnd);
+}
+
+#[test]
 fn split_panes_navigate_independently_and_survive_tab_switches() {
     let _desktop = desktop();
     let t = TempDir::new("split");

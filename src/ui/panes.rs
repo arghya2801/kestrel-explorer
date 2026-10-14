@@ -265,6 +265,72 @@ pub(super) fn activate(list: HWND) {
     }
 }
 
+/// Sync pane navigation: the active pane went `from` → `to`; into a subfolder or up one
+/// level, the other pane does the same. Other jumps leave it alone.
+pub(super) fn follow(from: Option<PathBuf>, to: &std::path::Path) {
+    let Some(job) = with_app(|a| {
+        let other = a.other.as_mut().filter(|_| a.split_view && a.sync_panes)?;
+        let (from, here) = (from?, other.browser.dir()?.to_path_buf());
+        let target = if to.parent() == Some(from.as_path()) {
+            here.join(to.file_name()?)
+        } else if from.parent() == Some(to) {
+            here.parent()?.to_path_buf()
+        } else {
+            return None;
+        };
+        Some(other.browser.go(target))
+    })
+    .flatten() else {
+        return;
+    };
+    super::spawn_list(job);
+}
+
+/// View > Compare panes: selects, in each pane, the files the other pane lacks or has
+/// with a different size or modified time.
+pub(super) fn compare() {
+    let Some(picks) = with_app(|a| {
+        let other = a.other.as_ref().filter(|_| a.split_view)?;
+        let rows = |v: &FolderView, w: &FolderView| -> Option<(HWND, Vec<usize>)> {
+            let (mine, theirs) = (v.browser.snapshot()?, w.browser.snapshot()?);
+            let diff: std::collections::HashSet<u32> =
+                crate::listing::differing(mine, theirs).into_iter().collect();
+            Some((
+                v.list,
+                v.browser
+                    .order
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| diff.contains(e))
+                    .map(|(r, _)| r)
+                    .collect(),
+            ))
+        };
+        Some([rows(&a.view, other)?, rows(other, &a.view)?])
+    })
+    .flatten() else {
+        return;
+    };
+    let select = |list: HWND, row: usize, on: bool| {
+        let state = if on { LVIS_SELECTED } else { LIST_VIEW_ITEM_STATE_FLAGS(0) };
+        let item = LVITEMW { state, stateMask: LVIS_SELECTED, ..Default::default() };
+        unsafe {
+            SendMessageW(list, LVM_SETITEMSTATE, Some(WPARAM(row)), Some(LPARAM(&item as *const _ as isize)))
+        };
+    };
+    for (list, rows) in &picks {
+        select(*list, usize::MAX, false);
+        for &row in rows {
+            select(*list, row, true);
+        }
+    }
+    super::set_status(&format!(
+        "Compare: {} files differ here, {} in the other pane",
+        picks[0].1.len(),
+        picks[1].1.len()
+    ));
+}
+
 pub(super) fn focus_other() {
     if let Some(list) =
         with_app(|a| a.split_view.then(|| a.other.as_ref().map(|v| v.list)).flatten()).flatten()

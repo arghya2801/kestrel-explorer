@@ -166,6 +166,8 @@ struct App {
     view: panes::FolderView,
     other: Option<panes::FolderView>,
     split_view: bool,
+    /// View > Sync pane navigation: the other pane follows into subfolders and up.
+    sync_panes: bool,
     right_active: bool,
     pane_ratio: i32,
     preview_width: Option<i32>,
@@ -451,6 +453,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 view,
                 other: None,
                 split_view: false,
+                sync_panes: false,
                 right_active: false,
                 pane_ratio: settings.pane_ratio,
                 preview_width: settings.preview_width,
@@ -1220,9 +1223,16 @@ fn apply(ev: Event) {
 
 /// Runs a browser navigation (`Browser::back`, `up`, ...) and lists its target.
 fn run(nav: impl FnOnce(&mut Browser) -> Option<ListJob>) {
-    if let Some(job) = with_app(|a| nav(&mut a.view.browser)).flatten() {
-        spawn_list(job);
-    }
+    let Some((job, from)) = with_app(|a| {
+        let from = a.view.browser.requested_location().map(|l| l.dir);
+        nav(&mut a.view.browser).map(|job| (job, from))
+    })
+    .flatten() else {
+        return;
+    };
+    let to = job.dir.clone();
+    spawn_list(job);
+    panes::follow(from, &to);
 }
 
 fn go(dir: PathBuf) {
