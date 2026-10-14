@@ -52,6 +52,9 @@ pub fn search(
             let e = &listed.entries[i];
             if needle.is_empty() || fold(name).windows(needle.len()).any(|w| w == needle.as_slice()) {
                 out.add(&rel, e.attrs, e.size, e.modified);
+                if let Some(last) = out.entries.last_mut() {
+                    last.created = e.created;
+                }
                 if out.len() >= MAX_RESULTS {
                     return Ok(out);
                 }

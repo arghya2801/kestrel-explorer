@@ -98,7 +98,9 @@ pub(super) unsafe fn create(
             let col = LVCOLUMNW {
                 mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
                 fmt: if *key == SortKey::Size { LVCFMT_RIGHT } else { LVCFMT_LEFT },
-                cx: settings.columns.get(i).copied().unwrap_or_else(|| super::scale(parent, *width)),
+                cx: settings.columns.get(i).copied().unwrap_or_else(|| {
+                    if i < super::SHOWN_COLUMNS { super::scale(parent, *width) } else { 0 }
+                }),
                 pszText: PWSTR(title.0 as *mut _),
                 ..Default::default()
             };

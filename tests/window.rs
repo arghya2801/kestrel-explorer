@@ -822,7 +822,8 @@ fn settings_shape_the_window_and_are_captured_on_close() {
     std::fs::write(&hidden, "").unwrap();
     unsafe { SetFileAttributesW(&HSTRING::from(hidden.as_os_str()), FILE_ATTRIBUTE_HIDDEN) }.unwrap();
     let s = Settings {
-        columns: vec![210, 111, 112, 113],
+        // Date created hidden, Attributes shown.
+        columns: vec![210, 111, 112, 113, 0, 90],
         sort: Sort { key: SortKey::Size, descending: true },
         show_hidden: true,
         split: Some(300),
@@ -833,7 +834,9 @@ fn settings_shape_the_window_and_are_captured_on_close() {
     let list = list_of(hwnd);
     assert!(pump_until(WAIT, || rows(list) == ["big.txt", "small.txt", "hidden.txt"]), "{:?}", rows(list));
     let width = |c: usize| unsafe { SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(c)), None) }.0;
-    assert_eq!(width(0), 210);
+    assert_eq!((width(0), width(4), width(5)), (210, 0, 90));
+    assert!(cell(list, 2, 5).contains('H'), "{}", cell(list, 2, 5));
+    assert!(!cell(list, 0, 4).is_empty(), "created date filled in");
     let mut r = windows::Win32::Foundation::RECT::default();
     unsafe { GetWindowRect(tree_of(hwnd), &mut r) }.unwrap();
     assert_eq!(r.right - r.left, 300);

@@ -20,6 +20,24 @@ pub fn bytes(bytes: u64) -> String {
     from_wide_z(&buf)
 }
 
+/// Explorer's Attributes column: R H S A, then compressed, encrypted and link flags.
+pub fn attributes(attrs: u32) -> String {
+    use windows::Win32::Storage::FileSystem::*;
+    [
+        (FILE_ATTRIBUTE_READONLY, 'R'),
+        (FILE_ATTRIBUTE_HIDDEN, 'H'),
+        (FILE_ATTRIBUTE_SYSTEM, 'S'),
+        (FILE_ATTRIBUTE_ARCHIVE, 'A'),
+        (FILE_ATTRIBUTE_COMPRESSED, 'C'),
+        (FILE_ATTRIBUTE_ENCRYPTED, 'E'),
+        (FILE_ATTRIBUTE_REPARSE_POINT, 'L'),
+    ]
+    .iter()
+    .filter(|(flag, _)| attrs & flag.0 != 0)
+    .map(|&(_, c)| c)
+    .collect()
+}
+
 /// Short local date + time without seconds. `0` (unknown) renders blank.
 pub fn time(filetime: u64) -> String {
     if filetime == 0 {
@@ -71,6 +89,17 @@ mod tests {
         let s = time(133_628_976_000_000_000);
         assert!(s.contains("2024"), "{s}");
         assert!(s.contains(':'), "{s}");
+    }
+
+    #[test]
+    fn attributes_read_like_explorer() {
+        use windows::Win32::Storage::FileSystem::*;
+        assert_eq!(attributes(0), "");
+        assert_eq!(
+            attributes(FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_ARCHIVE.0),
+            "RHA"
+        );
+        assert_eq!(attributes(FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0), "L");
     }
 
     #[test]

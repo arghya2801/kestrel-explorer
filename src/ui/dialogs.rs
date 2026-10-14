@@ -218,7 +218,13 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> w
                     (0, PREVIEW_WIDTH, "Preview width", None, false),
                     (1, GRID, "Thumbnail grid view", None, true),
                     (1, HIDDEN, "Show &hidden items", None, true),
-                    (1, SORT, "&Sort by", Some("Name|Date modified|Type|Size"), false),
+                    (
+                        1,
+                        SORT,
+                        "&Sort by",
+                        Some("Name|Date modified|Type|Size|Date created|Attributes"),
+                        false,
+                    ),
                     (1, DESCENDING, "&Descending", None, true),
                     (1, COLUMN, "&Name column width", None, false),
                     (1, COLUMN + 1, "&Date column width", None, false),
@@ -375,6 +381,8 @@ fn fill(hwnd: HWND, s: &Settings) {
             SortKey::Modified => 1,
             SortKey::Type => 2,
             SortKey::Size => 3,
+            SortKey::Created => 4,
+            SortKey::Attributes => 5,
         },
     );
     check(DESCENDING, s.sort.descending);
@@ -431,6 +439,8 @@ fn read(hwnd: HWND) -> std::result::Result<Settings, String> {
                 1 => SortKey::Modified,
                 2 => SortKey::Type,
                 3 => SortKey::Size,
+                4 => SortKey::Created,
+                5 => SortKey::Attributes,
                 _ => SortKey::Name,
             },
             descending: checked(DESCENDING),

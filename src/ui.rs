@@ -73,12 +73,17 @@ const ID_FORWARD: usize = 2;
 const ID_UP: usize = 3;
 /// Listing threads stuck on dead network paths we tolerate before refusing new ones.
 const MAX_LISTERS: usize = 8;
-const COLUMNS: [(PCWSTR, i32, SortKey); 4] = [
+/// Details columns: title, width when shown (at 100% scaling) and sort key.
+/// Columns from `SHOWN_COLUMNS` on start hidden (width 0); the header menu shows them.
+const COLUMNS: [(PCWSTR, i32, SortKey); 6] = [
     (w!("Name"), 320, SortKey::Name),
     (w!("Date modified"), 160, SortKey::Modified),
     (w!("Type"), 150, SortKey::Type),
     (w!("Size"), 100, SortKey::Size),
+    (w!("Date created"), 160, SortKey::Created),
+    (w!("Attributes"), 80, SortKey::Attributes),
 ];
+const SHOWN_COLUMNS: usize = 4;
 
 enum Event {
     Thumbnail {
@@ -855,6 +860,12 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 layout(hwnd);
                 LRESULT(0)
             }
+            WM_CONTEXTMENU if header_list(HWND(wp.0 as _)).is_some() => {
+                if let Some(list) = header_list(HWND(wp.0 as _)) {
+                    column_menu(hwnd, list, lp);
+                }
+                LRESULT(0)
+            }
             WM_CONTEXTMENU if with_app(|a| a.views().any(|v| v.list.0 as usize == wp.0)) == Some(true) => {
                 panes::activate(HWND(wp.0 as _));
                 commands::context_menu(hwnd, lp);
@@ -1027,6 +1038,8 @@ fn fill(b: &Browser, icons: &mut Icons, grid: &mut grid::Grid, drop_row: Option<
             write(item, &wide(icons.type_name(s.name(i), s.is_dir(i)).unwrap_or_default()))
         }
         Some(SortKey::Size) if !s.is_dir(i) => write(item, &wide(format::size(s.entries[i].size))),
+        Some(SortKey::Created) => write(item, &wide(format::time(s.entries[i].created))),
+        Some(SortKey::Attributes) => write(item, &wide(format::attributes(s.entries[i].attrs))),
         _ => write(item, &[]),
     }
 }
@@ -1835,6 +1848,39 @@ fn update_sort_arrows() {
                 item.fmt.0 |= if sort.descending { HDF_SORTDOWN.0 } else { HDF_SORTUP.0 };
             }
             SendMessageW(header, HDM_SETITEMW, Some(WPARAM(i)), Some(LPARAM(&item as *const _ as isize)));
+        }
+    }
+}
+
+/// The file list whose column header is `header`.
+fn header_list(header: HWND) -> Option<HWND> {
+    let lists = with_app(|a| a.views().map(|v| v.list).collect::<Vec<_>>())?;
+    lists.into_iter().find(|&l| unsafe { SendMessageW(l, LVM_GETHEADER, None, None) }.0 == header.0 as isize)
+}
+
+/// Right-click on the column headers: show or hide every column but Name.
+fn column_menu(hwnd: HWND, list: HWND, lp: LPARAM) {
+    let width = |i: usize| unsafe { SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(i)), None) }.0;
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        for (i, (title, _, _)) in COLUMNS.iter().enumerate().skip(1) {
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | if width(i) > 0 { MF_CHECKED } else { MF_UNCHECKED },
+                i,
+                *title,
+            );
+        }
+        let mut at = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
+        if lp.0 == -1 {
+            let _ = GetCursorPos(&mut at);
+        }
+        let picked =
+            TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, None, hwnd, None).0 as usize;
+        let _ = DestroyMenu(menu);
+        if let Some(&(_, shown_width, _)) = COLUMNS.get(picked).filter(|_| picked > 0) {
+            let cx = if width(picked) > 0 { 0 } else { scale(hwnd, shown_width) };
+            SendMessageW(list, LVM_SETCOLUMNWIDTH, Some(WPARAM(picked)), Some(LPARAM(cx as isize)));
         }
     }
 }

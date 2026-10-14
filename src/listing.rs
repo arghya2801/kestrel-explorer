@@ -20,6 +20,8 @@ pub struct Entry {
     pub size: u64,
     /// FILETIME as u64 (100ns ticks since 1601, UTC).
     pub modified: u64,
+    /// Same units; 0 where unknown (network share lists).
+    pub created: u64,
 }
 
 /// One folder's contents. Immutable once built; names live in one shared buffer.
@@ -43,6 +45,7 @@ impl Snapshot {
             attrs,
             size,
             modified,
+            created: 0,
         });
         self.names.extend_from_slice(name);
     }
@@ -157,6 +160,9 @@ fn push(snap: &mut Snapshot, d: &WIN32_FIND_DATAW) {
         (d.nFileSizeHigh as u64) << 32 | d.nFileSizeLow as u64,
         (d.ftLastWriteTime.dwHighDateTime as u64) << 32 | d.ftLastWriteTime.dwLowDateTime as u64,
     );
+    if let Some(e) = snap.entries.last_mut() {
+        e.created = (d.ftCreationTime.dwHighDateTime as u64) << 32 | d.ftCreationTime.dwLowDateTime as u64;
+    }
 }
 
 #[cfg(test)]

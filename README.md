@@ -31,6 +31,7 @@ toolbar and preview follow the active pane. Each tab remembers its panes; drag t
 to change their widths. Turning Split off preserves the second pane for reopening.
 
 **View** offers Details, four thumbnail sizes, sorting, hidden items and preview visibility.
+Right-click the column headers to show Date created or Attributes, or hide other columns.
 **More** includes pin/unpin, recent folders, parent folders, Open terminal here and File operations.
 Click a breadcrumb to visit an ancestor; use **Edit** or **Ctrl+L** to type a path.
 The terminal command opens Windows PowerShell in the active folder.
@@ -42,7 +43,7 @@ and cancellation dialogs.
 | Page | Controls |
 |---|---|
 | Appearance | Theme, sidebar width, preview visibility/width, split layout and pane ratio |
-| File list | Details/grid, hidden items, sort column/direction and all four column widths |
+| File list | Details/grid, hidden items, sort column/direction and the four main column widths |
 | Startup | Startup folder and session restoration |
 | Window | Saved position, size and maximized state |
 

@@ -68,11 +68,13 @@ pub const THUMB_SIZES: [(i32, &str); 4] = [
     (256, "Extra large thumbnails"),
 ];
 
-const KEYS: [(SortKey, &str); 4] = [
+const KEYS: [(SortKey, &str); 6] = [
     (SortKey::Name, "Name"),
     (SortKey::Size, "Size"),
     (SortKey::Modified, "Modified"),
     (SortKey::Type, "Type"),
+    (SortKey::Created, "Created"),
+    (SortKey::Attributes, "Attributes"),
 ];
 
 fn ints(v: &str) -> Option<Vec<i32>> {
@@ -100,7 +102,10 @@ impl Settings {
                         .map(|v| (v[0], v[1], v[2], v[3]))
                 }
                 "maximized" => s.maximized = flag(value).unwrap_or(false),
-                "columns" => s.columns = ints(value).filter(|v| v.iter().all(|&w| w > 0)).unwrap_or_default(),
+                // Width 0 is a column hidden from the header menu.
+                "columns" => {
+                    s.columns = ints(value).filter(|v| v.iter().all(|&w| w >= 0)).unwrap_or_default()
+                }
                 "sort" => {
                     if let Some((k, d)) = value.split_once(',')
                         && let (Some(&(key, _)), Some(descending)) =

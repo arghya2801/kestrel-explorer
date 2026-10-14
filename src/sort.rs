@@ -14,6 +14,8 @@ pub enum SortKey {
     Modified,
     /// By extension, which stands in for Explorer's type names without asking the shell.
     Type,
+    Created,
+    Attributes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +95,9 @@ pub fn sorted_order(s: &Snapshot, sort: Sort, show_hidden: bool) -> Vec<u32> {
             SortKey::Size => s.entries[a].size.cmp(&s.entries[b].size),
             SortKey::Modified => s.entries[a].modified.cmp(&s.entries[b].modified),
             SortKey::Type => lower_ext(s.name(a)).cmp(lower_ext(s.name(b))),
+            SortKey::Created => s.entries[a].created.cmp(&s.entries[b].created),
+            SortKey::Attributes => crate::format::attributes(s.entries[a].attrs)
+                .cmp(&crate::format::attributes(s.entries[b].attrs)),
         };
         let primary = if sort.descending { primary.reverse() } else { primary };
         s.is_dir(b).cmp(&s.is_dir(a)).then(primary).then_with(|| key(a).cmp(key(b)))
