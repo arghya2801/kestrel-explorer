@@ -289,7 +289,7 @@ fn start_history(redo: bool) {
     });
 }
 
-fn start_op(op: Op, edit: bool) {
+pub(super) fn start_op(op: Op, edit: bool) {
     let Some((events, hwnd, view, dir)) = with_app(|a| {
         (a.events.clone(), a.hwnd.0 as isize, a.view.id, a.view.browser.dir().map(PathBuf::from))
     }) else {
@@ -352,6 +352,13 @@ pub(super) fn after_refresh() {
 }
 
 fn rename_selected() {
+    let paths: Vec<PathBuf> = selected_paths().into_iter().map(|p| p.0).collect();
+    if paths.len() > 1 {
+        if let Some(hwnd) = with_app(|a| a.hwnd) {
+            super::rename::open(hwnd, paths);
+        }
+        return;
+    }
     let (Some(list), Some(&row)) = (list(), selected_rows().first()) else { return };
     unsafe {
         let _ = SetFocus(Some(list));

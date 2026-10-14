@@ -54,6 +54,7 @@ mod drag;
 mod grid;
 mod panes;
 mod preview;
+mod rename;
 mod tabbar;
 pub mod toolbar;
 pub use commands::{

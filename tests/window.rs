@@ -711,6 +711,38 @@ fn calculate_folder_sizes_fills_the_size_column() {
 }
 
 #[test]
+fn f2_on_several_items_renames_them_together_with_one_undo() {
+    let _desktop = desktop();
+    let t = TempDir::new("batch");
+    for name in ["IMG_1.jpg", "IMG_2.jpg"] {
+        std::fs::write(t.0.join(name), "").unwrap();
+    }
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["IMG_1.jpg", "IMG_2.jpg"]));
+    select_row(list, 0);
+    select_row(list, 1);
+    command(hwnd, ui::CMD_RENAME);
+    let dialog = unsafe { FindWindowW(w!("KestrelRename"), None) }.expect("rename window");
+    let field = |id: i32| unsafe { GetDlgItem(Some(dialog), id) }.unwrap();
+    type_into(field(10), "IMG_");
+    type_into(field(11), "Trip ");
+    let preview = {
+        let mut buf = [0u16; 512];
+        let n = unsafe { GetWindowTextW(field(12), &mut buf) };
+        String::from_utf16_lossy(&buf[..n as usize])
+    };
+    assert!(preview.contains("IMG_2.jpg  →  Trip 2.jpg"), "{preview}");
+    unsafe { SendMessageW(dialog, WM_COMMAND, Some(WPARAM(IDOK.0 as usize)), None) };
+    assert!(pump_until(WAIT, || rows(list) == ["Trip 1.jpg", "Trip 2.jpg"]), "{:?}", rows(list));
+    assert!(pump_until(WAIT, || ui::running_operations() == 0));
+    ctrl_key(list, VK_Z, false);
+    assert!(pump_until(WAIT, || rows(list) == ["IMG_1.jpg", "IMG_2.jpg"]), "{:?}", rows(list));
+    assert!(pump_until(WAIT, || ui::running_operations() == 0));
+    close(hwnd);
+}
+
+#[test]
 fn ctrl_z_brings_back_a_recycled_file() {
     let _desktop = desktop();
     let t = TempDir::new("undo");

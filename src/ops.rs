@@ -44,6 +44,35 @@ pub enum Op {
     Restore {
         items: Vec<(String, PathBuf)>,
     },
+    /// Batch rename: each path gets its new name, in one operation (one undo).
+    RenameMany {
+        items: Vec<(PathBuf, String)>,
+    },
+}
+
+/// Batch rename: `find` is replaced by `replace` in each name's stem (the extension stays);
+/// an empty `find` replaces the whole stem. `#` in `replace` becomes 1, 2, 3... padded to
+/// the same width. Fails with the reason if any result is invalid or two results collide.
+pub fn batch_names(names: &[String], find: &str, replace: &str) -> Result<Vec<String>, String> {
+    let width = names.len().to_string().len();
+    let mut seen = std::collections::HashSet::new();
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let (stem, ext) = match name.rfind('.') {
+                Some(dot) if dot > 0 => name.split_at(dot),
+                _ => (name.as_str(), ""),
+            };
+            let replacement = replace.replace('#', &format!("{:0width$}", i + 1));
+            let stem = if find.is_empty() { replacement } else { stem.replace(find, &replacement) };
+            let new = validate_name(&format!("{stem}{ext}")).map_err(|e| format!("{name}: {e}"))?;
+            if !seen.insert(new.to_lowercase()) {
+                return Err(format!("Two items would both be named \"{new}\"."));
+            }
+            Ok(new)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +162,7 @@ fn label(op: &Op) -> String {
         Op::Rename { path, name } => format!("Rename {} to {name}", path.display()),
         Op::NewFolder { dir } => format!("New folder in {}", dir.display()),
         Op::Restore { items } => format!("Put back {} items", items.len()),
+        Op::RenameMany { items } => format!("Rename {} items", items.len()),
     }
 }
 
@@ -301,7 +331,7 @@ fn undo_of(op: &Op, made: Vec<Made>) -> Option<Op> {
             paths: made.into_iter().map(|(_, to)| PathBuf::from(to)).collect(),
             recycle: true,
         }),
-        Op::Rename { .. } | Op::Move { .. } | Op::Delete { .. } => {
+        Op::Rename { .. } | Op::RenameMany { .. } | Op::Move { .. } | Op::Delete { .. } => {
             Some(Op::Restore { items: made.into_iter().filter_map(|(from, to)| Some((to, from?))).collect() })
         }
     }
@@ -359,6 +389,13 @@ fn run_inner(op: &Op, mode: Mode) -> Result<(Option<String>, Option<Op>), String
                         fo.MoveItem(&item(p)?, &dest_item, PCWSTR::null(), NO_SINK)
                     };
                     r.map_err(|e| fail("copy", e))?;
+                }
+            }
+            Op::RenameMany { items } => {
+                for (path, name) in items {
+                    let name = validate_name(name)?;
+                    fo.RenameItem(&item(path)?, &HSTRING::from(&name), NO_SINK)
+                        .map_err(|e| fail("rename", e))?;
                 }
             }
             Op::Restore { items } => {
@@ -476,6 +513,8 @@ mod tests {
         let before = names();
         undo(Op::Rename { path: d.join("x.txt"), name: "y.txt".into() });
         assert_eq!(names(), before);
+        undo(Op::RenameMany { items: vec![(d.join("x.txt"), "a.txt".into()), (d.join("sub"), "b".into())] });
+        assert_eq!(names(), before);
         // Windows names the copy "x - Copy.txt"; Undo must remove that one, not x.txt.
         undo(Op::Copy { paths: vec![d.join("x.txt")], dest: d.clone() });
         assert_eq!(names(), before);
@@ -489,6 +528,20 @@ mod tests {
             run_inner(&Op::Delete { paths: vec![d.join("x.txt")], recycle: false }, Mode::Silent).unwrap();
         assert_eq!(none, None, "permanent deletes can't be undone");
         fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn batch_names_replace_number_and_reject_collisions() {
+        let names: Vec<String> = ["IMG_1.jpg", "IMG_2.jpg", "notes.txt"].map(String::from).to_vec();
+        assert_eq!(batch_names(&names, "IMG_", "Trip ").unwrap(), ["Trip 1.jpg", "Trip 2.jpg", "notes.txt"]);
+        assert_eq!(
+            batch_names(&names, "", "Photo #").unwrap(),
+            ["Photo 1.jpg", "Photo 2.jpg", "Photo 3.txt"]
+        );
+        let many: Vec<String> = (0..12).map(|i| format!("f{i}")).collect();
+        assert_eq!(batch_names(&many, "", "x#").unwrap()[0], "x01", "numbers are padded to the count");
+        assert!(batch_names(&names, "", "same").is_err_and(|e| e.contains("same.jpg")));
+        assert!(batch_names(&names, "IMG", "a:b").is_err());
     }
 
     #[test]

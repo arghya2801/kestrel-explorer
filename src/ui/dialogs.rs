@@ -39,6 +39,14 @@ const FOLDER_MENU: usize = 32;
 
 thread_local! { static WINDOWS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) }; }
 
+/// Lets another modeless window get Tab, Enter and Esc handling like these dialogs.
+pub(super) fn track(hwnd: HWND) {
+    WINDOWS.with(|all| all.borrow_mut().push(hwnd));
+}
+pub(super) fn untrack(hwnd: HWND) {
+    WINDOWS.with(|all| all.borrow_mut().retain(|&h| h != hwnd));
+}
+
 struct Dialog {
     owner: HWND,
     guide: bool,
@@ -70,7 +78,7 @@ Ctrl+A    Select all\r\n\
 Ctrl+C / Ctrl+X / Ctrl+V    Copy / cut / paste\r\n\
 Ctrl+Shift+C    Copy selected paths\r\n\
 Ctrl+Shift+N    New folder\r\n\
-F2    Rename\r\n\
+F2    Rename; with several items selected, batch rename with preview\r\n\
 Delete    Recycle\r\n\
 Shift+Delete    Delete permanently\r\n\
 Ctrl+Z / Ctrl+Y    Undo / redo the last file operation\r\n\

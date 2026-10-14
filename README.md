@@ -76,7 +76,7 @@ Press **F1**, or choose **Help > Keyboard shortcuts**, for the in-app guide.
 | Ctrl+F | Filter; Enter searches subfolders |
 | Esc | Cancel loading/search; clear the focused filter or restore the address |
 | F5 / Ctrl+H | Refresh / show hidden items |
-| F2 | Rename |
+| F2 | Rename; several selected items open batch rename (find/replace, `#` numbers) |
 | Del / Shift+Del | Recycle / delete permanently |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste |
 | Ctrl+Z / Ctrl+Y | Undo / redo the last file operation |
