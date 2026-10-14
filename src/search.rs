@@ -8,7 +8,7 @@ use std::path::Path;
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
 use crate::listing::{Snapshot, list_dir};
-use crate::sort::fold;
+use crate::sort::Query;
 
 /// Enough to be useful; a search matching more than this should be narrowed.
 pub const MAX_RESULTS: usize = 100_000;
@@ -25,7 +25,7 @@ pub fn search(
     cancelled: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(usize),
 ) -> io::Result<Snapshot> {
-    let needle = fold(&query.encode_utf16().collect::<Vec<_>>());
+    let q = Query::parse(query, crate::sort::now());
     let mut out = Snapshot::new(root.to_path_buf());
     let mut queue = VecDeque::from([(root.to_path_buf(), Vec::<u16>::new())]);
     let mut first = true;
@@ -50,7 +50,11 @@ pub fn search(
             }
             rel.extend_from_slice(name);
             let e = &listed.entries[i];
-            if needle.is_empty() || fold(name).windows(needle.len()).any(|w| w == needle.as_slice()) {
+            let found = q.matches(&listed, i)
+                && q.content.as_deref().is_none_or(|text| {
+                    !listed.is_dir(i) && contains_text(&dir.join(String::from_utf16_lossy(name)), text)
+                });
+            if found {
                 out.add(&rel, e.attrs, e.size, e.modified);
                 if let Some(last) = out.entries.last_mut() {
                     last.created = e.created;
@@ -66,6 +70,21 @@ pub fn search(
         progress(out.len());
     }
     Ok(out)
+}
+
+/// Files larger than this aren't read for `content:`.
+const MAX_CONTENT: u64 = 16 << 20;
+
+/// Whether the file holds `text` (lowercase UTF-8), ignoring ASCII case, as UTF-8 or UTF-16.
+/// ponytail: a plain scan of the whole file; an index is the upgrade if searches get slow.
+fn contains_text(path: &Path, text: &[u8]) -> bool {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_CONTENT) {
+        return false;
+    }
+    let Ok(mut data) = std::fs::read(path) else { return false };
+    data.make_ascii_lowercase();
+    let wide: Vec<u8> = String::from_utf8_lossy(text).encode_utf16().flat_map(u16::to_le_bytes).collect();
+    data.windows(text.len()).any(|w| w == text) || data.windows(wide.len()).any(|w| w == wide.as_slice())
 }
 
 /// Total bytes of every file below `dir`, hidden ones included, as Explorer's Properties counts.
@@ -125,6 +144,19 @@ mod tests {
         assert_eq!(found(&s), ["Report2.txt", r"a\b\report1.txt", "reports"]);
         let i = (0..s.len()).find(|&i| s.name_string(i) == "reports").unwrap();
         assert!(s.is_dir(i));
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn content_search_reads_utf8_and_utf16_files() {
+        let d = temp("content");
+        fs::write(d.join("a.txt"), "Invoice TOTAL: 42").unwrap();
+        let utf16: Vec<u8> = "\u{feff}grand total".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        fs::write(d.join("b.txt"), utf16).unwrap();
+        fs::write(d.join("c.txt"), "nothing here").unwrap();
+        fs::create_dir(d.join("total folder")).unwrap();
+        assert_eq!(found(&run(&d, "content:total", false).unwrap()), ["a.txt", "b.txt"]);
+        assert_eq!(found(&run(&d, "b content:total", false).unwrap()), ["b.txt"]);
         fs::remove_dir_all(d).unwrap();
     }
 

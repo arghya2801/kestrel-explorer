@@ -33,6 +33,9 @@ to change their widths. Turning Split off preserves the second pane for reopenin
 **View** offers Details, four thumbnail sizes, sorting, hidden items and preview visibility.
 Right-click the column headers to show Date created or Attributes, or hide other columns.
 **More** includes pin/unpin, recent folders, parent folders, Open terminal here and File operations.
+The filter (**Ctrl+F**) matches names and also understands `size:>10MB`, `size:<1KB`, `modified:<7d`
+(changed within a week) and `modified:>2w`. Press **Enter** to search subfolders; there,
+`content:word` also finds files containing the word. **View > Calculate folder sizes** fills in folder sizes.
 Click a breadcrumb to visit an ancestor; use **Edit** or **Ctrl+L** to type a path.
 The terminal command opens Windows PowerShell in the active folder.
 File operations shows running jobs and recent results for this process; Windows supplies progress

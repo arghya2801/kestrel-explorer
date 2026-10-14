@@ -81,6 +81,8 @@ Search\r\n\
 Ctrl+F    Focus the filter\r\n\
 Enter in the filter    Search subfolders\r\n\
 Esc in the filter    Clear the filter\r\n\
+Filter words    size:>10MB  size:<1KB  modified:<7d  modified:>2w\r\n\
+Search only    content:word finds files containing the word\r\n\
 Esc in the list    Cancel loading or search\r\n\
 Esc in the address    Restore the current address\r\n\r\n\
 Tabs and windows\r\n\
