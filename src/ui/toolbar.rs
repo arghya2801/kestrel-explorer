@@ -34,6 +34,7 @@ pub const OPERATIONS: usize = 220;
 pub const THUMBS: usize = 221;
 // 221..=224 are the thumbnail sizes.
 pub const UPDATES: usize = 230;
+pub const FOLDER_SIZES: usize = 231;
 const RELEASES: &str = "https://github.com/arghya2801/kestrel-explorer/releases/latest";
 
 const BUTTONS: &[(usize, &str, i32)] = &[
@@ -173,6 +174,7 @@ pub(super) fn execute(id: usize) -> bool {
             }
         }
         PREVIEW => preview::toggle(hwnd),
+        FOLDER_SIZES => super::calculate_folder_sizes(),
         SORT_NAME..=SORT_SIZE | DESCENDING => {
             let job = with_app(|a| {
                 let key = match id {
@@ -237,6 +239,7 @@ fn popup(hwnd: HWND, kind: usize) {
                 add(DESCENDING, "Descending", sort.descending);
                 add(HIDDEN, "Hidden items\tCtrl+H", hidden);
                 add(PREVIEW, "Preview pane\tAlt+P", preview);
+                add(FOLDER_SIZES, "Calculate folder sizes", false);
             }
             HELP => {
                 add(SHORTCUTS, "Keyboard shortcuts\tF1", false);

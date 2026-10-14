@@ -36,7 +36,7 @@ use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::browser::{Applied, Browser, ListJob, SortJob, parse_location};
 use crate::events::Events;
-use crate::icons::{self, Done, Icons};
+use crate::icons::{self, Done};
 use crate::listing::Snapshot;
 use crate::search;
 use crate::settings::Settings;
@@ -143,6 +143,15 @@ enum Event {
     /// The list should catch up with the browser (after a rename box closed).
     Resync(u64),
     /// A file operation ended: the item to select, or an error.
+    /// One folder's total from Calculate folder sizes.
+    FolderSize {
+        view: u64,
+        dir: PathBuf,
+        name: Vec<u16>,
+        bytes: u64,
+        done: usize,
+        of: usize,
+    },
     OpDone {
         view: u64,
         dir: Option<PathBuf>,
@@ -939,7 +948,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
     }
     if hdr.code == LVN_GETDISPINFOW {
         let item = unsafe { &mut (*(lp.0 as *mut NMLVDISPINFOW)).item };
-        with_view(view, |v| fill(&v.browser, &mut v.icons, &mut v.grid, v.drop_row, item));
+        with_view(view, |v| fill(v, item));
         return Some(LRESULT(0));
     }
     if matches!(
@@ -1015,7 +1024,8 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
 }
 
 /// Answers the list's request for a row's text and/or icon.
-fn fill(b: &Browser, icons: &mut Icons, grid: &mut grid::Grid, drop_row: Option<usize>, item: &mut LVITEMW) {
+fn fill(v: &mut panes::FolderView, item: &mut LVITEMW) {
+    let (b, icons, grid, drop_row) = (&v.browser, &mut v.icons, &mut v.grid, v.drop_row);
     let (Some(s), Ok(row)) = (b.snapshot(), usize::try_from(item.iItem)) else { return write(item, &[]) };
     let Some(&entry) = b.order.get(row) else { return write(item, &[]) };
     let i = entry as usize;
@@ -1038,6 +1048,10 @@ fn fill(b: &Browser, icons: &mut Icons, grid: &mut grid::Grid, drop_row: Option<
             write(item, &wide(icons.type_name(s.name(i), s.is_dir(i)).unwrap_or_default()))
         }
         Some(SortKey::Size) if !s.is_dir(i) => write(item, &wide(format::size(s.entries[i].size))),
+        Some(SortKey::Size) => match v.sizes.get(s.name(i)) {
+            Some(&bytes) => write(item, &wide(format::size(bytes))),
+            None => write(item, &[]),
+        },
         Some(SortKey::Created) => write(item, &wide(format::time(s.entries[i].created))),
         Some(SortKey::Attributes) => write(item, &wide(format::attributes(s.entries[i].attrs))),
         _ => write(item, &[]),
@@ -1081,6 +1095,12 @@ fn apply(ev: Event) {
             });
             match applied {
                 Some(Applied::Shown { select, new_folder }) => {
+                    if new_folder {
+                        with_view(id, |v| {
+                            v.sizes_cancel.store(true, Ordering::SeqCst);
+                            v.sizes.clear();
+                        });
+                    }
                     if new_folder
                         && let Some(dir) = with_view(id, |v| v.browser.dir().map(PathBuf::from)).flatten()
                     {
@@ -1135,6 +1155,26 @@ fn apply(ev: Event) {
             }
         }
         Event::WatchReady { id, handle } => on_watch_ready(id, handle),
+        Event::FolderSize { view, dir, name, bytes, done, of } => {
+            let list = with_view(view, |v| {
+                (v.browser.dir() == Some(dir.as_path())).then(|| {
+                    v.sizes.insert(name, bytes);
+                    v.list
+                })
+            });
+            if let Some(Some(list)) = list {
+                unsafe {
+                    let _ = InvalidateRect(Some(list), None, false);
+                }
+                if with_app(|a| a.view.id == view) == Some(true) {
+                    set_status(&if done == of {
+                        format!("Folder sizes calculated ({of})")
+                    } else {
+                        format!("Calculating folder sizes… {done} of {of}  (Esc to stop)")
+                    });
+                }
+            }
+        }
         Event::OpDone { view, dir, result, edit } => commands::on_op_done(view, dir, result, edit),
         Event::Resync(id) => refresh_view(id, &selected_rows_for(id), false, focused_name(id).as_deref()),
         Event::Sorted { generation, sort, show_hidden, filter, order } => {
@@ -1566,8 +1606,44 @@ fn on_device_change(event: u32, lp: LPARAM) {
     }
 }
 
+/// View > Calculate folder sizes: totals for every folder shown, one at a time on a worker.
+fn calculate_folder_sizes() {
+    let Some((view, dir, names, events, cancel)) = with_app(|a| {
+        let v = &mut a.view;
+        let s = v.browser.snapshot()?;
+        let names: Vec<Vec<u16>> = v
+            .browser
+            .order
+            .iter()
+            .map(|&i| i as usize)
+            .filter(|&i| s.is_dir(i))
+            .map(|i| s.name(i).to_vec())
+            .collect();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        std::mem::replace(&mut v.sizes_cancel, cancel.clone()).store(true, Ordering::SeqCst);
+        Some((v.id, s.dir.clone(), names, a.events.clone(), cancel))
+    })
+    .flatten() else {
+        return;
+    };
+    if names.is_empty() {
+        return set_status("No folders here to measure");
+    }
+    let of = names.len();
+    spawn("folder sizes", move || {
+        for (done, name) in names.into_iter().enumerate() {
+            let path = dir.join(String::from_utf16_lossy(&name));
+            let Some(bytes) = search::folder_size(&path, &|| cancel.load(Ordering::SeqCst)) else { return };
+            events.send(Event::FolderSize { view, dir: dir.clone(), name, bytes, done: done + 1, of });
+        }
+    });
+}
+
 fn cancel_loading() {
-    with_app(|a| a.view.lister_cancel.store(true, Ordering::SeqCst));
+    with_app(|a| {
+        a.view.lister_cancel.store(true, Ordering::SeqCst);
+        a.view.sizes_cancel.store(true, Ordering::SeqCst);
+    });
     let Some(worker) =
         with_app(|a| a.view.browser.cancel().then(|| a.view.lister.take()).flatten()).flatten()
     else {

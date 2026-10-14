@@ -696,6 +696,21 @@ fn f2_renames_in_place_and_rejects_bad_names() {
 }
 
 #[test]
+fn calculate_folder_sizes_fills_the_size_column() {
+    let t = TempDir::new("sizes");
+    std::fs::create_dir_all(t.0.join("sub").join("deep")).unwrap();
+    std::fs::write(t.0.join("sub").join("deep").join("big.bin"), vec![0u8; 5000]).unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["sub"]));
+    assert_eq!(cell(list, 0, 3), "", "folders have no size until asked");
+    command(hwnd, ui::toolbar::FOLDER_SIZES);
+    assert!(pump_until(WAIT, || cell(list, 0, 3) == kestrel::format::size(5000)), "{:?}", cell(list, 0, 3));
+    assert!(status_text(hwnd).starts_with("Folder sizes calculated (1)"), "{}", status_text(hwnd));
+    close(hwnd);
+}
+
+#[test]
 fn ctrl_z_brings_back_a_recycled_file() {
     let _desktop = desktop();
     let t = TempDir::new("undo");

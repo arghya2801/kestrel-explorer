@@ -41,11 +41,15 @@ pub(super) struct FolderView {
     pub drop_row: Option<usize>,
     pub drop_target: Option<IDropTarget>,
     pub drop_registered: bool,
+    /// Calculated folder sizes by name, for the folder in `browser`; cleared on navigation.
+    pub sizes: std::collections::HashMap<Vec<u16>, u64>,
+    pub sizes_cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Drop for FolderView {
     fn drop(&mut self) {
         self.lister_cancel.store(true, Ordering::SeqCst);
+        self.sizes_cancel.store(true, Ordering::SeqCst);
         unsafe {
             if self.drop_registered {
                 let _ = RevokeDragDrop(self.list);
@@ -184,6 +188,8 @@ pub(super) unsafe fn create(
             drop_row: None,
             drop_target: target,
             drop_registered,
+            sizes: Default::default(),
+            sizes_cancel: Default::default(),
         })
     }
 }

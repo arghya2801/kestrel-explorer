@@ -68,6 +68,27 @@ pub fn search(
     Ok(out)
 }
 
+/// Total bytes of every file below `dir`, hidden ones included, as Explorer's Properties counts.
+/// Junctions aren't entered and unreadable folders are skipped. `None`: cancelled.
+pub fn folder_size(dir: &Path, cancelled: &dyn Fn() -> bool) -> Option<u64> {
+    let mut queue = vec![dir.to_path_buf()];
+    let mut total = 0;
+    while let Some(dir) = queue.pop() {
+        if cancelled() {
+            return None;
+        }
+        let Ok(listed) = list_dir(&dir) else { continue };
+        for (i, e) in listed.entries.iter().enumerate() {
+            if !listed.is_dir(i) {
+                total += e.size;
+            } else if e.attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 {
+                queue.push(dir.join(listed.name_string(i)));
+            }
+        }
+    }
+    Some(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +125,26 @@ mod tests {
         assert_eq!(found(&s), ["Report2.txt", r"a\b\report1.txt", "reports"]);
         let i = (0..s.len()).find(|&i| s.name_string(i) == "reports").unwrap();
         assert!(s.is_dir(i));
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn folder_size_adds_up_nested_files_once() {
+        let d = temp("size");
+        fs::create_dir_all(d.join("a").join("b")).unwrap();
+        fs::write(d.join("one.txt"), "x".repeat(10)).unwrap();
+        fs::write(d.join("a").join("b").join("two.txt"), "x".repeat(32)).unwrap();
+        let link = d.join("a").join("loop");
+        let ok = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&d)
+            .output()
+            .unwrap();
+        assert!(ok.status.success());
+        assert_eq!(folder_size(&d, &|| false), Some(42), "the junction back to the root isn't counted");
+        assert_eq!(folder_size(&d, &|| true), None);
+        fs::remove_dir(&link).unwrap();
         fs::remove_dir_all(d).unwrap();
     }
 
