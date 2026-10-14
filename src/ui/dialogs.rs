@@ -108,6 +108,16 @@ F1    Keyboard shortcuts\r\n\r\n\
 Text boxes keep their normal editing shortcuts. File commands do not delete, cut, or copy files while you edit text.\r\n\
 Close this guide with Esc or the Close button.";
 
+/// The guide, plus the user's own keys.txt bindings.
+fn guide_text() -> String {
+    let custom = crate::keys::bindings(super::COMMAND_NAMES);
+    if custom.is_empty() {
+        return GUIDE.to_owned();
+    }
+    let lines: Vec<&str> = custom.iter().map(|b| b.text.as_str()).collect();
+    format!("Your keys (keys.txt; these win over the keys below)\r\n{}\r\n\r\n{GUIDE}", lines.join("\r\n"))
+}
+
 pub(super) fn shortcuts(owner: HWND) {
     open(owner, 1);
 }
@@ -189,7 +199,7 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> w
                 child(
                     hwnd,
                     w!("EDIT"),
-                    &HSTRING::from(if operations { crate::activity::text() } else { GUIDE.to_owned() }),
+                    &HSTRING::from(if operations { crate::activity::text() } else { guide_text() }),
                     WS_TABSTOP
                         | WS_VSCROLL
                         | WINDOW_STYLE((ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32),

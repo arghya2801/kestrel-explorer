@@ -63,6 +63,41 @@ pub use commands::{
 };
 mod tree;
 
+/// Command names for keys.txt; each runs exactly like its menu item.
+const COMMAND_NAMES: &[(&str, usize)] = &[
+    ("open", commands::CMD_OPEN),
+    ("cut", commands::CMD_CUT),
+    ("copy", commands::CMD_COPY),
+    ("paste", commands::CMD_PASTE),
+    ("rename", commands::CMD_RENAME),
+    ("delete", commands::CMD_DELETE),
+    ("delete-permanently", commands::CMD_DELETE_PERMANENTLY),
+    ("new-folder", commands::CMD_NEW_FOLDER),
+    ("copy-path", commands::CMD_COPY_PATH),
+    ("show-in-explorer", commands::CMD_SHOW_IN_EXPLORER),
+    ("select-all", commands::CMD_SELECT_ALL),
+    ("windows-menu", commands::CMD_MORE_OPTIONS),
+    ("open-in-new-tab", commands::CMD_OPEN_NEW_TAB),
+    ("properties", commands::CMD_PROPERTIES),
+    ("undo", commands::CMD_UNDO),
+    ("redo", commands::CMD_REDO),
+    ("refresh", toolbar::REFRESH),
+    ("hidden-items", toolbar::HIDDEN),
+    ("preview", toolbar::PREVIEW),
+    ("split", toolbar::SPLIT),
+    ("settings", toolbar::SETTINGS),
+    ("shortcuts", toolbar::SHORTCUTS),
+    ("details", toolbar::DETAILS),
+    ("thumbnails", toolbar::GRID),
+    ("pin", toolbar::PIN),
+    ("terminal", toolbar::TERMINAL),
+    ("file-operations", toolbar::OPERATIONS),
+    ("folder-sizes", toolbar::FOLDER_SIZES),
+    ("sync-panes", toolbar::SYNC_PANES),
+    ("compare-panes", toolbar::COMPARE),
+    ("check-for-updates", toolbar::UPDATES),
+];
+
 const CLASS: PCWSTR = w!("Kestrel");
 const WM_APP_EVENTS: u32 = WM_APP + 1;
 const WM_APP_LATE_INIT: u32 = WM_APP + 2;
@@ -572,6 +607,18 @@ fn on_key(msg: &MSG) -> bool {
     let in_list = msg.hwnd == list;
     let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
     let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+    // keys.txt bindings win over the built-in keys, except plain typing keys in text boxes.
+    let alt = unsafe { GetKeyState(VK_MENU.0 as i32) } < 0;
+    let chord = crate::keys::Chord { vk: key.0, ctrl, shift, alt };
+    let typing =
+        (in_address || msg.hwnd == filter) && !ctrl && !alt && !(VK_F1.0..=VK_F24.0).contains(&key.0);
+    if !typing
+        && let Some(binding) = crate::keys::bindings(COMMAND_NAMES).iter().find(|b| b.chord == chord)
+        && let Some(hwnd) = with_app(|a| a.hwnd)
+    {
+        unsafe { SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(binding.command)), Some(LPARAM(0))) };
+        return true;
+    }
     if msg.message == WM_SYSKEYDOWN {
         match key {
             VK_LEFT => run(Browser::back),

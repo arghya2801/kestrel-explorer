@@ -54,8 +54,8 @@ and cancellation dialogs.
 
 Apply saves changes, OK applies and closes, and Cancel discards edits made since the last Apply.
 Restore defaults resets preferences. Theme and pins apply across open windows; view and layout
-changes apply to the current view/window. Unsupported preferences such as custom key bindings,
-font size and plugins are not offered.
+changes apply to the current view/window. Unsupported preferences such as font size and plugins are not offered;
+key bindings live in keys.txt (below).
 
 Settings and logs live in %LOCALAPPDATA%\Kestrel. For portable use, put an empty file named `portable`
 beside kestrel.exe; data then goes to a KestrelData folder there. Settings from the old FileExplorerPro
@@ -96,6 +96,25 @@ Press **F1**, or choose **Help > Keyboard shortcuts**, for the in-app guide.
 | Alt+Enter | Properties |
 
 Text boxes keep their normal editing shortcuts.
+
+### Your own keys
+
+Put a `keys.txt` beside settings.txt (in %LOCALAPPDATA%\Kestrel) with one binding per line, then restart:
+
+~~~text
+# keys = command
+Ctrl+E = show-in-explorer
+Ctrl+Shift+P = properties
+F9 = compare-panes
+~~~
+
+Your bindings win over the built-in keys and appear at the top of the F1 guide. Keys combine Ctrl, Shift
+and Alt with a letter, digit, F1-F24, Left, Right, Up, Down, Home, End, PageUp, PageDown, Insert, Delete,
+Backspace, Enter, Space, Tab or Esc. In the address and filter boxes, keys without Ctrl or Alt keep typing.
+Commands: open, cut, copy, paste, rename, delete, delete-permanently, new-folder, copy-path,
+show-in-explorer, select-all, windows-menu, open-in-new-tab, properties, undo, redo, refresh, hidden-items,
+preview, split, settings, shortcuts, details, thumbnails, pin, terminal, file-operations, folder-sizes,
+sync-panes, compare-panes and check-for-updates. Problems with the file are written to log.txt.
 
 ## Build
 

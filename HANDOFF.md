@@ -27,6 +27,7 @@ Exclusions:
 $env:LOCALAPPDATA = Join-Path $PWD 'target/final-test-data'
 cargo test --offline --lib -- --test-threads=1 --skip files_survive_a_trip_through_the_clipboard
 cargo test --offline --test window -- --test-threads=1 --skip copy_and_cut_then_paste_into_another_folder --skip copy_as_path_puts_quoted_paths_on_the_clipboard
+cargo test --offline --test keys
 cargo clippy --offline --all-targets -- -D warnings
 cargo fmt --check
 cargo build --offline --release --bins --examples

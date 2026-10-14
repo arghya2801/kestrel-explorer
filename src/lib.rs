@@ -6,6 +6,7 @@ pub mod dnd;
 pub mod events;
 pub mod format;
 pub mod icons;
+pub mod keys;
 pub mod listing;
 pub mod network;
 pub mod ops;
