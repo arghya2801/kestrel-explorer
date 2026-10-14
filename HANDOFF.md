@@ -5,7 +5,7 @@ Updated 2026-10-15. Package, lockfile and Windows resources are at 1.1.0; no rel
 
 ## Validation
 
-Latest full applicable run: **135 unit tests and 45 window tests passed**.
+Latest full applicable run: **143 unit tests, 50 window tests and the key-binding test passed**.
 Clippy passed across all targets with warnings denied; formatting passed.
 
 Tests cover independent panes and tab switching, session round trips and sign-out saving, missing

@@ -16,16 +16,16 @@
 
 1.1.0 version metadata is set locally. Release tagging awaits the manual checks in HANDOFF.
 
-## Current measurements, 2026-10-11
+## Current measurements, 2026-10-15 (first paint, size, tests) and 2026-10-11 (the rest)
 
 | Measurement | Result |
 |---|---|
-| Quiet release first paint, seven launches | 102, 99, 114, 98, 134, 95, 91 ms; median 99 ms |
-| Release executable | 1,089,024 bytes |
-| Working set at first paint | 15,568 to 15,668 KiB; not steady-state memory |
+| Release first paint, seven launches | 222, 103, 70, 79, 72, 70, 93 ms; median 79 ms (2026-10-11: median 99 ms) |
+| Release executable | 1,264,128 bytes (2026-10-11: 1,089,024) |
+| Working set at first paint | 14,208 to 14,764 KiB; not steady-state memory |
 | Restore 50,001 selected names in 100,001 items | 26.44 ms in a release logic test |
 | Last-visible icon behind 250 executable requests | 7.52 s before viewport cancellation; 11.56 ms after |
-| Applicable regression suite | 131 unit tests and 43 window tests passed |
+| Applicable regression suite | 143 unit tests, 50 window tests and 1 key-binding test passed |
 | Expanded 600-second stress | 7,942 actions; 210,141 file changes; worst interval 1.585 s |
 | Resource change versus warm-up layout | Handles -44, GDI +7, USER -5; focused GDI follow-up below |
 
@@ -115,13 +115,19 @@ Items are ordered by priority inside each phase.
 
 ### 2.0: power features
 
-- [ ] Folder size calculation on demand (cancellable worker, like search)
-- [ ] Search by size/date filters, then by content; reuse the search worker
-- [ ] Batch rename with preview
-- [ ] Synchronized navigation and folder compare between split panes
-- [ ] Archive browsing (zip first, through the shell namespace)
-- [ ] Custom key bindings, sharing the shortcut table the guide already uses
-- [ ] Accessibility pass: screen-reader names for custom-drawn controls, high-contrast theme
+- [x] View > Calculate folder sizes: a cancellable worker fills the Size column (Esc stops it).
+      Sorting by size still treats folders as empty
+- [x] `size:`, `modified:` conditions in the filter and search; `content:word` in the search
+      (whole-file scan up to 16 MB per file; one word, no phrases)
+- [x] Batch rename (F2 on several items): find/replace, `#` numbering, live preview, one undo
+- [x] View > Sync pane navigation (into subfolders and up) and View > Compare panes (selects differences)
+- [x] .zip files open as folders through the shell; copy out works. Writing into a zip depends on
+      what Windows' zip folder supports
+- [x] Custom key bindings in keys.txt, listed first in the F1 guide (read at startup)
+- [x] Accessibility: names for the address, filter, file lists, sidebar and tab strip;
+      Windows high-contrast colors when contrast mode is on
+- [ ] Later: phrase and indexed content search, other archive formats, a key-binding editor in Settings,
+      a screen-reader walkthrough with Narrator/NVDA (names were checked through MSAA only)
 
 ### Housekeeping
 

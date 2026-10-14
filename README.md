@@ -21,7 +21,11 @@ and shell integrations. See [ROADMAP.md](ROADMAP.md) for measured startup, size 
 - .zip files open as folders through Windows' built-in zip support; copy files out as from any folder
 - Windows' full shell context menu through a separate helper process
 - Settings pages, light/dark/system themes, and an in-app keyboard shortcut guide
-- Session restoration for tabs, folder panes and window layouts
+- Session restoration for tabs, folder panes and window layouts, also after a crash or sign-out
+- Status bar with selection count and size and the drive's free space
+- Folder sizes on demand, size/date/content search conditions, synced and compared split panes
+- Custom key bindings, portable mode, an optional "Open in Kestrel" folder-menu entry
+- Screen-reader names and Windows high-contrast colors
 - An operation-status window and Open terminal here
 
 ## Using the new controls
