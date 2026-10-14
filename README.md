@@ -73,6 +73,7 @@ Press **F1**, or choose **Help > Keyboard shortcuts**, for the in-app guide.
 | F2 | Rename |
 | Del / Shift+Del | Recycle / delete permanently |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste |
+| Ctrl+Z / Ctrl+Y | Undo / redo the last file operation |
 | Ctrl+Shift+N / Ctrl+Shift+C | New folder / copy paths |
 | Ctrl+A | Select all |
 | Ctrl+T / Ctrl+W | New tab / close tab |

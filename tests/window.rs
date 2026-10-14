@@ -696,6 +696,23 @@ fn f2_renames_in_place_and_rejects_bad_names() {
 }
 
 #[test]
+fn ctrl_z_brings_back_a_recycled_file() {
+    let _desktop = desktop();
+    let t = TempDir::new("undo");
+    std::fs::write(t.0.join("x.txt"), "x").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["x.txt"]));
+    select_row(list, 0);
+    command(hwnd, ui::CMD_DELETE);
+    assert!(pump_until(WAIT, || rows(list).is_empty() && ui::running_operations() == 0));
+    ctrl_key(list, VK_Z, false);
+    assert!(pump_until(WAIT, || rows(list) == ["x.txt"]), "{}", status_text(hwnd));
+    assert!(pump_until(WAIT, || ui::running_operations() == 0));
+    close(hwnd);
+}
+
+#[test]
 fn new_folder_appears_selected_and_ready_to_rename() {
     let t = TempDir::new("newdir");
     std::fs::write(t.0.join("x.txt"), "").unwrap();

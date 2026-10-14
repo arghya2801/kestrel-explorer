@@ -72,6 +72,7 @@ Ctrl+Shift+N    New folder\r\n\
 F2    Rename\r\n\
 Delete    Recycle\r\n\
 Shift+Delete    Delete permanently\r\n\
+Ctrl+Z / Ctrl+Y    Undo / redo the last file operation\r\n\
 Shift+F10 / Menu key    Context menu\r\n\
 Shift+right-click    Full Windows context menu\r\n\
 Alt+Enter    Properties\r\n\r\n\

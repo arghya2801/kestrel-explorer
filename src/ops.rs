@@ -3,26 +3,47 @@
 //! operation ends, so it runs on its own worker thread.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
-use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::UI::Shell::{
     FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI,
     FOF_RENAMEONCOLLISION, FOF_SILENT, FOFX_RECYCLEONDELETE, FileOperation, IFileOperation,
-    IFileOperationProgressSink, IShellItem, SHCreateItemFromParsingName,
+    IFileOperationProgressSink, IFileOperationProgressSink_Impl, IShellItem, SHCreateItemFromParsingName,
+    SIGDN, SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
 };
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{HRESULT, HSTRING, PCWSTR, Ref, implement};
 
 use crate::shell::Com;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
-    Delete { paths: Vec<PathBuf>, recycle: bool },
-    Rename { path: PathBuf, name: String },
-    NewFolder { dir: PathBuf },
-    Copy { paths: Vec<PathBuf>, dest: PathBuf },
-    Move { paths: Vec<PathBuf>, dest: PathBuf },
+    Delete {
+        paths: Vec<PathBuf>,
+        recycle: bool,
+    },
+    Rename {
+        path: PathBuf,
+        name: String,
+    },
+    NewFolder {
+        dir: PathBuf,
+    },
+    Copy {
+        paths: Vec<PathBuf>,
+        dest: PathBuf,
+    },
+    Move {
+        paths: Vec<PathBuf>,
+        dest: PathBuf,
+    },
+    /// Undo of a move, rename or recycle: each item (by parsing name; Recycle Bin
+    /// items have no file path) goes back to its original path.
+    Restore {
+        items: Vec<(String, PathBuf)>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,10 +94,31 @@ fn item(path: &Path) -> Result<IShellItem, String> {
 
 const NO_SINK: Option<&IFileOperationProgressSink> = None;
 
-/// Runs `op` to completion. Returns the name of the item to select afterwards
-/// (new or renamed), or `None`. Cancelled by the user counts as success.
+/// Runs `op` to completion and records it for Undo. Returns the name of the item to
+/// select afterwards (new or renamed), or `None`. Cancelled by the user counts as success.
 pub fn run(op: &Op, mode: Mode) -> Result<Option<String>, String> {
-    let label = match op {
+    run_recorded(op, mode, true)
+}
+
+/// `fresh`: a new operation, which ends what Redo could repeat.
+fn run_recorded(op: &Op, mode: Mode, fresh: bool) -> Result<Option<String>, String> {
+    let job = crate::activity::Job::start(label(op));
+    let result = run_inner(op, mode);
+    job.finish(&result.as_ref().map(|r| r.0.clone()).map_err(Clone::clone));
+    let (select, undo) = result?;
+    let mut history = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(undo) = undo {
+        history.undo.push((undo, op.clone()));
+    }
+    if fresh {
+        history.redo.clear();
+    }
+    Ok(select)
+}
+
+/// The operation as the File operations window lists it.
+fn label(op: &Op) -> String {
+    match op {
         Op::Copy { paths, dest } => format!("Copy {} items to {}", paths.len(), dest.display()),
         Op::Move { paths, dest } => format!("Move {} items to {}", paths.len(), dest.display()),
         Op::Delete { paths, recycle } => format!(
@@ -87,14 +129,182 @@ pub fn run(op: &Op, mode: Mode) -> Result<Option<String>, String> {
         ),
         Op::Rename { path, name } => format!("Rename {} to {name}", path.display()),
         Op::NewFolder { dir } => format!("New folder in {}", dir.display()),
-    };
-    let job = crate::activity::Job::start(label);
-    let result = run_inner(op, mode);
-    job.finish(&result);
-    result
+        Op::Restore { items } => format!("Put back {} items", items.len()),
+    }
 }
 
-fn run_inner(op: &Op, mode: Mode) -> Result<Option<String>, String> {
+/// This process's Undo and Redo stacks, like Explorer's: (undo, original) pairs, and originals.
+struct History {
+    undo: Vec<(Op, Op)>,
+    redo: Vec<Op>,
+}
+static HISTORY: Mutex<History> = Mutex::new(History { undo: Vec::new(), redo: Vec::new() });
+
+/// Whether Undo and Redo have anything to do.
+pub fn can_undo_redo() -> (bool, bool) {
+    let h = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    (!h.undo.is_empty(), !h.redo.is_empty())
+}
+
+/// Reverses the latest operation. `None`: nothing to undo.
+pub fn undo(mode: Mode) -> Option<Result<Option<String>, String>> {
+    let (undo, original) = HISTORY.lock().unwrap_or_else(|e| e.into_inner()).undo.pop()?;
+    let job = crate::activity::Job::start(format!("Undo {}", label(&original)));
+    let result = run_inner(&undo, mode).map(|r| r.0);
+    job.finish(&result);
+    let mut h = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    match &result {
+        Ok(_) => h.redo.push(original),
+        Err(_) => h.undo.push((undo, original)),
+    }
+    Some(result)
+}
+
+/// Repeats the latest undone operation. `None`: nothing to redo.
+pub fn redo(mode: Mode) -> Option<Result<Option<String>, String>> {
+    let op = HISTORY.lock().unwrap_or_else(|e| e.into_inner()).redo.pop()?;
+    let result = run_recorded(&op, mode, false);
+    if result.is_err() {
+        HISTORY.lock().unwrap_or_else(|e| e.into_inner()).redo.push(op);
+    }
+    Some(result)
+}
+
+/// What each item became, collected while Windows works, so Undo knows the real names.
+#[implement(IFileOperationProgressSink)]
+struct Sink(std::sync::Arc<Mutex<Vec<Made>>>);
+
+/// An item's source path (none for a new item) and what it became, as a parsing name.
+type Made = (Option<PathBuf>, String);
+
+impl Sink {
+    fn record(&self, from: Ref<IShellItem>, hr: HRESULT, made: Ref<IShellItem>) {
+        if let (true, Some(made)) = (hr.is_ok(), made.as_ref())
+            && let Some(to) = name_of(made, SIGDN_DESKTOPABSOLUTEPARSING)
+        {
+            let from = from.as_ref().and_then(|f| name_of(f, SIGDN_FILESYSPATH)).map(PathBuf::from);
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).push((from, to));
+        }
+    }
+}
+
+fn name_of(item: &IShellItem, kind: SIGDN) -> Option<String> {
+    unsafe {
+        let p = item.GetDisplayName(kind).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as _));
+        s
+    }
+}
+
+type R = windows::core::Result<()>;
+
+impl IFileOperationProgressSink_Impl for Sink_Impl {
+    fn PostRenameItem(
+        &self,
+        _: u32,
+        i: Ref<IShellItem>,
+        _: &PCWSTR,
+        hr: HRESULT,
+        made: Ref<IShellItem>,
+    ) -> R {
+        self.record(i, hr, made);
+        Ok(())
+    }
+    fn PostMoveItem(
+        &self,
+        _: u32,
+        i: Ref<IShellItem>,
+        _: Ref<IShellItem>,
+        _: &PCWSTR,
+        hr: HRESULT,
+        made: Ref<IShellItem>,
+    ) -> R {
+        self.record(i, hr, made);
+        Ok(())
+    }
+    fn PostCopyItem(
+        &self,
+        _: u32,
+        i: Ref<IShellItem>,
+        _: Ref<IShellItem>,
+        _: &PCWSTR,
+        hr: HRESULT,
+        made: Ref<IShellItem>,
+    ) -> R {
+        self.record(i, hr, made);
+        Ok(())
+    }
+    fn PostDeleteItem(&self, _: u32, i: Ref<IShellItem>, hr: HRESULT, made: Ref<IShellItem>) -> R {
+        self.record(i, hr, made);
+        Ok(())
+    }
+    fn PostNewItem(
+        &self,
+        _: u32,
+        _: Ref<IShellItem>,
+        _: &PCWSTR,
+        _: &PCWSTR,
+        _: u32,
+        hr: HRESULT,
+        made: Ref<IShellItem>,
+    ) -> R {
+        self.record(Ref::default(), hr, made);
+        Ok(())
+    }
+    fn StartOperations(&self) -> R {
+        Ok(())
+    }
+    fn FinishOperations(&self, _: HRESULT) -> R {
+        Ok(())
+    }
+    fn PreRenameItem(&self, _: u32, _: Ref<IShellItem>, _: &PCWSTR) -> R {
+        Ok(())
+    }
+    fn PreMoveItem(&self, _: u32, _: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR) -> R {
+        Ok(())
+    }
+    fn PreCopyItem(&self, _: u32, _: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR) -> R {
+        Ok(())
+    }
+    fn PreDeleteItem(&self, _: u32, _: Ref<IShellItem>) -> R {
+        Ok(())
+    }
+    fn PreNewItem(&self, _: u32, _: Ref<IShellItem>, _: &PCWSTR) -> R {
+        Ok(())
+    }
+    fn UpdateProgress(&self, _: u32, _: u32) -> R {
+        Ok(())
+    }
+    fn ResetTimer(&self) -> R {
+        Ok(())
+    }
+    fn PauseTimer(&self) -> R {
+        Ok(())
+    }
+    fn ResumeTimer(&self) -> R {
+        Ok(())
+    }
+}
+
+/// The operation that reverses `op`, given what it produced.
+fn undo_of(op: &Op, made: Vec<Made>) -> Option<Op> {
+    match op {
+        _ if made.is_empty() => None,
+        Op::Delete { recycle: false, .. } | Op::Restore { .. } => None,
+        // Undoing a copy recycles the copies, as Explorer does.
+        Op::Copy { .. } | Op::NewFolder { .. } => Some(Op::Delete {
+            paths: made.into_iter().map(|(_, to)| PathBuf::from(to)).collect(),
+            recycle: true,
+        }),
+        Op::Rename { .. } | Op::Move { .. } | Op::Delete { .. } => {
+            Some(Op::Restore { items: made.into_iter().filter_map(|(from, to)| Some((to, from?))).collect() })
+        }
+    }
+}
+
+/// Runs `op` and returns the item to select and the operation that undoes it.
+fn run_inner(op: &Op, mode: Mode) -> Result<(Option<String>, Option<Op>), String> {
     let _com = Com::init();
     let fail = |what: &str, e: windows::core::Error| format!("Couldn't {what}: {}", e.message());
     unsafe {
@@ -147,13 +357,29 @@ fn run_inner(op: &Op, mode: Mode) -> Result<Option<String>, String> {
                     r.map_err(|e| fail("copy", e))?;
                 }
             }
+            Op::Restore { items } => {
+                for (now, original) in items {
+                    let (Some(parent), Some(name)) = (original.parent(), original.file_name()) else {
+                        continue;
+                    };
+                    fo.MoveItem(&item(Path::new(now))?, &item(parent)?, &HSTRING::from(name), NO_SINK)
+                        .map_err(|e| fail("put the item back", e))?;
+                }
+            }
         }
         fo.SetOperationFlags(flags).map_err(|e| fail("start the operation", e))?;
-        fo.PerformOperations().map_err(|e| fail("finish", e))?;
+        let made = std::sync::Arc::default();
+        let sink: IFileOperationProgressSink = Sink(std::sync::Arc::clone(&made)).into();
+        let advised = fo.Advise(&sink).map_err(|e| fail("start the operation", e))?;
+        let performed = fo.PerformOperations().map_err(|e| fail("finish", e));
+        let _ = fo.Unadvise(advised);
+        // Whatever finished before a failure or cancel can still be undone.
+        let undo = undo_of(op, std::mem::take(&mut *made.lock().unwrap_or_else(|e| e.into_inner())));
+        performed?;
         if fo.GetAnyOperationsAborted().is_ok_and(|b| b.as_bool()) {
-            return Ok(None);
+            return Ok((None, undo));
         }
-        Ok(select)
+        Ok((select, undo))
     }
 }
 
@@ -221,6 +447,43 @@ mod tests {
         run(&Op::Delete { paths: vec![d.join("renamed.txt"), dest.clone()], recycle: false }, Mode::Silent)
             .unwrap();
         assert!(!d.join("renamed.txt").exists() && !dest.exists());
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn every_recorded_operation_undoes() {
+        let d = temp("undo");
+        fs::write(d.join("x.txt"), "x").unwrap();
+        fs::create_dir(d.join("sub")).unwrap();
+        let undo = |op: Op| {
+            let (_, undo) = run_inner(&op, Mode::Silent).unwrap();
+            // Same items, but kept out of the real Recycle Bin.
+            let undo = match undo.expect("undoable") {
+                Op::Delete { paths, .. } => Op::Delete { paths, recycle: false },
+                undo => undo,
+            };
+            run_inner(&undo, Mode::Silent).unwrap();
+        };
+        let names = || {
+            let mut n: Vec<_> = fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
+            n.sort();
+            n
+        };
+        let before = names();
+        undo(Op::Rename { path: d.join("x.txt"), name: "y.txt".into() });
+        assert_eq!(names(), before);
+        // Windows names the copy "x - Copy.txt"; Undo must remove that one, not x.txt.
+        undo(Op::Copy { paths: vec![d.join("x.txt")], dest: d.clone() });
+        assert_eq!(names(), before);
+        undo(Op::NewFolder { dir: d.clone() });
+        assert_eq!(names(), before);
+        undo(Op::Move { paths: vec![d.join("x.txt")], dest: d.join("sub") });
+        assert_eq!(names(), before);
+        undo(Op::Delete { paths: vec![d.join("x.txt")], recycle: true });
+        assert_eq!(fs::read_to_string(d.join("x.txt")).unwrap(), "x", "restored from the Recycle Bin");
+        let (_, none) =
+            run_inner(&Op::Delete { paths: vec![d.join("x.txt")], recycle: false }, Mode::Silent).unwrap();
+        assert_eq!(none, None, "permanent deletes can't be undone");
         fs::remove_dir_all(d).unwrap();
     }
 

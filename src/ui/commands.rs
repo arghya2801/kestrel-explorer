@@ -32,6 +32,8 @@ pub const CMD_SELECT_ALL: usize = 110;
 pub const CMD_MORE_OPTIONS: usize = 111;
 pub const CMD_OPEN_NEW_TAB: usize = 112;
 pub const CMD_PROPERTIES: usize = 113;
+pub const CMD_UNDO: usize = 114;
+pub const CMD_REDO: usize = 115;
 
 /// Runs a menu command. Returns false for ids that aren't ours.
 pub(super) fn run(cmd: usize) -> bool {
@@ -53,6 +55,8 @@ pub(super) fn run(cmd: usize) -> bool {
         CMD_SELECT_ALL => select_all(),
         CMD_MORE_OPTIONS => more_options(None, false),
         CMD_PROPERTIES => more_options(None, true),
+        CMD_UNDO => start_history(false),
+        CMD_REDO => start_history(true),
         CMD_OPEN_NEW_TAB => {
             if let Some((dir, true)) = selected_paths().into_iter().next() {
                 super::tabbar::new_tab(Some(dir));
@@ -129,6 +133,9 @@ pub(super) fn context_menu(hwnd: HWND, lp: LPARAM) {
         add(CMD_RENAME, w!("Rena&me\tF2"), has_selection);
         add(CMD_DELETE, w!("&Delete\tDel"), has_selection);
         add(CMD_NEW_FOLDER, w!("New &folder\tCtrl+Shift+N"), true);
+        let (can_undo, can_redo) = ops::can_undo_redo();
+        add(CMD_UNDO, w!("&Undo\tCtrl+Z"), can_undo);
+        add(CMD_REDO, w!("Red&o\tCtrl+Y"), can_redo);
         line();
         add(CMD_COPY_PATH, w!("Copy &as path\tCtrl+Shift+C"), has_selection);
         add(CMD_SHOW_IN_EXPLORER, w!("Show in &Explorer"), true);
@@ -261,6 +268,27 @@ pub(super) fn transfer(paths: Vec<PathBuf>, dest: PathBuf, move_: bool) {
 }
 
 /// Runs `op` on its own thread; `edit` starts renaming the item it creates.
+/// Undo (or Redo) of the latest file operation in this process, on a worker like any operation.
+fn start_history(redo: bool) {
+    let Some((events, hwnd, view, dir)) = with_app(|a| {
+        (a.events.clone(), a.hwnd.0 as isize, a.view.id, a.view.browser.dir().map(PathBuf::from))
+    }) else {
+        return;
+    };
+    let running = super::OpGuard::new();
+    spawn("undo", move || {
+        let _running = running;
+        let mode = Mode::Interactive(hwnd);
+        match crash::guard(|| if redo { ops::redo(mode) } else { ops::undo(mode) }) {
+            Some(Some(result)) => events.send(Event::OpDone { view, dir, result, edit: false }),
+            Some(None) => {
+                events.send(Event::Message(format!("Nothing to {}", if redo { "redo" } else { "undo" })))
+            }
+            None => events.send(Event::Message("Internal error during undo.".into())),
+        }
+    });
+}
+
 fn start_op(op: Op, edit: bool) {
     let Some((events, hwnd, view, dir)) = with_app(|a| {
         (a.events.clone(), a.hwnd.0 as isize, a.view.id, a.view.browser.dir().map(PathBuf::from))

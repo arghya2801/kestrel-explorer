@@ -570,6 +570,8 @@ fn on_key(msg: &MSG) -> bool {
         VK_X if in_list && ctrl => _ = commands::run(commands::CMD_CUT),
         VK_V if in_list && ctrl => _ = commands::run(commands::CMD_PASTE),
         VK_A if in_list && ctrl => _ = commands::run(commands::CMD_SELECT_ALL),
+        VK_Z if in_list && ctrl => _ = commands::run(commands::CMD_UNDO),
+        VK_Y if in_list && ctrl => _ = commands::run(commands::CMD_REDO),
         VK_N if !in_address && ctrl && shift => _ = commands::run(commands::CMD_NEW_FOLDER),
         VK_F5 => run(Browser::refresh),
         VK_F4 => focus_address(),
