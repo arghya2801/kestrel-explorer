@@ -20,7 +20,7 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Tag matches Cargo.toml
         if: startsWith(github.ref, 'refs/tags/v')
@@ -64,8 +64,8 @@ jobs:
           Copy-Item target/release/kestrel.exe "dist/kestrel-$env:VERSION-x64.exe"
           Compress-Archive target/release/kestrel.pdb "dist/kestrel-$env:VERSION-x64-symbols.zip"
           Get-ChildItem dist | Get-FileHash -Algorithm SHA256 |
-            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
-            Set-Content dist/SHA256SUMS.txt
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)`n" } |
+            Set-Content -NoNewline dist/SHA256SUMS.txt  # LF, so sha256sum -c works
 
       - name: Publish
         if: startsWith(github.ref, 'refs/tags/v')
