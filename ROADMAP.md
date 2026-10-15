@@ -2,7 +2,7 @@
 
 [HANDOFF.md](HANDOFF.md) records validation commands and remaining release checks.
 
-## Built through 1.2.0
+## Built through 1.2.1
 
 | Area | Implemented |
 |---|---|
@@ -14,7 +14,7 @@
 | Persistence | Validated atomic preferences, normal-exit tab/window sessions and missing-folder fallback |
 | Diagnostics | Operation status, crash logs/dumps, watchdog, startup probe and expanded stress runner |
 
-Released as 1.2.0; see CHANGELOG.md.
+Latest release 1.2.1; see CHANGELOG.md.
 
 ## Current measurements, 2026-10-15 (first paint, size, tests) and 2026-10-11 (the rest)
 

@@ -1,6 +1,6 @@
 # Kestrel handoff
 
-Updated 2026-10-15. Version 1.2.0; see CHANGELOG.md.
+Updated 2026-10-15. Version 1.2.1; see CHANGELOG.md.
 [ROADMAP.md](ROADMAP.md) holds what is built, what remains and the measurements.
 
 ## Validation

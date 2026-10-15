@@ -6,6 +6,8 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-15
+
 ### Added
 - Middle-click a tab to close it.
 
