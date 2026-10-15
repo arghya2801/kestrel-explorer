@@ -1,4 +1,4 @@
-# Every push and PR is linted, tested and built. A tag like v1.1.0 also publishes a GitHub release.
+# Every push and PR is linted, tested and built. A tag like v1.2.0 also builds a draft GitHub release.
 name: ci
 
 on:
@@ -71,4 +71,4 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist).FullName --title "Kestrel $env:VERSION" --generate-notes --verify-tag
+        run: gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist).FullName --title "Kestrel v$env:VERSION" --draft --generate-notes --verify-tag

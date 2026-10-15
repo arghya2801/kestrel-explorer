@@ -1,6 +1,6 @@
 # Kestrel handoff
 
-Updated 2026-10-15. Package, lockfile and Windows resources are at 1.1.0; no release tag has been pushed.
+Updated 2026-10-15. Version 1.2.0; see CHANGELOG.md.
 [ROADMAP.md](ROADMAP.md) holds what is built, what remains and the measurements.
 
 ## Validation
@@ -38,7 +38,7 @@ Do not use the real user data directory for regression tests; the sign-out windo
 ## Releasing
 
 .github/workflows/ci.yml lints, unit-tests and builds every push to main and every PR.
-Pushing a tag `vX.Y.Z` that matches Cargo.toml also publishes a GitHub release with the exe,
+Pushing a tag `vX.Y.Z` that matches Cargo.toml also builds a draft GitHub release with the exe,
 a symbols zip (for crash dumps) and SHA256SUMS. Window tests need a desktop, so run them locally
 before tagging. Set the `SIGNING_PFX` (base64) and `SIGNING_PASSWORD` secrets to sign releases.
 

@@ -2,7 +2,7 @@
 
 [HANDOFF.md](HANDOFF.md) records validation commands and remaining release checks.
 
-## Built through 1.1.0
+## Built through 1.2.0
 
 | Area | Implemented |
 |---|---|
@@ -14,7 +14,7 @@
 | Persistence | Validated atomic preferences, normal-exit tab/window sessions and missing-folder fallback |
 | Diagnostics | Operation status, crash logs/dumps, watchdog, startup probe and expanded stress runner |
 
-1.1.0 version metadata is set locally. Release tagging awaits the manual checks in HANDOFF.
+Released as 1.2.0; see CHANGELOG.md.
 
 ## Current measurements, 2026-10-15 (first paint, size, tests) and 2026-10-11 (the rest)
 
@@ -88,7 +88,7 @@ Items are ordered by priority inside each phase.
 - [x] Save the session on Windows sign-out/restart (`WM_QUERYENDSESSION`/`WM_ENDSESSION`)
 - [x] Checkpoint the session every 30 seconds, so a crash or kill keeps the tabs
 - [ ] Finish the manual checks: cold-cache startup, physical high-DPI/monitors, SMB and clipboard
-- [ ] Tag a release through the job. The features below suggest 1.2.0 rather than 1.1.0
+- [x] Tag a release through the job: v1.2.0, 2026-10-15
 
 ### 1.2: everyday-use gaps versus Explorer
 

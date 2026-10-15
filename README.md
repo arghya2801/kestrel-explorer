@@ -7,7 +7,7 @@ One executable, no separate runtime.</p>
 
 Kestrel keeps folder listing, search, file operations and icon loading on background workers.
 Browse independent folders side by side, switch between tabs, and use Windows' own file operations
-and shell integrations. See [ROADMAP.md](ROADMAP.md) for measured startup, size and stress results.
+and shell integrations. See [ROADMAP.md](ROADMAP.md) for measured startup, size and stress results and [CHANGELOG.md](CHANGELOG.md) for changes.
 
 ## Features
 
