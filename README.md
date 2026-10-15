@@ -90,6 +90,7 @@ Press **F1**, or choose **Help > Keyboard shortcuts**, for the in-app guide.
 | Ctrl+Shift+N / Ctrl+Shift+C | New folder / copy paths |
 | Ctrl+A | Select all |
 | Ctrl+T / Ctrl+W | New tab / close tab |
+| Middle-click a tab | Close that tab |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+N | New window, side by side |
 | Ctrl+Shift+S / F6 | Toggle split / focus the other pane |

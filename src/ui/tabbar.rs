@@ -29,8 +29,9 @@ pub(super) unsafe fn create(parent: HWND) -> Result<HWND> {
     // Roomier tabs than the control's default.
     let (x, y) = (super::scale(parent, 16), super::scale(parent, 4));
     unsafe {
-        SendMessageW(strip, TCM_SETPADDING, None, Some(LPARAM((y << 16 | x) as isize)));
+        SendMessageW(strip, TCM_SETPADDING, None, Some(LPARAM(((y << 16) | x) as isize)));
         SendMessageW(strip, TCM_SETMINTABWIDTH, None, Some(LPARAM(super::scale(parent, 96) as isize)));
+        let _ = windows::Win32::UI::Shell::SetWindowSubclass(strip, Some(middle_click), 3, 0);
     }
     insert_label(strip, 0, "");
     Ok(strip)
@@ -211,6 +212,28 @@ pub(super) fn switch_to(to: usize) {
     unsafe {
         let _ = SetFocus(Some(list));
     }
+}
+
+/// Middle-clicking a tab closes it, as in browsers.
+unsafe extern "system" fn middle_click(
+    strip: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    if msg == WM_MBUTTONUP {
+        let pt = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
+        let mut hit = TCHITTESTINFO { pt, ..Default::default() };
+        let tab =
+            unsafe { SendMessageW(strip, TCM_HITTEST, None, Some(LPARAM(&mut hit as *mut _ as isize))) }.0;
+        if let Ok(tab) = usize::try_from(tab) {
+            crate::crash::guard(|| close_tab(tab));
+            return LRESULT(0);
+        }
+    }
+    unsafe { windows::Win32::UI::Shell::DefSubclassProc(strip, msg, wp, lp) }
 }
 
 /// Notifications from the tab strip.

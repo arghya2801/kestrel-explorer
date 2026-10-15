@@ -1163,6 +1163,28 @@ fn tabs_keep_their_own_folders() {
     close(hwnd);
 }
 
+#[test]
+fn middle_click_closes_the_tab_under_the_cursor() {
+    let t = TempDir::new("middle");
+    std::fs::create_dir(t.0.join("sub")).unwrap();
+    let hwnd = open(&t.0);
+    assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()) == ["sub"]));
+    ctrl_key(ui::active_list().unwrap(), VK_T, false);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
+    activate(hwnd, ui::active_list().unwrap(), 0);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).get(1).is_some_and(|l| l == "sub")));
+    // Middle-click the first (inactive) tab.
+    let strip = find(hwnd, w!("SysTabControl32"));
+    let mut r = windows::Win32::Foundation::RECT::default();
+    unsafe {
+        SendMessageW(strip, TCM_GETITEMRECT, Some(WPARAM(0)), Some(LPARAM(&mut r as *mut _ as isize)));
+        let at = ((((r.top + r.bottom) / 2) << 16) | ((r.left + r.right) / 2)) as isize;
+        SendMessageW(strip, WM_MBUTTONUP, None, Some(LPARAM(at)));
+    }
+    assert!(pump_until(WAIT, || tab_labels(hwnd) == ["sub"]), "{:?}", tab_labels(hwnd));
+    close(hwnd);
+}
+
 // ---- dark mode ----
 
 /// Brightness (0-255) of the window's pixel at client point (x, y), rendered off-screen.

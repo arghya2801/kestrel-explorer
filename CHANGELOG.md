@@ -6,6 +6,9 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ## [Unreleased]
 
+### Added
+- Middle-click a tab to close it.
+
 ### Changed
 - A redesigned top bar: flat buttons with icons, a rounded address bar whose breadcrumbs fit their names, a search-style filter box, toolbar groups with separators, and tabs that open into the folder below. Focused text boxes show a line in your Windows accent color. Light and dark themes both get the new look; high contrast keeps Windows' own drawing.
 

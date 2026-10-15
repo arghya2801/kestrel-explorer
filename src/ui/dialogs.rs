@@ -96,6 +96,7 @@ Esc in the address    Restore the current address\r\n\r\n\
 Tabs and windows\r\n\
 Ctrl+T    New tab\r\n\
 Ctrl+W    Close the active tab (the last tab stays)\r\n\
+Middle-click a tab    Close that tab\r\n\
 Ctrl+Tab / Ctrl+Shift+Tab    Next / previous tab\r\n\
 Ctrl+N    New window, side by side\r\n\
 Ctrl+Shift+S    Toggle two folder panes\r\n\
