@@ -39,19 +39,25 @@ pub const SYNC_PANES: usize = 232;
 pub const COMPARE: usize = 233;
 const RELEASES: &str = "https://github.com/arghya2801/kestrel-explorer/releases/latest";
 
-const BUTTONS: &[(usize, &str, i32)] = &[
-    (commands::CMD_NEW_FOLDER, "New folder", 94),
-    (commands::CMD_CUT, "Cut", 44),
-    (commands::CMD_COPY, "Copy", 52),
-    (commands::CMD_PASTE, "Paste", 54),
-    (commands::CMD_RENAME, "Rename", 70),
-    (commands::CMD_DELETE, "Delete", 62),
-    (REFRESH, "Refresh", 70),
-    (SPLIT, "Split", 52),
-    (VIEW, "View", 55),
-    (MORE, "More", 58),
-    (SETTINGS, "Settings", 72),
-    (HELP, "Help", 50),
+/// Logical y where the toolbar row ends and the tab strip starts.
+pub(super) const BOTTOM: i32 = 74;
+const TOP: i32 = 40;
+const HEIGHT: i32 = 32;
+
+/// Command, label, and group: a separator is drawn between groups.
+const BUTTONS: &[(usize, &str, u8)] = &[
+    (commands::CMD_NEW_FOLDER, "New folder", 0),
+    (commands::CMD_CUT, "Cut", 1),
+    (commands::CMD_COPY, "Copy", 1),
+    (commands::CMD_PASTE, "Paste", 1),
+    (commands::CMD_RENAME, "Rename", 1),
+    (commands::CMD_DELETE, "Delete", 1),
+    (REFRESH, "Refresh", 2),
+    (SPLIT, "Split", 2),
+    (VIEW, "View", 2),
+    (MORE, "More", 3),
+    (SETTINGS, "Settings", 3),
+    (HELP, "Help", 3),
 ];
 
 pub(super) unsafe fn create(parent: HWND) -> Result<Vec<HWND>> {
@@ -69,23 +75,55 @@ pub(super) fn owns(hwnd: HWND) -> bool {
 
 pub(super) fn layout(parent: HWND, width: i32) {
     let Some(buttons) = with_app(|a| a.toolbar.clone()) else { return };
-    let pad = scale(parent, 4);
-    let reserve: i32 = BUTTONS.iter().rev().take(3).map(|b| scale(parent, b.2) + pad).sum();
-    let mut x = pad;
-    for (i, &(id, _, logical_width)) in BUTTONS.iter().enumerate() {
-        let w = scale(parent, logical_width);
+    let (gap, group_gap) = (scale(parent, 2), scale(parent, 13));
+    let widths: Vec<i32> = buttons
+        .iter()
+        .zip(BUTTONS)
+        .map(|(&b, &(id, _, _))| super::chrome::button_width(parent, b, id))
+        .collect();
+    // The pinned last group, plus the separator before it.
+    let reserve: i32 = widths.iter().rev().take(3).map(|w| w + gap).sum::<i32>() + group_gap;
+    let mut x = scale(parent, 6);
+    let mut group = BUTTONS[0].2;
+    for (i, &(id, _, g)) in BUTTONS.iter().enumerate() {
         let pinned = matches!(id, MORE | SETTINGS | HELP);
-        let visible = pinned || x + w + reserve <= width;
+        if g != group {
+            x += group_gap - gap;
+        }
+        let visible = pinned || x + widths[i] + reserve <= width;
         unsafe {
             let _ = ShowWindow(buttons[i], if visible { SW_SHOWNA } else { SW_HIDE });
             if visible {
-                let _ = MoveWindow(buttons[i], x, scale(parent, 36), w, scale(parent, 28), true);
+                let _ = MoveWindow(buttons[i], x, scale(parent, TOP), widths[i], scale(parent, HEIGHT), true);
             }
         }
         if visible {
-            x += w + pad;
+            x += widths[i] + gap;
+            group = g;
+        } else if g != group {
+            x -= group_gap - gap;
         }
     }
+}
+
+/// Hairlines between visible groups, in the parent's client coordinates.
+pub(super) fn separators(parent: HWND) -> Vec<RECT> {
+    let Some(buttons) = with_app(|a| a.toolbar.clone()) else { return Vec::new() };
+    let visible: Vec<(RECT, u8)> = buttons
+        .iter()
+        .zip(BUTTONS)
+        .filter(|(b, _)| unsafe { IsWindowVisible(**b) }.as_bool())
+        .map(|(&b, &(_, _, g))| (super::client_rect_of(parent, b), g))
+        .collect();
+    let inset = scale(parent, 8);
+    visible
+        .windows(2)
+        .filter(|w| w[0].1 != w[1].1)
+        .map(|w| {
+            let x = (w[0].0.right + w[1].0.left) / 2;
+            RECT { left: x, top: w[0].0.top + inset, right: x + 1, bottom: w[0].0.bottom - inset }
+        })
+        .collect()
 }
 
 pub(super) fn enabled(id: usize) -> bool {

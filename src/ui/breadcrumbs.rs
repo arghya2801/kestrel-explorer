@@ -1,6 +1,9 @@
 //! Clickable ancestors in the address row; Ctrl+L keeps the ordinary editable path.
 use super::{child, with_app};
-use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::*};
+use windows::Win32::{
+    Foundation::{HWND, RECT},
+    UI::WindowsAndMessaging::*,
+};
 use windows::core::{HSTRING, w};
 pub(super) const EDIT: usize = 399;
 const FIRST: usize = 400;
@@ -54,7 +57,7 @@ pub(super) fn update() {
             child(
                 hwnd,
                 w!("BUTTON"),
-                &HSTRING::from(format!("{} ›", text.replace('&', "&&"))),
+                &HSTRING::from(text.replace('&', "&&")),
                 WS_TABSTOP,
                 WINDOW_EX_STYLE(0),
                 FIRST + i,
@@ -82,39 +85,50 @@ pub(super) fn update() {
     super::layout(hwnd);
 }
 pub(super) fn layout() {
-    let Some((hwnd, address, edit, editing, buttons)) = with_app(|a| {
+    let Some((hwnd, address, edit, editing, buttons, field)) = with_app(|a| {
         (
             a.hwnd,
             a.address,
             a.address_edit_button,
             a.address_editing,
             a.breadcrumbs.iter().map(|p| p.0).collect::<Vec<_>>(),
+            a.fields[0],
         )
     }) else {
         return;
     };
-    let r = super::client_rect_of(hwnd, address);
-    let edit_width = super::scale(hwnd, 48).min(r.right - r.left);
+    // Crumbs and the edit button sit inside the address field, inset by `gap`.
+    let gap = super::scale(hwnd, 2);
+    let r = RECT {
+        left: field.left + gap,
+        top: field.top + gap,
+        right: field.right - gap,
+        bottom: field.bottom - gap,
+    };
+    let edit_width = super::scale(hwnd, 32).min(r.right - r.left);
     let available = (r.right - r.left - edit_width).max(0);
-    let count = buttons.len().min((available / super::scale(hwnd, 64).max(1)) as usize);
-    let first = buttons.len().saturating_sub(count);
+    let last = buttons.len().saturating_sub(1);
+    let widths: Vec<i32> =
+        buttons.iter().enumerate().map(|(i, &b)| super::chrome::crumb_width(hwnd, b, i == last)).collect();
+    // The nearest ancestors that fit; the current folder always shows, squeezed if need be.
+    let mut first = buttons.len();
+    let mut used = 0;
+    while first > 0 && (first == buttons.len() || used + widths[first - 1] <= available) {
+        first -= 1;
+        used += widths[first];
+    }
     unsafe {
         let _ = ShowWindow(address, if editing || buttons.is_empty() { SW_SHOWNA } else { SW_HIDE });
         let _ = ShowWindow(edit, if editing || buttons.is_empty() { SW_HIDE } else { SW_SHOWNA });
         let _ = MoveWindow(edit, r.right - edit_width, r.top, edit_width, r.bottom - r.top, true);
+        let mut x = r.left;
         for (i, button) in buttons.into_iter().enumerate() {
-            let show = !editing && i >= first && count > 0;
+            let show = !editing && i >= first;
             let _ = ShowWindow(button, if show { SW_SHOWNA } else { SW_HIDE });
             if show {
-                let width = available / count as i32;
-                let _ = MoveWindow(
-                    button,
-                    r.left + (i - first) as i32 * width,
-                    r.top,
-                    width,
-                    r.bottom - r.top,
-                    true,
-                );
+                let width = widths[i].min(r.left + available - x).max(0);
+                let _ = MoveWindow(button, x, r.top, width, r.bottom - r.top, true);
+                x += width;
             }
         }
     }

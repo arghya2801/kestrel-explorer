@@ -26,6 +26,12 @@ pub(super) unsafe fn create(parent: HWND) -> Result<HWND> {
     let strip = unsafe {
         child(parent, WC_TABCONTROLW, w!(""), WINDOW_STYLE(TCS_FOCUSNEVER), WINDOW_EX_STYLE(0), 0)?
     };
+    // Roomier tabs than the control's default.
+    let (x, y) = (super::scale(parent, 16), super::scale(parent, 4));
+    unsafe {
+        SendMessageW(strip, TCM_SETPADDING, None, Some(LPARAM((y << 16 | x) as isize)));
+        SendMessageW(strip, TCM_SETMINTABWIDTH, None, Some(LPARAM(super::scale(parent, 96) as isize)));
+    }
     insert_label(strip, 0, "");
     Ok(strip)
 }

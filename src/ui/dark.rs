@@ -1,7 +1,8 @@
 //! Light and dark appearance. Uses the documented dark title bar attribute,
 //! control color messages, and the "DarkMode_*" visual-style names (which
 //! fall back to the normal look if Windows ever drops them). Controls with no
-//! dark style (tab strip, status bar) are painted here in dark mode.
+//! dark style are painted here: the status bar in dark mode, the tab strip always
+//! (except in high contrast).
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
@@ -200,7 +201,7 @@ unsafe fn paint_header(nm: &NMCUSTOMDRAW, palette: Palette) {
     }
 }
 
-/// Paints the tab strip and status bar ourselves in dark mode; light mode is untouched.
+/// Paints the tab strip, and in dark mode the status bar, ourselves.
 unsafe extern "system" fn paint_dark(
     hwnd: HWND,
     msg: u32,
@@ -209,8 +210,10 @@ unsafe extern "system" fn paint_dark(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
-    let palette = crate::crash::guard(|| with_app(|a| a.palette)).flatten();
-    let Some(palette) = palette.filter(|p| p.dark) else {
+    let palette = crate::crash::guard(|| with_app(|a| (a.palette, a.tab_strip == hwnd))).flatten();
+    let Some((palette, _)) =
+        palette.filter(|&(p, strip)| if strip { !crate::theme::high_contrast() } else { p.dark })
+    else {
         return unsafe { DefSubclassProc(hwnd, msg, wp, lp) };
     };
     match msg {
@@ -239,15 +242,33 @@ unsafe fn paint(hwnd: HWND, p: Palette) {
         let mut class = [0u16; 32];
         let n = GetClassNameW(hwnd, &mut class) as usize;
         if String::from_utf16_lossy(&class[..n]) == "SysTabControl32" {
-            let field = CreateSolidBrush(COLORREF(p.field));
+            // A base line along the bottom; the selected tab opens into the content below it.
+            let base = CreateSolidBrush(COLORREF(super::chrome::stroke(&p)));
+            let line = RECT { top: client.bottom - 1, ..client };
+            FillRect(hdc, &line, base);
+            let _ = DeleteObject(HGDIOBJ(base.0));
             let count = SendMessageW(hwnd, TCM_GETITEMCOUNT, None, None).0.max(0) as usize;
             let selected = SendMessageW(hwnd, TCM_GETCURSEL, None, None).0;
+            let radius = super::scale(hwnd, 6);
             for i in 0..count {
                 let mut r = RECT::default();
                 SendMessageW(hwnd, TCM_GETITEMRECT, Some(WPARAM(i)), Some(LPARAM(&mut r as *mut _ as isize)));
-                if i as isize == selected {
-                    FillRect(hdc, &r, field);
+                r.top = client.top + super::scale(hwnd, 4);
+                r.bottom = client.bottom;
+                let selected = i as isize == selected;
+                if selected {
+                    let tab = RECT { bottom: r.bottom + radius, ..r };
+                    super::chrome::round_outline(hdc, &tab, p.window, super::chrome::stroke(&p), radius);
+                    let gap =
+                        RECT { left: r.left + 1, top: r.bottom - 1, right: r.right - 1, bottom: r.bottom };
+                    let fill = CreateSolidBrush(COLORREF(p.window));
+                    FillRect(hdc, &gap, fill);
+                    let _ = DeleteObject(HGDIOBJ(fill.0));
                 }
+                SetTextColor(
+                    hdc,
+                    COLORREF(if selected { p.text } else { crate::theme::mix(p.chrome, p.text, 70) }),
+                );
                 let mut buf = [0u16; 260];
                 let mut item = TCITEMW {
                     mask: TCIF_TEXT,
@@ -257,14 +278,15 @@ unsafe fn paint(hwnd: HWND, p: Palette) {
                 };
                 SendMessageW(hwnd, TCM_GETITEMW, Some(WPARAM(i)), Some(LPARAM(&mut item as *mut _ as isize)));
                 let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
+                r.left += super::scale(hwnd, 6);
+                r.right -= super::scale(hwnd, 6);
                 DrawTextW(
                     hdc,
                     &mut buf[..len],
                     &mut r,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
                 );
             }
-            let _ = DeleteObject(HGDIOBJ(field.0));
         } else {
             // Status bar: one text part.
             let mut buf = [0u16; 1024];

@@ -63,6 +63,35 @@ pub struct Palette {
     pub field: u32,
     /// Toolbar, tab strip and status bar.
     pub chrome: u32,
+    /// Windows' accent color, for focus lines and the active tab.
+    pub accent: u32,
+}
+
+/// `a` blended toward `b` by `percent` (0 to 100), per channel.
+pub fn mix(a: u32, b: u32, percent: u32) -> u32 {
+    (0..3).fold(0, |c, i| {
+        let (x, y) = ((a >> (i * 8)) & 0xFF, (b >> (i * 8)) & 0xFF);
+        c | ((x * (100 - percent) + y * percent) / 100) << (i * 8)
+    })
+}
+
+/// The user's Windows accent color (COLORREF), lightened on dark backgrounds as Windows does.
+fn accent(dark: bool) -> u32 {
+    let mut value = 0x00D47800u32; // Windows' default blue, #0078D4
+    let mut size = 4u32;
+    let _ = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\DWM"),
+            w!("AccentColor"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut value as *mut u32 as *mut _),
+            Some(&mut size),
+        )
+    };
+    let value = value & 0x00FF_FFFF;
+    if dark { mix(value, 0x00FFFFFF, 35) } else { value }
 }
 
 /// Whether Windows' high-contrast mode is on.
@@ -90,16 +119,32 @@ impl Palette {
             return Palette::system();
         }
         if dark {
-            Palette { dark, window: 0x00202020, text: 0x00F0F0F0, field: 0x00383838, chrome: 0x002B2B2B }
+            Palette {
+                dark,
+                window: 0x00202020,
+                text: 0x00F0F0F0,
+                field: 0x00383838,
+                chrome: 0x002B2B2B,
+                accent: accent(true),
+            }
         } else {
-            Palette { dark, window: 0x00FFFFFF, text: 0x00000000, field: 0x00FFFFFF, chrome: 0x00F0F0F0 }
+            Palette {
+                dark,
+                window: 0x00FFFFFF,
+                text: 0x00000000,
+                field: 0x00FFFFFF,
+                chrome: 0x00F3F3F3,
+                accent: accent(false),
+            }
         }
     }
 
     /// Windows' own colors, as high contrast requires. Never "dark": dark control themes
     /// would override the contrast theme.
     pub fn system() -> Palette {
-        use windows::Win32::Graphics::Gdi::{COLOR_BTNFACE, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor};
+        use windows::Win32::Graphics::Gdi::{
+            COLOR_BTNFACE, COLOR_HIGHLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor,
+        };
         let color = |c| unsafe { GetSysColor(c) };
         Palette {
             dark: false,
@@ -107,6 +152,7 @@ impl Palette {
             text: color(COLOR_WINDOWTEXT),
             field: color(COLOR_WINDOW),
             chrome: color(COLOR_BTNFACE),
+            accent: color(COLOR_HIGHLIGHT),
         }
     }
 }
@@ -148,6 +194,13 @@ mod tests {
         assert!(!p.dark);
         assert_eq!((p.window, p.text), unsafe { (GetSysColor(COLOR_WINDOW), GetSysColor(COLOR_WINDOWTEXT)) });
         let _ = high_contrast();
+    }
+
+    #[test]
+    fn mix_blends_each_channel() {
+        assert_eq!(mix(0x000000, 0xFFFFFF, 0), 0x000000);
+        assert_eq!(mix(0x000000, 0xFFFFFF, 100), 0xFFFFFF);
+        assert_eq!(mix(0x0000FF, 0xFF0000, 50), 0x7F007F);
     }
 
     #[test]

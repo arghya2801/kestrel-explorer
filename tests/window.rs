@@ -1865,7 +1865,7 @@ fn pins_breadcrumbs_and_address_editing_work_together() {
             .any(|(p, _)| p == &t.0.join("one").join("two").display().to_string())
     );
     let parent = (400..405)
-        .find(|&id| unsafe { GetDlgItem(Some(hwnd), id) }.ok().is_some_and(|h| window_text_of(h) == "one ›"))
+        .find(|&id| unsafe { GetDlgItem(Some(hwnd), id) }.ok().is_some_and(|h| window_text_of(h) == "one"))
         .unwrap();
     command(hwnd, parent as usize);
     assert!(pump_until(WAIT, || rows(list) == ["two"]));

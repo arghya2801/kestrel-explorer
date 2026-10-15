@@ -47,6 +47,7 @@ use crate::watch::Watcher;
 use crate::{crash, format, shell};
 
 mod breadcrumbs;
+mod chrome;
 mod commands;
 mod dark;
 mod dialogs;
@@ -211,6 +212,8 @@ struct App {
     address_edit_button: HWND,
     address_editing: bool,
     breadcrumbs: Vec<(HWND, PathBuf)>,
+    /// The address and filter fields drawn around their controls (`chrome::paint`).
+    fields: [RECT; 2],
     filter: HWND,
     syncing_filter: bool,
     buttons: [HWND; 3],
@@ -432,29 +435,18 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
 
         let none = WINDOW_EX_STYLE::default();
         let button = |text, id| child(hwnd, WC_BUTTONW, text, WS_TABSTOP | WS_DISABLED, none, id);
-        let buttons = [button(w!("←"), ID_BACK)?, button(w!("→"), ID_FORWARD)?, button(w!("↑"), ID_UP)?];
-        let address = child(
-            hwnd,
-            WC_EDITW,
-            w!(""),
-            WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-            WS_EX_CLIENTEDGE,
-            0,
-        )?;
-        let filter = child(
-            hwnd,
-            WC_EDITW,
-            w!(""),
-            WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-            WS_EX_CLIENTEDGE,
-            0,
-        )?;
+        let buttons =
+            [button(w!("Back"), ID_BACK)?, button(w!("Forward"), ID_FORWARD)?, button(w!("Up"), ID_UP)?];
+        let address =
+            child(hwnd, WC_EDITW, w!(""), WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32), none, 0)?;
+        let filter =
+            child(hwnd, WC_EDITW, w!(""), WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32), none, 0)?;
         // Grey hint text while empty; shown even when focused.
         SendMessageW(
             filter,
             EM_SETCUEBANNER,
             Some(WPARAM(1)),
-            Some(LPARAM(w!("Filter  (Enter: search subfolders)").0 as isize)),
+            Some(LPARAM(w!("Filter (Enter searches subfolders)").0 as isize)),
         );
         let font = message_font(hwnd);
         let target = hwnd.0 as isize;
@@ -497,6 +489,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 address_edit_button,
                 address_editing: false,
                 breadcrumbs: Vec::new(),
+                fields: [RECT::default(); 2],
                 buttons,
                 toolbar: toolbar_buttons,
                 startup_override: None,
@@ -769,6 +762,14 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 // Only clicks on our buttons and menu picks. Edit controls (the address
                 // bar, the rename box) also send WM_COMMAND, with ids that can collide.
                 let (id, code, from) = (wp.0 & 0xFFFF, (wp.0 >> 16) & 0xFFFF, lp.0);
+                // The focused field's accent line comes and goes.
+                if matches!(code as u32, EN_SETFOCUS | EN_KILLFOCUS)
+                    && let Some(fields) = with_app(|a| a.fields)
+                {
+                    for f in fields {
+                        let _ = InvalidateRect(Some(hwnd), Some(&f), true);
+                    }
+                }
                 // Typing in the filter box narrows the list at once.
                 if code == EN_CHANGE as usize && with_app(|a| a.filter.0 as isize) == Some(from) {
                     if with_app(|a| a.syncing_filter) == Some(true) {
@@ -821,7 +822,10 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
                 dark::edit_colors(HDC(wp.0 as _)).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
             }
-            WM_ERASEBKGND if dark::erase(hwnd, HDC(wp.0 as _)) => LRESULT(1),
+            WM_ERASEBKGND if dark::erase(hwnd, HDC(wp.0 as _)) => {
+                chrome::paint(hwnd, HDC(wp.0 as _));
+                LRESULT(1)
+            }
             // Windows' light/dark app setting changed.
             WM_SETTINGCHANGE => {
                 let area = if lp.0 == 0 {
@@ -979,6 +983,9 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 
 /// `None` = not handled, let DefWindowProc run.
 unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
+    if hdr.code == NM_CUSTOMDRAW && chrome::is_top_button(hdr.hwndFrom) {
+        return unsafe { chrome::draw_button(&*(lp.0 as *const NMCUSTOMDRAW)) };
+    }
     let (_list, tree, strip) = with_app(|a| (a.view.list, a.tree, a.tab_strip))?;
     if hdr.hwndFrom == strip {
         return tabbar::on_notify(hdr);
@@ -2058,16 +2065,41 @@ fn layout(hwnd: HWND) {
         let (mut client, mut sr) = (RECT::default(), RECT::default());
         let _ = GetClientRect(hwnd, &mut client);
         let _ = GetWindowRect(status, &mut sr);
-        let (pad, bar, bw) = (scale(hwnd, 4), scale(hwnd, 28), scale(hwnd, 32));
+        let (pad, bar, bw) = (scale(hwnd, 6), scale(hwnd, 32), scale(hwnd, 36));
         for (i, b) in buttons.iter().enumerate() {
-            let _ = MoveWindow(*b, pad + i as i32 * (bw + pad), pad, bw, bar, true);
+            let _ = MoveWindow(*b, pad + i as i32 * (bw + scale(hwnd, 2)), pad, bw, bar, true);
         }
-        let ax = pad + 3 * (bw + pad);
-        let fw = scale(hwnd, 240).min((client.right / 3).max(0));
-        let _ = MoveWindow(address, ax, pad, (client.right - ax - fw - 2 * pad).max(0), bar, true);
-        let _ = MoveWindow(filter, client.right - fw - pad, pad, fw, bar, true);
+        let ax = pad + 3 * (bw + scale(hwnd, 2)) + scale(hwnd, 4);
+        let fw = scale(hwnd, 260).min((client.right / 3).max(0));
+        let field =
+            |left: i32, right: i32| RECT { left, top: pad, right: right.max(left), bottom: pad + bar };
+        let fields =
+            [field(ax, client.right - fw - 2 * pad), field(client.right - fw - pad, client.right - pad)];
+        with_app(|a| a.fields = fields);
+        // Text boxes sit borderless inside their fields, vertically centered.
+        let line = chrome::line_height(hwnd) + 2;
+        let text_top = pad + (bar - line) / 2;
+        let f = fields[1];
+        let inset = chrome::filter_inset(hwnd);
+        let _ = MoveWindow(
+            filter,
+            f.left + inset,
+            text_top,
+            (f.right - f.left - inset - scale(hwnd, 8)).max(0),
+            line,
+            true,
+        );
+        let a = fields[0];
+        let _ = MoveWindow(
+            address,
+            a.left + scale(hwnd, 10),
+            text_top,
+            (a.right - a.left - scale(hwnd, 20)).max(0),
+            line,
+            true,
+        );
         toolbar::layout(hwnd, client.right);
-        let _ = MoveWindow(strip, 0, scale(hwnd, 68), client.right, tab_height(hwnd), true);
+        let _ = MoveWindow(strip, 0, scale(hwnd, toolbar::BOTTOM), client.right, tab_height(hwnd), true);
         let top = content_top(hwnd);
         let h = (client.bottom - (sr.bottom - sr.top) - top).max(0);
         let split = tree::clamp_split(split, client.right, GetDpiForWindow(hwnd));
@@ -2193,12 +2225,12 @@ fn drag_splitter(hwnd: HWND, kind: SplitKind, x: i32) {
 }
 
 fn tab_height(hwnd: HWND) -> i32 {
-    scale(hwnd, 26)
+    scale(hwnd, 30)
 }
 
 /// Where the sidebar and list start: below the toolbar and the tab strip.
 fn content_top(hwnd: HWND) -> i32 {
-    scale(hwnd, 68) + tab_height(hwnd)
+    scale(hwnd, toolbar::BOTTOM) + tab_height(hwnd)
 }
 
 fn shift_held() -> bool {
