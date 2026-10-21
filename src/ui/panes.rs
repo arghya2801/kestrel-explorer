@@ -44,6 +44,7 @@ pub(super) struct FolderView {
     /// Calculated folder sizes by name, for the folder in `browser`; cleared on navigation.
     pub sizes: std::collections::HashMap<Vec<u16>, u64>,
     pub sizes_cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub groups: windows::core::ComObject<super::groups::Groups>,
 }
 
 impl Drop for FolderView {
@@ -194,6 +195,7 @@ pub(super) unsafe fn create(
             drop_registered,
             sizes: Default::default(),
             sizes_cancel: Default::default(),
+            groups: super::groups::attach(list),
         })
     }
 }

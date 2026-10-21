@@ -53,6 +53,7 @@ mod dark;
 mod dialogs;
 mod drag;
 mod grid;
+mod groups;
 mod panes;
 mod preview;
 mod rename;
@@ -94,6 +95,7 @@ const COMMAND_NAMES: &[(&str, usize)] = &[
     ("terminal", toolbar::TERMINAL),
     ("file-operations", toolbar::OPERATIONS),
     ("folder-sizes", toolbar::FOLDER_SIZES),
+    ("group-by-date", toolbar::GROUP),
     ("reveal-in-sidebar", toolbar::REVEAL),
     ("sync-panes", toolbar::SYNC_PANES),
     ("compare-panes", toolbar::COMPARE),
@@ -223,6 +225,8 @@ struct App {
     restore_session: bool,
     pins: Vec<PathBuf>,
     recent: Vec<PathBuf>,
+    /// Folders shown grouped by date (View > Group by date).
+    grouped: Vec<PathBuf>,
     status: HWND,
     font: HFONT,
     events: Arc<Events<Event>>,
@@ -499,6 +503,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 restore_session: settings.restore_session,
                 pins: settings.pins.clone(),
                 recent: settings.recent.clone(),
+                grouped: settings.grouped.clone(),
                 status,
                 font,
                 events,
@@ -1009,6 +1014,11 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
         return unsafe { tree::on_notify(hdr, lp) };
     }
     let view = with_app(|a| a.views().find(|v| v.list == hdr.hwndFrom).map(|v| v.id)).flatten()?;
+    if hdr.code == NM_CUSTOMDRAW {
+        let (groups, palette) =
+            with_app(|a| Some((a.view_mut(view)?.groups.clone(), a.palette))).flatten()?;
+        return unsafe { groups::draw_header(&*(lp.0 as *const NMLVCUSTOMDRAW), &groups, palette) };
+    }
     if hdr.code == LVN_ODCACHEHINT {
         let hint = unsafe { &*(lp.0 as *const NMLVCACHEHINT) };
         with_view(view, |v| {
@@ -1355,6 +1365,7 @@ fn spawn_list(job: ListJob) {
     }) else {
         return;
     };
+    let grouped = is_grouped(&job.dir);
     // A refresh keeps the folder sizes already calculated; a new folder starts without them.
     let sizes = with_view(id, |v| {
         (job.query.is_none() && v.browser.dir() == Some(job.dir.as_path())).then(|| v.sizes.clone())
@@ -1389,7 +1400,10 @@ fn spawn_list(job: ListJob) {
                 }),
             };
             snap.map(|s| {
-                let order = filter_order(&s, &sorted_order(&s, sort, show_hidden, &sizes), &filter);
+                let mut order = filter_order(&s, &sorted_order(&s, sort, show_hidden, &sizes), &filter);
+                if grouped {
+                    crate::groups::group_order(&s, &mut order, crate::groups::today());
+                }
                 (s, order)
             })
         })
@@ -1512,6 +1526,7 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
             restore_session: a.restore_session,
             pins: a.pins.clone(),
             recent: a.recent.clone(),
+            grouped: a.grouped.clone(),
             ..Default::default()
         };
         (a.view.list, s)
@@ -1779,10 +1794,15 @@ fn spawn_sort(job: SortJob) {
     let Some(events) = with_app(|a| a.events.clone()) else { return };
     let sizes =
         with_view(crate::tabs::tab_of_generation(job.generation), |v| v.sizes.clone()).unwrap_or_default();
+    let grouped = is_grouped(&job.snapshot.dir);
     spawn("sort", move || {
         let order = crash::guard(|| {
             let s = &job.snapshot;
-            filter_order(s, &sorted_order(s, job.sort, job.show_hidden, &sizes), &job.filter)
+            let mut order = filter_order(s, &sorted_order(s, job.sort, job.show_hidden, &sizes), &job.filter);
+            if grouped {
+                crate::groups::group_order(s, &mut order, crate::groups::today());
+            }
+            order
         });
         if let Some(order) = order {
             events.send(Event::Sorted {
@@ -1794,6 +1814,11 @@ fn spawn_sort(job: SortJob) {
             });
         }
     });
+}
+
+/// Whether `dir` is shown grouped by date (View > Group by date).
+fn is_grouped(dir: &Path) -> bool {
+    with_app(|a| a.grouped.iter().any(|g| g == dir)) == Some(true)
 }
 
 fn open_file(path: PathBuf) {
@@ -1897,6 +1922,23 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool, focus: Option<&[u16
         }
         unsafe { SendMessageW(list, LVM_CANCELEDITLABEL, None, None) };
     }
+    // Group by date, in folders that asked for it.
+    let Some((sections, view_groups)) = with_app(|a| {
+        let v = a.views().find(|v| v.id == id)?;
+        let grouped = v.browser.dir().is_some_and(|d| a.grouped.iter().any(|g| g == d));
+        let sections = grouped.then(|| {
+            let today = crate::groups::today();
+            let s = v.browser.snapshot();
+            let days =
+                v.browser.order.iter().map(|&e| crate::groups::local_day(s?.entries[e as usize].modified));
+            let groups = crate::groups::by_date(days, today);
+            groups.into_iter().map(|(b, rows)| (crate::groups::LABELS[b], rows)).collect()
+        });
+        Some((sections, v.groups.clone()))
+    })
+    .flatten() else {
+        return;
+    };
     with_view(id, |v| v.restoring_selection = true);
     unsafe {
         let visible = IsWindowVisible(list).as_bool();
@@ -1917,6 +1959,7 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool, focus: Option<&[u16
             );
         };
         set(-1, 0);
+        groups::show(list, &view_groups, sections);
         let flags = if new_folder { 0 } else { LVSICF_NOSCROLL };
         SendMessageW(list, LVM_SETITEMCOUNT, Some(WPARAM(count)), Some(LPARAM(flags as isize)));
         if select.len() == count && count > 0 {

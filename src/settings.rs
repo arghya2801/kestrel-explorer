@@ -32,6 +32,8 @@ pub struct Settings {
     pub active_tab: usize,
     pub pins: Vec<PathBuf>,
     pub recent: Vec<PathBuf>,
+    /// Folders shown grouped by date.
+    pub grouped: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -56,6 +58,7 @@ impl Default for Settings {
             active_tab: 0,
             pins: Vec::new(),
             recent: Vec::new(),
+            grouped: Vec::new(),
         }
     }
 }
@@ -137,6 +140,11 @@ impl Settings {
                         s.pins.push(p);
                     }
                 }
+                "group" => {
+                    if let Some(p) = decode_path(value).filter(|p| rememberable(p)) {
+                        s.grouped.push(p);
+                    }
+                }
                 "recent" => {
                     if let Some(p) = decode_path(value).filter(|p| rememberable(p))
                         && s.recent.len() < 20
@@ -186,6 +194,13 @@ impl Settings {
         out += &format!("restore_session={}\n", self.restore_session);
         for p in self.pins.iter().filter(|p| rememberable(p)) {
             out += &format!("pin={}\n", encode_path(p));
+        }
+        for p in self.grouped.iter().filter(|p| rememberable(p)) {
+            out += &format!(
+                "group={}
+",
+                encode_path(p)
+            );
         }
         for p in self.recent.iter().filter(|p| rememberable(p)).take(20) {
             out += &format!("recent={}\n", encode_path(p));
@@ -296,6 +311,7 @@ mod tests {
             active_tab: 0,
             pins: vec![PathBuf::from(r"C:\pinned,=Ü")],
             recent: vec![PathBuf::from(r"D:\recent")],
+            grouped: vec![PathBuf::from(r"C:\Users\me\Downloads")],
         };
         assert_eq!(Settings::parse(&s.to_text()), s);
     }

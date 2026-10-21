@@ -2146,3 +2146,68 @@ fn sign_out_saves_the_open_windows() {
     close(hwnd);
     assert!(saved.iter().any(|s| s.last_folder.as_deref() == Some(t.0.as_path())), "{saved:?}");
 }
+
+// ---- group by date ----
+
+/// Header texts of the list's groups, in order.
+fn group_headers(list: HWND) -> Vec<String> {
+    let n = unsafe { SendMessageW(list, LVM_GETGROUPCOUNT, None, None) }.0 as usize;
+    (0..n)
+        .map(|i| {
+            let mut buf = [0u16; 64];
+            let mut g = LVGROUP {
+                cbSize: size_of::<LVGROUP>() as u32,
+                mask: LVGF_HEADER,
+                pszHeader: PWSTR(buf.as_mut_ptr()),
+                cchHeader: buf.len() as i32,
+                ..Default::default()
+            };
+            unsafe {
+                SendMessageW(
+                    list,
+                    LVM_GETGROUPINFOBYINDEX,
+                    Some(WPARAM(i)),
+                    Some(LPARAM(&mut g as *mut _ as isize)),
+                )
+            };
+            String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)])
+        })
+        .collect()
+}
+
+#[test]
+fn group_by_date_heads_sections_and_is_remembered_per_folder() {
+    let t = TempDir::new("group");
+    let old = std::time::SystemTime::now() - Duration::from_secs(3 * 365 * 24 * 3600);
+    std::fs::write(t.0.join("a-old.txt"), "").unwrap();
+    std::fs::File::options().write(true).open(t.0.join("a-old.txt")).unwrap().set_modified(old).unwrap();
+    std::fs::write(t.0.join("b-new.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["a-old.txt", "b-new.txt"]));
+    assert_eq!(unsafe { SendMessageW(list, LVM_ISGROUPVIEWENABLED, None, None) }.0, 0);
+
+    command(hwnd, ui::toolbar::GROUP);
+    // Rows re-sort into the groups, newest first, so row order is what the list shows.
+    assert!(pump_until(WAIT, || rows(list) == ["b-new.txt", "a-old.txt"]), "{:?}", rows(list));
+    assert_eq!(unsafe { SendMessageW(list, LVM_ISGROUPVIEWENABLED, None, None) }.0, 1);
+    assert_eq!(group_headers(list), ["Today", "A long time ago"]);
+
+    std::fs::write(t.0.join("c-new.txt"), "").unwrap();
+    assert!(pump_until(WAIT, || rows(list) == ["b-new.txt", "c-new.txt", "a-old.txt"]), "{:?}", rows(list));
+    assert_eq!(group_headers(list), ["Today", "A long time ago"]);
+
+    close(hwnd);
+    let saved = ui::take_final_settings().unwrap();
+    assert_eq!(saved.grouped, std::slice::from_ref(&t.0));
+
+    // Reopened with those settings, the folder comes back grouped; toggling again ungroups it.
+    let hwnd = ui::create_main_window(&t.0, &saved).unwrap();
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["b-new.txt", "c-new.txt", "a-old.txt"]), "{:?}", rows(list));
+    assert_eq!(unsafe { SendMessageW(list, LVM_ISGROUPVIEWENABLED, None, None) }.0, 1);
+    command(hwnd, ui::toolbar::GROUP);
+    assert!(pump_until(WAIT, || rows(list) == ["a-old.txt", "b-new.txt", "c-new.txt"]), "{:?}", rows(list));
+    assert_eq!(unsafe { SendMessageW(list, LVM_ISGROUPVIEWENABLED, None, None) }.0, 0);
+    close(hwnd);
+}

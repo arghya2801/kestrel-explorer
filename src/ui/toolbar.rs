@@ -38,6 +38,7 @@ pub const FOLDER_SIZES: usize = 231;
 pub const SYNC_PANES: usize = 232;
 pub const COMPARE: usize = 233;
 pub const REVEAL: usize = 234;
+pub const GROUP: usize = 235;
 const RELEASES: &str = "https://github.com/arghya2801/kestrel-explorer/releases/latest";
 
 /// Logical y where the toolbar row ends and the tab strip starts.
@@ -220,6 +221,33 @@ pub(super) fn execute(id: usize) -> bool {
         SYNC_PANES => _ = with_app(|a| a.sync_panes = !a.sync_panes),
         COMPARE => super::panes::compare(),
         REVEAL => super::tree::reveal(),
+        GROUP => {
+            // Every pane and tab showing this folder re-sorts into (or out of) date groups.
+            let ids = with_app(|a| {
+                let dir = a.view.browser.dir().map(std::path::PathBuf::from)?;
+                if a.grouped.contains(&dir) {
+                    a.grouped.retain(|p| p != &dir);
+                } else {
+                    a.grouped.push(dir.clone());
+                }
+                Some(
+                    a.views()
+                        .filter(|v| v.browser.dir() == Some(dir.as_path()))
+                        .map(|v| v.id)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten()
+            .unwrap_or_default();
+            for id in ids {
+                if let Some(job) = super::with_view(id, |v| v.browser.resort_job()).flatten() {
+                    spawn_sort(job);
+                }
+            }
+            if let Some(s) = super::current_settings(hwnd) {
+                super::save_preferences(s);
+            }
+        }
         SORT_NAME..=SORT_SIZE | DESCENDING => {
             let job = with_app(|a| {
                 let key = match id {
@@ -285,6 +313,9 @@ fn popup(hwnd: HWND, kind: usize) {
                 add(HIDDEN, "Hidden items\tCtrl+H", hidden);
                 add(PREVIEW, "Preview pane\tAlt+P", preview);
                 add(REVEAL, "Show in sidebar\tCtrl+Shift+E", false);
+                let grouped =
+                    with_app(|a| a.view.browser.dir().is_some_and(|d| a.grouped.iter().any(|g| g == d)));
+                add(GROUP, "Group by date", grouped == Some(true));
                 add(FOLDER_SIZES, "Calculate folder sizes", false);
                 add(SYNC_PANES, "Sync pane navigation", with_app(|a| a.sync_panes).unwrap_or(false));
                 add(COMPARE, "Compare panes", false);
