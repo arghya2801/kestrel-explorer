@@ -6,6 +6,8 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-21
+
 ### Added
 - View > Group by date shows a folder in Explorer's date groups (Today, Yesterday, Earlier this week, Last week…), keeping your sort inside each group. Each folder remembers it, so Downloads can stay grouped while other folders don't.
 - A + button after the last tab opens a new tab.
