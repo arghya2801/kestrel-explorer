@@ -362,6 +362,11 @@ pub(super) fn paint(hwnd: HWND, hdc: HDC) {
     }
 }
 
+/// Lines inside the file list (column edges, group rules): barely there.
+pub(super) fn faint(p: &Palette) -> u32 {
+    mix(p.window, p.text, if p.dark { 7 } else { 6 })
+}
+
 /// Hairlines: field borders, separators, the tab strip's base line.
 pub(super) fn stroke(p: &Palette) -> u32 {
     mix(p.chrome, p.text, if p.dark { 16 } else { 14 })

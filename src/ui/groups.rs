@@ -130,6 +130,10 @@ pub(super) unsafe fn draw_header(cd: &NMLVCUSTOMDRAW, groups: &Groups, p: Palett
     let (hdc, list) = (cd.nmcd.hdc, cd.nmcd.hdr.hwndFrom);
     let r = RECT { left: cd.nmcd.rc.left, right: cd.nmcd.rc.right, ..cd.rcText };
     unsafe {
+        // Covers the column lines crossing the header row.
+        let bg = CreateSolidBrush(COLORREF(p.window));
+        FillRect(hdc, &r, bg);
+        let _ = DeleteObject(HGDIOBJ(bg.0));
         let font = SendMessageW(list, WM_GETFONT, None, None).0;
         let old = SelectObject(hdc, HGDIOBJ(font as _));
         SetBkMode(hdc, TRANSPARENT);
@@ -143,7 +147,7 @@ pub(super) unsafe fn draw_header(cd: &NMLVCUSTOMDRAW, groups: &Groups, p: Palett
         let mid = (r.top + r.bottom) / 2;
         let gap = super::scale(list, 8);
         let rule = RECT { left: t.right + gap, top: mid, right: r.right - gap, bottom: mid + 1 };
-        let brush = CreateSolidBrush(COLORREF(super::chrome::stroke(&p)));
+        let brush = CreateSolidBrush(COLORREF(super::chrome::faint(&p)));
         FillRect(hdc, &rule, brush);
         let _ = DeleteObject(HGDIOBJ(brush.0));
         SelectObject(hdc, old);

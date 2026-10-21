@@ -227,6 +227,8 @@ struct App {
     recent: Vec<PathBuf>,
     /// Folders shown grouped by date (View > Group by date).
     grouped: Vec<PathBuf>,
+    /// The default sort and each folder's own, shared by every view's browser.
+    sorts: std::rc::Rc<std::cell::RefCell<crate::browser::FolderSorts>>,
     status: HWND,
     font: HFONT,
     events: Arc<Events<Event>>,
@@ -461,7 +463,12 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
             PostMessageW(Some(HWND(target as _)), WM_APP_EVENTS, WPARAM(0), LPARAM(0)).is_ok()
         }));
         startup_mark("address controls");
-        let view = panes::create(hwnd, settings, 0, events.clone(), font)?;
+        let mut view = panes::create(hwnd, settings, 0, events.clone(), font)?;
+        let sorts = std::rc::Rc::new(std::cell::RefCell::new(crate::browser::FolderSorts {
+            default: settings.sort,
+            folders: settings.folder_sorts.clone(),
+        }));
+        view.browser.sorts = sorts.clone();
         startup_mark("list control");
         let list = view.list;
         let status = child(hwnd, STATUSCLASSNAMEW, w!(""), WINDOW_STYLE(SBARS_SIZEGRIP), none, 0)?;
@@ -504,6 +511,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 pins: settings.pins.clone(),
                 recent: settings.recent.clone(),
                 grouped: settings.grouped.clone(),
+                sorts,
                 status,
                 font,
                 events,
@@ -1017,7 +1025,10 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
     if hdr.code == NM_CUSTOMDRAW {
         let (groups, palette) =
             with_app(|a| Some((a.view_mut(view)?.groups.clone(), a.palette))).flatten()?;
-        return unsafe { groups::draw_header(&*(lp.0 as *const NMLVCUSTOMDRAW), &groups, palette) };
+        let cd = unsafe { &*(lp.0 as *const NMLVCUSTOMDRAW) };
+        return unsafe {
+            groups::draw_header(cd, &groups, palette).or_else(|| dark::column_lines(cd, palette))
+        };
     }
     if hdr.code == LVN_ODCACHEHINT {
         let hint = unsafe { &*(lp.0 as *const NMLVCACHEHINT) };
@@ -1511,7 +1522,8 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
         let s = Settings {
             grid: a.view.grid.enabled,
             thumb_size: a.view.grid.size,
-            sort: a.view.browser.sort,
+            sort: a.sorts.borrow().default,
+            folder_sorts: a.sorts.borrow().folders.clone(),
             show_hidden: a.view.browser.show_hidden,
             split: Some(a.split),
             preview: preview::is_visible_in(a),
@@ -2022,6 +2034,8 @@ fn update_chrome() {
     }
     toolbar::update();
     panes::update_labels();
+    // A folder can bring its own sort; the header arrow follows.
+    update_sort_arrows();
     tree::sync();
     show_location();
     breadcrumbs::update();
@@ -2341,7 +2355,11 @@ fn apply_settings(hwnd: HWND, settings: Settings) {
         a.preview_width = settings.preview_width;
         a.startup_override = Some(settings.last_folder.clone());
         a.view.browser.show_hidden = settings.show_hidden;
-        let job = a.view.browser.set_sort(settings.sort);
+        *a.sorts.borrow_mut() =
+            crate::browser::FolderSorts { default: settings.sort, folders: settings.folder_sorts.clone() };
+        // The active folder takes the new default unless it has a sort of its own.
+        let sort = a.view.browser.dir().map_or(settings.sort, |d| a.sorts.borrow().get(d));
+        let job = a.view.browser.set_sort(sort);
         (a.view.list, job)
     }) else {
         return;

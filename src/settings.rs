@@ -34,6 +34,8 @@ pub struct Settings {
     pub recent: Vec<PathBuf>,
     /// Folders shown grouped by date.
     pub grouped: Vec<PathBuf>,
+    /// Folders sorted other than `sort`, the default.
+    pub folder_sorts: Vec<(PathBuf, Sort)>,
 }
 
 impl Default for Settings {
@@ -59,6 +61,7 @@ impl Default for Settings {
             pins: Vec::new(),
             recent: Vec::new(),
             grouped: Vec::new(),
+            folder_sorts: Vec::new(),
         }
     }
 }
@@ -140,6 +143,16 @@ impl Settings {
                         s.pins.push(p);
                     }
                 }
+                "folder_sort" => {
+                    let mut parts = value.splitn(3, ',');
+                    if let (Some(p), Some(k), Some(d)) = (parts.next(), parts.next(), parts.next())
+                        && let Some(p) = decode_path(p).filter(|p| rememberable(p))
+                        && let (Some(&(key, _)), Some(descending)) =
+                            (KEYS.iter().find(|(_, n)| *n == k), flag(d))
+                    {
+                        s.folder_sorts.push((p, Sort { key, descending }));
+                    }
+                }
                 "group" => {
                     if let Some(p) = decode_path(value).filter(|p| rememberable(p)) {
                         s.grouped.push(p);
@@ -194,6 +207,10 @@ impl Settings {
         out += &format!("restore_session={}\n", self.restore_session);
         for p in self.pins.iter().filter(|p| rememberable(p)) {
             out += &format!("pin={}\n", encode_path(p));
+        }
+        for (p, sort) in self.folder_sorts.iter().filter(|(p, _)| rememberable(p)) {
+            let key = KEYS.iter().find(|(k, _)| *k == sort.key).map_or("Name", |k| k.1);
+            out += &format!("folder_sort={},{key},{}\n", encode_path(p), sort.descending);
         }
         for p in self.grouped.iter().filter(|p| rememberable(p)) {
             out += &format!(
@@ -312,6 +329,10 @@ mod tests {
             pins: vec![PathBuf::from(r"C:\pinned,=Ü")],
             recent: vec![PathBuf::from(r"D:\recent")],
             grouped: vec![PathBuf::from(r"C:\Users\me\Downloads")],
+            folder_sorts: vec![(
+                PathBuf::from(r"C:\Users\me\Downloads"),
+                Sort { key: SortKey::Modified, descending: true },
+            )],
         };
         assert_eq!(Settings::parse(&s.to_text()), s);
     }

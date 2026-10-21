@@ -203,6 +203,50 @@ fn column_click_sorts_by_size_then_toggles() {
     close(hwnd);
 }
 
+/// The column showing a sort arrow, if any.
+fn sort_arrow_column(list: HWND) -> Option<usize> {
+    let header = HWND(unsafe { SendMessageW(list, LVM_GETHEADER, None, None) }.0 as _);
+    (0..6).find(|&i| {
+        let mut item = HDITEMW { mask: HDI_FORMAT, ..Default::default() };
+        unsafe {
+            SendMessageW(header, HDM_GETITEMW, Some(WPARAM(i)), Some(LPARAM(&mut item as *mut _ as isize)))
+        };
+        item.fmt.0 & (HDF_SORTUP.0 | HDF_SORTDOWN.0) != 0
+    })
+}
+
+#[test]
+fn each_folder_keeps_its_own_sort() {
+    let t = TempDir::new("folder-sort");
+    std::fs::write(t.0.join("a.txt"), "x".repeat(5000)).unwrap();
+    std::fs::write(t.0.join("b.txt"), "x").unwrap();
+    std::fs::create_dir(t.0.join("sub")).unwrap();
+    std::fs::write(t.0.join("sub").join("y.txt"), "x".repeat(5000)).unwrap();
+    std::fs::write(t.0.join("sub").join("z.txt"), "x").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["sub", "a.txt", "b.txt"]));
+
+    notify(hwnd, NMLISTVIEW { hdr: hdr(list, LVN_COLUMNCLICK), iSubItem: 3, ..Default::default() });
+    assert!(pump_until(WAIT, || rows(list) == ["sub", "b.txt", "a.txt"]), "{:?}", rows(list));
+    assert_eq!(sort_arrow_column(list), Some(3));
+
+    activate(hwnd, list, 0);
+    assert!(
+        pump_until(WAIT, || rows(list) == ["y.txt", "z.txt"]),
+        "the subfolder stays by name: {:?}",
+        rows(list)
+    );
+    assert_eq!(sort_arrow_column(list), Some(0));
+
+    key(list, VK_BACK);
+    assert!(pump_until(WAIT, || rows(list) == ["sub", "b.txt", "a.txt"]), "{:?}", rows(list));
+    assert_eq!(sort_arrow_column(list), Some(3));
+    close(hwnd);
+    let saved = ui::take_final_settings().unwrap();
+    assert_eq!(saved.sort.key, kestrel::sort::SortKey::Name, "the default is untouched");
+    assert_eq!(saved.folder_sorts.len(), 1);
+}
 #[test]
 fn opening_a_folder_then_backspace_returns_and_selects_it() {
     let t = TempDir::new("nav");

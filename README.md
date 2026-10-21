@@ -39,6 +39,9 @@ With **View > Sync pane navigation** on, entering a subfolder or going up in one
 the other. **View > Compare panes** selects the files each pane lacks or has with another size or date.
 
 **View** offers Details, four thumbnail sizes, sorting, hidden items and preview visibility.
+Each folder remembers the sort you choose in it (a column header or **View**); folders you haven't
+sorted use the default sort from **Settings > File list**. So Downloads can stay newest-first while
+everything else is alphabetical.
 **View > Group by date** sorts the folder into Explorer's date groups (Today, Yesterday, Earlier this
 week, Last week…), keeping the chosen sort inside each group; each folder remembers it, so Downloads
 can stay grouped while other folders don't. **View > Show in sidebar** (**Ctrl+Shift+E**) expands the
@@ -58,7 +61,7 @@ and cancellation dialogs.
 | Page | Controls |
 |---|---|
 | Appearance | Theme, sidebar width, preview visibility/width, split layout and pane ratio |
-| File list | Details/grid, hidden items, sort column/direction and the four main column widths |
+| File list | Details/grid, hidden items, the default sort and the four main column widths |
 | Startup | Startup folder, session restoration and an optional "Open in Kestrel" folder-menu entry |
 | Window | Saved position, size and maximized state |
 
