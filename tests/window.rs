@@ -1185,6 +1185,29 @@ fn middle_click_closes_the_tab_under_the_cursor() {
     close(hwnd);
 }
 
+#[test]
+fn plus_button_and_ctrl_shift_k_open_tabs() {
+    let t = TempDir::new("plus");
+    std::fs::create_dir(t.0.join("sub")).unwrap();
+    let hwnd = open(&t.0);
+    assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()) == ["sub"]));
+    let strip = find(hwnd, w!("SysTabControl32"));
+    let plus = unsafe { GetDlgItem(Some(strip), 240) }.unwrap(); // tabbar::NEW_TAB
+    // Shown right of the last tab (the test window itself stays hidden, so check the style).
+    assert!(unsafe { GetWindowLongW(plus, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0);
+    unsafe { SendMessageW(plus, BM_CLICK, None, None) };
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
+    activate(hwnd, ui::active_list().unwrap(), 0);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).get(1).is_some_and(|l| l == "sub")));
+    ctrl_key(ui::active_list().unwrap(), VK_K, true);
+    assert!(
+        pump_until(WAIT, || tab_labels(hwnd).len() == 3 && tab_labels(hwnd)[2] == "sub"),
+        "{:?}",
+        tab_labels(hwnd)
+    );
+    close(hwnd);
+}
+
 // ---- dark mode ----
 
 /// Brightness (0-255) of the window's pixel at client point (x, y), rendered off-screen.
