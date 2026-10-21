@@ -2,14 +2,49 @@
 //! generation number; results for an older generation are dropped. History
 //! only changes when a navigation succeeds.
 
+use std::cell::RefCell;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 
 use crate::listing::Snapshot;
 use crate::sort::{Sort, SortKey};
+
+/// The sort each folder shows, shared by every view of a window: a folder keeps the sort
+/// last chosen in it, and every other folder uses `default` (Settings > File list).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FolderSorts {
+    pub default: Sort,
+    pub folders: Vec<(PathBuf, Sort)>,
+}
+
+impl Default for FolderSorts {
+    fn default() -> Self {
+        FolderSorts { default: Sort { key: SortKey::Name, descending: false }, folders: Vec::new() }
+    }
+}
+
+impl FolderSorts {
+    pub fn get(&self, dir: &Path) -> Sort {
+        self.folders.iter().find(|(d, _)| same_dir(d, dir)).map_or(self.default, |&(_, s)| s)
+    }
+
+    /// Remembers `sort` for `dir`; a folder back on the default sort is forgotten.
+    pub fn remember(&mut self, dir: &Path, sort: Sort) {
+        self.folders.retain(|(d, _)| !same_dir(d, dir));
+        if sort != self.default {
+            self.folders.push((dir.to_path_buf(), sort));
+        }
+    }
+}
+
+/// Folder paths compare without case, as Windows does.
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+}
 
 /// A place in history: a folder, or search results below it.
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +117,8 @@ pub struct Browser {
     pub order: Vec<u32>,
     order_spec: (Sort, bool, Vec<u16>),
     pub sort: Sort,
+    /// Per-folder sorts, shared with the window's other views.
+    pub sorts: Rc<RefCell<FolderSorts>>,
     pub show_hidden: bool,
     loading: Option<Pending>,
     /// Folded filter text; empty shows everything.
@@ -109,6 +146,7 @@ impl Default for Browser {
             filter: Vec::new(),
             shown_query: None,
             sort,
+            sorts: Default::default(),
             show_hidden: false,
             loading: None,
             error: None,
@@ -134,6 +172,10 @@ impl Browser {
             // Somewhere else: a filter typed for the old place would only confuse.
             self.select_next = None;
             self.filter.clear();
+        }
+        // Entering another folder shows it in its own sort; searches keep the sort they started with.
+        if at.query.is_none() && !self.dir().is_some_and(|d| same_dir(d, &at.dir)) {
+            self.sort = self.sorts.borrow().get(&at.dir);
         }
         let filter = self.filter.clone();
         let job = ListJob {
@@ -368,8 +410,12 @@ impl Browser {
         Applied::Shown { select, new_folder: !same_dir }
     }
 
+    /// Sorts the list and remembers the sort for this folder.
     pub fn set_sort(&mut self, sort: Sort) -> Option<SortJob> {
         self.sort = sort;
+        if let Some(at) = self.requested_location().filter(|at| at.query.is_none()) {
+            self.sorts.borrow_mut().remember(&at.dir, sort);
+        }
         self.sort_job()
     }
 
@@ -783,6 +829,24 @@ mod tests {
         assert_eq!((resort.generation, resort.sort), (job.generation, by_size));
         b.on_sorted(job.generation, by_size, false, &[], vec![0], &[]);
         assert!(b.sort_job().is_none());
+    }
+
+    #[test]
+    fn each_folder_keeps_its_own_sort_and_others_use_the_default() {
+        let mut b = Browser::default();
+        let by_date = Sort { key: SortKey::Modified, descending: true };
+        visit(&mut b, r"C:\Downloads", &["x"]);
+        b.set_sort(by_date);
+        visit(&mut b, r"C:\other", &["y"]);
+        assert_eq!(b.sort, FolderSorts::default().default, "other folders stay on the default");
+        let job = b.back().unwrap();
+        assert_eq!((job.sort, b.sort), (by_date, by_date), "Downloads comes back sorted by date");
+        b.on_listed(job.generation, listed(r"C:\Downloads", &["x"]), &[]);
+        let job = b.go(r"c:\downloads".into());
+        assert_eq!(job.sort, by_date, "folder paths ignore case");
+        b.on_listed(job.generation, listed(r"C:\Downloads", &["x"]), &[]);
+        b.set_sort(FolderSorts::default().default);
+        assert!(b.sorts.borrow().folders.is_empty(), "back on the default, nothing to remember");
     }
 
     #[test]

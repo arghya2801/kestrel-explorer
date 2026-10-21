@@ -16,6 +16,7 @@ and shell integrations. See [ROADMAP.md](ROADMAP.md) for measured startup, size 
 - Breadcrumb navigation, editable addresses, Quick access pins, recent folders, drives and Network
 - A command toolbar below the address bar, with overflow commands under More
 - Details and thumbnail grid views in four sizes, hidden-item toggle, adjustable sidebar and preview widths
+- Group by date (Today, Yesterday, Last week…), remembered per folder
 - Text, image and Windows preview-handler previews
 - Copy, cut, paste, rename, batch rename, recycle, permanent delete, new folder, drag/drop and undo/redo
 - .zip files open as folders through Windows' built-in zip support; copy files out as from any folder
@@ -38,6 +39,13 @@ With **View > Sync pane navigation** on, entering a subfolder or going up in one
 the other. **View > Compare panes** selects the files each pane lacks or has with another size or date.
 
 **View** offers Details, four thumbnail sizes, sorting, hidden items and preview visibility.
+Each folder remembers the sort you choose in it (a column header or **View**); folders you haven't
+sorted use the default sort from **Settings > File list**. So Downloads can stay newest-first while
+everything else is alphabetical.
+**View > Group by date** sorts the folder into Explorer's date groups (Today, Yesterday, Earlier this
+week, Last week…), keeping the chosen sort inside each group; each folder remembers it, so Downloads
+can stay grouped while other folders don't. **View > Show in sidebar** (**Ctrl+Shift+E**) expands the
+sidebar to the open folder; it doesn't follow navigation on its own.
 Right-click the column headers to show Date created or Attributes, or hide other columns.
 **More** includes pin/unpin, recent folders, parent folders, Open terminal here and File operations.
 The filter (**Ctrl+F**) matches names and also understands `size:>10MB`, `size:<1KB`, `modified:<7d`
@@ -53,7 +61,7 @@ and cancellation dialogs.
 | Page | Controls |
 |---|---|
 | Appearance | Theme, sidebar width, preview visibility/width, split layout and pane ratio |
-| File list | Details/grid, hidden items, sort column/direction and the four main column widths |
+| File list | Details/grid, hidden items, the default sort and the four main column widths |
 | Startup | Startup folder, session restoration and an optional "Open in Kestrel" folder-menu entry |
 | Window | Saved position, size and maximized state |
 
@@ -90,12 +98,15 @@ Press **F1**, or choose **Help > Keyboard shortcuts**, for the in-app guide.
 | Ctrl+Shift+N / Ctrl+Shift+C | New folder / copy paths |
 | Ctrl+A | Select all |
 | Ctrl+T / Ctrl+W | New tab / close tab |
+| Ctrl+Shift+K | Duplicate the active tab |
 | Middle-click a tab | Close that tab |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+N | New window, side by side |
 | Ctrl+Shift+S / F6 | Toggle split / focus the other pane |
 | Alt+P | Toggle preview |
+| Ctrl+Shift+E | Show the open folder in the sidebar |
 | Ctrl+mouse wheel | Thumbnail size; past the smallest, back to Details |
+| Shift+mouse wheel | Scroll the file list sideways |
 | Tab / Shift+Tab | Next / previous control |
 | Shift+F10, Menu key | Context menu |
 | Shift+right-click | Full Windows context menu |
@@ -163,7 +174,7 @@ The ignored executable-icon and visual-capture diagnostics can be run separately
 
 | Path | Responsibility |
 |---|---|
-| src/listing.rs, sort.rs, search.rs | Reading folders, sorting and searching |
+| src/listing.rs, sort.rs, groups.rs, search.rs | Reading folders, sorting, date groups and searching |
 | src/browser.rs | Navigation and history |
 | src/ops.rs, clip.rs, dnd.rs, activity.rs | File operations, clipboard, drag/drop and operation status |
 | src/settings.rs, session.rs | Preferences and session persistence |

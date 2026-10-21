@@ -122,6 +122,8 @@ Items are ordered by priority inside each phase.
 - [x] View > Sync pane navigation (into subfolders and up) and View > Compare panes (selects differences)
 - [x] .zip files open as folders through the shell; copy out works. Writing into a zip depends on
       what Windows' zip folder supports
+- [x] View > Group by date, per folder: Explorer's date buckets as native list groups on the virtual list
+      (undocumented IOwnerDataCallback, as Explorer uses), rows re-sorted so groups are contiguous
 - [x] Custom key bindings in keys.txt, listed first in the F1 guide (read at startup)
 - [x] Accessibility: names for the address, filter, file lists, sidebar and tab strip;
       Windows high-contrast colors when contrast mode is on

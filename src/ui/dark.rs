@@ -4,7 +4,7 @@
 //! dark style are painted here: the status bar in dark mode, the tab strip always
 //! (except in high contrast).
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Controls::*;
@@ -299,4 +299,40 @@ unsafe fn paint(hwnd: HWND, p: Palette) {
         let _ = DeleteObject(HGDIOBJ(chrome.0));
         let _ = EndPaint(hwnd, &ps);
     }
+}
+
+/// In Details view the list theme draws a 2px line beside every column edge, far darker
+/// than the rest of the list. Before the rows paint (so selection still covers it), replace
+/// each with a faint 1px line. High contrast keeps Windows' lines.
+pub(super) unsafe fn column_lines(cd: &NMLVCUSTOMDRAW, p: Palette) -> Option<LRESULT> {
+    if crate::theme::high_contrast() || cd.nmcd.dwDrawStage != CDDS_PREPAINT || cd.dwItemType == LVCDI_GROUP {
+        return None;
+    }
+    let (list, hdc) = (cd.nmcd.hdr.hwndFrom, cd.nmcd.hdc);
+    unsafe {
+        if GetWindowLongPtrW(list, GWL_STYLE) as u32 & LVS_TYPEMASK != LVS_REPORT {
+            return None;
+        }
+        let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as _);
+        let count = SendMessageW(header, HDM_GETITEMCOUNT, None, None).0.max(0) as usize;
+        let mut client = RECT::default();
+        let _ = GetClientRect(list, &mut client);
+        let (bg, line) =
+            (CreateSolidBrush(COLORREF(p.window)), CreateSolidBrush(COLORREF(super::chrome::faint(&p))));
+        for i in 0..count {
+            let mut r = RECT::default();
+            SendMessageW(header, HDM_GETITEMRECT, Some(WPARAM(i)), Some(LPARAM(&mut r as *mut _ as isize)));
+            if r.right <= r.left {
+                continue; // a hidden column
+            }
+            let mut edge = [POINT { x: r.right, y: 0 }];
+            MapWindowPoints(Some(header), Some(list), &mut edge);
+            let x = edge[0].x;
+            FillRect(hdc, &RECT { left: x - 2, right: x + 2, ..client }, bg);
+            FillRect(hdc, &RECT { left: x - 1, right: x, ..client }, line);
+        }
+        let _ = DeleteObject(HGDIOBJ(bg.0));
+        let _ = DeleteObject(HGDIOBJ(line.0));
+    }
+    None
 }

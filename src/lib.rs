@@ -5,6 +5,7 @@ pub mod crash;
 pub mod dnd;
 pub mod events;
 pub mod format;
+pub mod groups;
 pub mod icons;
 pub mod keys;
 pub mod listing;

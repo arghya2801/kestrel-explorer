@@ -7,12 +7,15 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 ## [Unreleased]
 
 ### Added
+- View > Group by date shows a folder in Explorer's date groups (Today, Yesterday, Earlier this week, Last week…), keeping your sort inside each group. Each folder remembers it, so Downloads can stay grouped while other folders don't.
 - A + button after the last tab opens a new tab.
 - Duplicate tab, from a tab's right-click menu or Ctrl+Shift+K.
 - View > Show in sidebar (Ctrl+Shift+E) expands the sidebar to the open folder.
 
 ### Changed
+- Each folder remembers its own sort. Folders you haven't sorted use the default sort from Settings > File list, instead of whatever sort you last picked elsewhere.
 - The sidebar no longer expands to every folder you open; use Show in sidebar when you want it.
+- Column lines in Details view are a faint 1px line instead of the list theme's heavy 2px one.
 
 ### Fixed
 - Shift+mouse wheel scrolls the file list sideways.

@@ -245,7 +245,7 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> w
                     (
                         1,
                         SORT,
-                        "&Sort by",
+                        "Default &sort",
                         Some("Name|Date modified|Type|Size|Date created|Attributes"),
                         false,
                     ),

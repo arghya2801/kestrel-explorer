@@ -44,6 +44,7 @@ pub(super) struct FolderView {
     /// Calculated folder sizes by name, for the folder in `browser`; cleared on navigation.
     pub sizes: std::collections::HashMap<Vec<u16>, u64>,
     pub sizes_cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub groups: windows::core::ComObject<super::groups::Groups>,
 }
 
 impl Drop for FolderView {
@@ -172,6 +173,9 @@ pub(super) unsafe fn create(
         SendMessageW(list, LVM_SETCALLBACKMASK, Some(WPARAM(LVIS_DROPHILITED.0 as usize)), None);
         let mut browser = Browser::with_generation_base(crate::tabs::generation_base(id));
         (browser.sort, browser.show_hidden) = (settings.sort, settings.show_hidden);
+        if let Some(sorts) = with_app(|a| a.sorts.clone()) {
+            browser.sorts = sorts;
+        }
         Ok(FolderView {
             id,
             list,
@@ -194,6 +198,7 @@ pub(super) unsafe fn create(
             drop_registered,
             sizes: Default::default(),
             sizes_cancel: Default::default(),
+            groups: super::groups::attach(list),
         })
     }
 }
