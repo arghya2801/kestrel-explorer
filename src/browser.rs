@@ -380,11 +380,18 @@ impl Browser {
 
     /// A job to run if the shown order doesn't match the wanted sort and filter.
     pub fn sort_job(&self) -> Option<SortJob> {
-        let snapshot = self.current.clone()?;
         let wanted = (self.sort, self.show_hidden, self.filter.clone());
-        (self.order_spec != wanted).then_some(SortJob {
+        if self.order_spec == wanted {
+            return None;
+        }
+        self.resort_job()
+    }
+
+    /// A job to re-order the shown entries with the current sort, even if it hasn't changed.
+    pub fn resort_job(&self) -> Option<SortJob> {
+        Some(SortJob {
             generation: self.shown_generation,
-            snapshot,
+            snapshot: self.current.clone()?,
             sort: self.sort,
             show_hidden: self.show_hidden,
             filter: self.filter.clone(),

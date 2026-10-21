@@ -114,8 +114,8 @@ Items are ordered by priority inside each phase.
 
 ### 2.0: power features
 
-- [x] View > Calculate folder sizes: a cancellable worker fills the Size column (Esc stops it).
-      Sorting by size still treats folders as empty
+- [x] View > Calculate folder sizes: a cancellable worker fills the Size column (Esc stops it),
+      and sorting by size uses the results
 - [x] `size:`, `modified:` conditions in the filter and search; `content:word` in the search
       (whole-file scan up to 16 MB per file; one word, no phrases)
 - [x] Batch rename (F2 on several items): find/replace, `#` numbering, live preview, one undo
