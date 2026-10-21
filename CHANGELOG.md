@@ -6,6 +6,9 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ## [Unreleased]
 
+### Added
+- Duplicate tab, from a tab's right-click menu or Ctrl+Shift+K.
+
 ### Fixed
 - Shift+mouse wheel scrolls the file list sideways.
 - Sorting by size uses the folder sizes from View > Calculate folder sizes, and re-sorts when they finish.
