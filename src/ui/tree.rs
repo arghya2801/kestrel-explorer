@@ -348,6 +348,7 @@ pub(super) fn reload() {
 }
 
 /// Rebuild once when the active view's hidden setting changes; old worker results carry an epoch.
+/// Then take the next step of a `reveal`, if one is under way.
 pub(super) fn sync() {
     let Some((tree, rebuild, dir)) = with_app(|a| {
         if a.nodes.is_empty() {
@@ -371,6 +372,10 @@ pub(super) fn sync() {
         let pc = populate();
         with_app(|a| a.this_pc = pc);
     }
+    if with_app(|a| a.tree_revealing) != Some(true) {
+        return deselect_elsewhere(tree, dir);
+    }
+    // Before the first listing there is nothing to reveal yet; the next sync carries on.
     let Some(dir) = dir else { return };
     let target = dir.to_string_lossy().to_lowercase();
     if let Some(rest) = target.strip_prefix(r"\\").filter(|s| !s.starts_with("?\\"))
@@ -398,34 +403,62 @@ pub(super) fn sync() {
             .max_by_key(|&(_, len, _)| len)
     })
     .flatten();
-    if let Some((node, _, exact)) = closest {
-        if !exact
-            && let Some(parent) = with_app(|a| {
-                (a.nodes[node].state == State::Loaded).then(|| a.nodes[node].path.clone()).flatten()
-            })
-            .flatten()
-            && let Some(next) = dir.ancestors().find(|p| {
-                p.parent()
-                    .is_some_and(|p| p.to_string_lossy().eq_ignore_ascii_case(&parent.to_string_lossy()))
-            })
-            && let Some(name) = next.file_name()
-        {
-            let name = name.to_string_lossy();
-            with_app(|a| a.nodes[node].pending.retain(|n| !n.eq_ignore_ascii_case(&name)));
-            insert(Some(node), &name, Some(next.to_path_buf()), true);
-            sync();
-            return;
+    let Some((node, _, exact)) = closest else { return stop_revealing() };
+    if !exact
+        && let Some(parent) =
+            with_app(|a| (a.nodes[node].state == State::Loaded).then(|| a.nodes[node].path.clone()).flatten())
+                .flatten()
+        && let Some(next) = dir.ancestors().find(|p| {
+            p.parent().is_some_and(|p| p.to_string_lossy().eq_ignore_ascii_case(&parent.to_string_lossy()))
+        })
+        && let Some(name) = next.file_name()
+    {
+        let name = name.to_string_lossy();
+        with_app(|a| a.nodes[node].pending.retain(|n| !n.eq_ignore_ascii_case(&name)));
+        insert(Some(node), &name, Some(next.to_path_buf()), true);
+        sync();
+        return;
+    }
+    if let Some((tree, item)) = item_of(node) {
+        unsafe {
+            SendMessageW(tree, TVM_SELECTITEM, Some(WPARAM(TVGN_CARET as usize)), Some(LPARAM(item)));
+            SendMessageW(tree, TVM_ENSUREVISIBLE, None, Some(LPARAM(item)));
         }
-        if let Some((tree, item)) = item_of(node) {
-            unsafe {
-                SendMessageW(tree, TVM_SELECTITEM, Some(WPARAM(TVGN_CARET as usize)), Some(LPARAM(item)));
-                SendMessageW(tree, TVM_ENSUREVISIBLE, None, Some(LPARAM(item)));
-            }
-        }
-        if !exact {
-            start_loading(node);
-            expand(node);
-        }
+    }
+    if exact {
+        stop_revealing();
+    } else {
+        start_loading(node);
+        expand(node);
+    }
+}
+
+/// Expands the sidebar down to the open folder. Folders load on a worker, so this
+/// continues from `on_children` until it gets there.
+pub(super) fn reveal() {
+    with_app(|a| a.tree_revealing = true);
+    sync();
+}
+
+fn stop_revealing() {
+    with_app(|a| a.tree_revealing = false);
+}
+
+/// The sidebar doesn't follow navigation; drop a selection that no longer matches
+/// the open folder so clicking that item navigates again.
+fn deselect_elsewhere(tree: HWND, dir: Option<PathBuf>) {
+    let item = unsafe { SendMessageW(tree, TVM_GETNEXTITEM, Some(WPARAM(TVGN_CARET as usize)), None) }.0;
+    if item == 0 {
+        return;
+    }
+    let mut tv = TVITEMW { mask: TVIF_PARAM, hItem: HTREEITEM(item), ..Default::default() };
+    unsafe { SendMessageW(tree, TVM_GETITEMW, None, Some(LPARAM(&mut tv as *mut _ as isize))) };
+    let selected = with_app(|a| a.nodes.get(tv.lParam.0 as usize).and_then(|n| n.path.clone())).flatten();
+    let same = selected
+        .zip(dir)
+        .is_some_and(|(s, d)| s.to_string_lossy().eq_ignore_ascii_case(&d.to_string_lossy()));
+    if !same {
+        unsafe { SendMessageW(tree, TVM_SELECTITEM, Some(WPARAM(TVGN_CARET as usize)), Some(LPARAM(0))) };
     }
 }
 

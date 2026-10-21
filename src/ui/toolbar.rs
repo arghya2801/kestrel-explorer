@@ -37,6 +37,7 @@ pub const UPDATES: usize = 230;
 pub const FOLDER_SIZES: usize = 231;
 pub const SYNC_PANES: usize = 232;
 pub const COMPARE: usize = 233;
+pub const REVEAL: usize = 234;
 const RELEASES: &str = "https://github.com/arghya2801/kestrel-explorer/releases/latest";
 
 /// Logical y where the toolbar row ends and the tab strip starts.
@@ -218,6 +219,7 @@ pub(super) fn execute(id: usize) -> bool {
         FOLDER_SIZES => super::calculate_folder_sizes(),
         SYNC_PANES => _ = with_app(|a| a.sync_panes = !a.sync_panes),
         COMPARE => super::panes::compare(),
+        REVEAL => super::tree::reveal(),
         SORT_NAME..=SORT_SIZE | DESCENDING => {
             let job = with_app(|a| {
                 let key = match id {
@@ -282,6 +284,7 @@ fn popup(hwnd: HWND, kind: usize) {
                 add(DESCENDING, "Descending", sort.descending);
                 add(HIDDEN, "Hidden items\tCtrl+H", hidden);
                 add(PREVIEW, "Preview pane\tAlt+P", preview);
+                add(REVEAL, "Show in sidebar\tCtrl+Shift+E", false);
                 add(FOLDER_SIZES, "Calculate folder sizes", false);
                 add(SYNC_PANES, "Sync pane navigation", with_app(|a| a.sync_panes).unwrap_or(false));
                 add(COMPARE, "Compare panes", false);
