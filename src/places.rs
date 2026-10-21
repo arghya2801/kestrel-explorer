@@ -106,7 +106,8 @@ pub fn known_folders() -> Vec<(&'static str, PathBuf)> {
 /// Names of the folders directly inside `dir`, in display order.
 pub fn subfolders(dir: &Path, show_hidden: bool) -> io::Result<Vec<String>> {
     let s = list_dir(dir)?;
-    let order = sorted_order(&s, Sort { key: SortKey::Name, descending: false }, show_hidden);
+    let order =
+        sorted_order(&s, Sort { key: SortKey::Name, descending: false }, show_hidden, &Default::default());
     Ok(order.into_iter().map(|i| i as usize).filter(|&i| s.is_dir(i)).map(|i| s.name_string(i)).collect())
 }
 

@@ -1,6 +1,8 @@
 //! Explorer-style ordering: folders first, natural ("file2" < "file10"),
 //! case-insensitive names. Produces indices into a Snapshot; never moves entries.
 
+use std::collections::HashMap;
+
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::Globalization::{LCMAP_SORTKEY, LCMapStringEx, NORM_IGNORECASE, SORT_DIGITSASNUMBERS};
 use windows::core::PCWSTR;
@@ -167,7 +169,13 @@ fn parse_age(text: &str) -> Option<u64> {
 }
 
 /// Visible entries in display order. Ties on size/date fall back to name, ascending.
-pub fn sorted_order(s: &Snapshot, sort: Sort, show_hidden: bool) -> Vec<u32> {
+/// Folders sort by their size in `dir_sizes` (from Calculate folder sizes), else as empty.
+pub fn sorted_order(
+    s: &Snapshot,
+    sort: Sort,
+    show_hidden: bool,
+    dir_sizes: &HashMap<Vec<u16>, u64>,
+) -> Vec<u32> {
     let mut v: Vec<u32> = (0..s.len() as u32).filter(|&i| show_hidden || !s.is_hidden(i as usize)).collect();
 
     let mut keys = Vec::new();
@@ -179,12 +187,16 @@ pub fn sorted_order(s: &Snapshot, sort: Sort, show_hidden: bool) -> Vec<u32> {
         spans[i as usize] = (start as u32, (keys.len() - start) as u32);
     }
     let key = |i: usize| &keys[spans[i].0 as usize..(spans[i].0 + spans[i].1) as usize];
+    let size = |i: usize| match s.is_dir(i) {
+        true => dir_sizes.get(s.name(i)).copied().unwrap_or(0),
+        false => s.entries[i].size,
+    };
 
     v.sort_by(|&a, &b| {
         let (a, b) = (a as usize, b as usize);
         let primary = match sort.key {
             SortKey::Name => key(a).cmp(key(b)),
-            SortKey::Size => s.entries[a].size.cmp(&s.entries[b].size),
+            SortKey::Size => size(a).cmp(&size(b)),
             SortKey::Modified => s.entries[a].modified.cmp(&s.entries[b].modified),
             SortKey::Type => lower_ext(s.name(a)).cmp(lower_ext(s.name(b))),
             SortKey::Created => s.entries[a].created.cmp(&s.entries[b].created),
@@ -215,7 +227,7 @@ mod tests {
     }
 
     fn sorted(s: &Snapshot, key: SortKey, descending: bool, show_hidden: bool) -> Vec<String> {
-        sorted_order(s, Sort { key, descending }, show_hidden)
+        sorted_order(s, Sort { key, descending }, show_hidden, &HashMap::new())
             .into_iter()
             .map(|i| s.name_string(i as usize))
             .collect()
@@ -315,6 +327,21 @@ mod tests {
         assert_eq!(sorted(&s, SortKey::Size, false, true), ["b", "c", "a"]);
         assert_eq!(sorted(&s, SortKey::Size, true, true), ["a", "b", "c"]);
         assert_eq!(sorted(&s, SortKey::Modified, false, true), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn folders_sort_by_calculated_size() {
+        let s = snap(&[("small", DIR, 0, 0), ("big", DIR, 0, 0), ("unmeasured", DIR, 0, 0), ("f", 0, 9, 0)]);
+        let sizes =
+            HashMap::from([("small".encode_utf16().collect(), 5), ("big".encode_utf16().collect(), 50)]);
+        let names = |descending| -> Vec<String> {
+            sorted_order(&s, Sort { key: SortKey::Size, descending }, true, &sizes)
+                .into_iter()
+                .map(|i| s.name_string(i as usize))
+                .collect()
+        };
+        assert_eq!(names(false), ["unmeasured", "small", "big", "f"]);
+        assert_eq!(names(true), ["big", "small", "unmeasured", "f"]);
     }
 
     #[test]

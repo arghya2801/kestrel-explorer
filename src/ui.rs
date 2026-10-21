@@ -1230,6 +1230,14 @@ fn apply(ev: Event) {
                 })
             });
             if let Some(Some(list)) = list {
+                if done == of
+                    && let Some(job) = with_view(view, |v| {
+                        (v.browser.sort.key == SortKey::Size).then(|| v.browser.resort_job()).flatten()
+                    })
+                    .flatten()
+                {
+                    spawn_sort(job);
+                }
                 unsafe {
                     let _ = InvalidateRect(Some(list), None, false);
                 }
@@ -1341,6 +1349,12 @@ fn spawn_list(job: ListJob) {
     }) else {
         return;
     };
+    // A refresh keeps the folder sizes already calculated; a new folder starts without them.
+    let sizes = with_view(id, |v| {
+        (job.query.is_none() && v.browser.dir() == Some(job.dir.as_path())).then(|| v.sizes.clone())
+    })
+    .flatten()
+    .unwrap_or_default();
     live.fetch_add(1, Ordering::SeqCst);
     let worker = spawn("list", move || {
         struct Done(Arc<AtomicUsize>);
@@ -1369,7 +1383,7 @@ fn spawn_list(job: ListJob) {
                 }),
             };
             snap.map(|s| {
-                let order = filter_order(&s, &sorted_order(&s, sort, show_hidden), &filter);
+                let order = filter_order(&s, &sorted_order(&s, sort, show_hidden, &sizes), &filter);
                 (s, order)
             })
         })
@@ -1757,10 +1771,12 @@ fn cancel_loading() {
 
 fn spawn_sort(job: SortJob) {
     let Some(events) = with_app(|a| a.events.clone()) else { return };
+    let sizes =
+        with_view(crate::tabs::tab_of_generation(job.generation), |v| v.sizes.clone()).unwrap_or_default();
     spawn("sort", move || {
         let order = crash::guard(|| {
             let s = &job.snapshot;
-            filter_order(s, &sorted_order(s, job.sort, job.show_hidden), &job.filter)
+            filter_order(s, &sorted_order(s, job.sort, job.show_hidden, &sizes), &job.filter)
         });
         if let Some(order) = order {
             events.send(Event::Sorted {
