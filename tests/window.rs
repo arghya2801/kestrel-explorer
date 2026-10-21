@@ -1697,7 +1697,7 @@ fn session_restores_tabs_and_both_folders() {
 }
 
 #[test]
-fn sidebar_follows_navigation_and_reloads_hidden_children() {
+fn sidebar_reveals_the_open_folder_and_reloads_hidden_children() {
     let t = TempDir::new("sidebar-sync");
     std::fs::create_dir(t.0.join("visible")).unwrap();
     std::fs::create_dir(t.0.join("hidden")).unwrap();
@@ -1712,6 +1712,7 @@ fn sidebar_follows_navigation_and_reloads_hidden_children() {
     let tree = tree_of(hwnd);
     let selected = || tv_next(tree, TVGN_CARET, 0);
     let name = t.0.file_name().unwrap().to_string_lossy().to_string();
+    command(hwnd, ui::toolbar::REVEAL);
     assert!(
         pump_until(WAIT, || tv_item(tree, selected()).0 == name),
         "target {} selected {:?} children {:?}",
@@ -1726,6 +1727,7 @@ fn sidebar_follows_navigation_and_reloads_hidden_children() {
     assert!(!tv_children(tree, selected()).iter().any(|n| n.0 == "hidden"));
     command(hwnd, ui::toolbar::HIDDEN);
     assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()) == ["hidden", "visible"]));
+    command(hwnd, ui::toolbar::REVEAL);
     assert!(
         pump_until(WAIT, || tv_item(tree, selected()).0 == name),
         "target {} selected {:?} children {:?}",
@@ -1750,6 +1752,7 @@ fn sidebar_offers_all_children_after_load_more() {
     let tree = tree_of(hwnd);
     let name = t.0.file_name().unwrap().to_string_lossy().to_string();
     let selected = || tv_next(tree, TVGN_CARET, 0);
+    command(hwnd, ui::toolbar::REVEAL);
     assert!(
         pump_until(WAIT, || tv_item(tree, selected()).0 == name),
         "target {} selected {:?} children {:?}",

@@ -94,6 +94,7 @@ const COMMAND_NAMES: &[(&str, usize)] = &[
     ("terminal", toolbar::TERMINAL),
     ("file-operations", toolbar::OPERATIONS),
     ("folder-sizes", toolbar::FOLDER_SIZES),
+    ("reveal-in-sidebar", toolbar::REVEAL),
     ("sync-panes", toolbar::SYNC_PANES),
     ("compare-panes", toolbar::COMPARE),
     ("check-for-updates", toolbar::UPDATES),
@@ -237,6 +238,8 @@ struct App {
     nodes: Vec<tree::Node>,
     tree_epoch: usize,
     tree_hidden: bool,
+    /// A reveal (Ctrl+Shift+E) is expanding the sidebar towards the open folder.
+    tree_revealing: bool,
     split: i32,
     drag_offset: Option<i32>,
     watch_ids: u64,
@@ -513,6 +516,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 nodes: Vec::new(),
                 tree_epoch: 0,
                 tree_hidden: settings.show_hidden,
+                tree_revealing: false,
                 split: settings.split.unwrap_or_else(|| scale(hwnd, 240)),
                 drag_offset: None,
                 watch_ids: 0,
@@ -698,6 +702,7 @@ fn on_key(msg: &MSG) -> bool {
         }
         VK_ESCAPE => cancel_loading(),
         VK_T if ctrl => tabbar::new_tab(None),
+        VK_E if ctrl && shift => tree::reveal(),
         VK_K if ctrl && shift => tabbar::duplicate(with_app(|a| a.tabs.active()).unwrap_or(0)),
         VK_N if ctrl && !shift => open_side_by_side(with_app(|a| a.hwnd).unwrap_or_default()),
         VK_W if ctrl => tabbar::close_active(),

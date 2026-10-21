@@ -8,6 +8,10 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ### Added
 - Duplicate tab, from a tab's right-click menu or Ctrl+Shift+K.
+- View > Show in sidebar (Ctrl+Shift+E) expands the sidebar to the open folder.
+
+### Changed
+- The sidebar no longer expands to every folder you open; use Show in sidebar when you want it.
 
 ### Fixed
 - Shift+mouse wheel scrolls the file list sideways.
