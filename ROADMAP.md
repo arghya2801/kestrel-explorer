@@ -107,8 +107,7 @@ Items are ordered by priority inside each phase.
 ### 1.3: distribution and trust
 
 - [x] Code signing step in the release job, active once `SIGNING_PFX`/`SIGNING_PASSWORD` secrets exist
-- [ ] Buy or set up a signing certificate (or Azure Trusted Signing): an owner decision
-- [ ] winget manifest pointing at the release assets, after the first published release
+- Dropped: a signing certificate and a winget manifest. Not needed
 - [x] Optional "Open in Kestrel" on folder and drive menus, per user, from Settings > Startup
 - [x] Help > Check for updates opens the releases page; nothing is sent until the user asks
 - [x] Portable mode: a `portable` file beside kestrel.exe keeps data in KestrelData there
