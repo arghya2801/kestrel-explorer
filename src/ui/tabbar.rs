@@ -6,12 +6,15 @@ use super::{
 };
 use crate::{browser::Browser, settings::Settings};
 use std::path::PathBuf;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PWSTR, Result, w};
+
+/// The "+" button's control id; distinct from every top-bar command, as it shares their drawing.
+pub(super) const NEW_TAB: usize = 240;
 
 pub(super) struct TabSlot {
     pub workspace: Option<Workspace>,
@@ -24,17 +27,43 @@ impl TabSlot {
 
 pub(super) unsafe fn create(parent: HWND) -> Result<HWND> {
     let strip = unsafe {
-        child(parent, WC_TABCONTROLW, w!(""), WINDOW_STYLE(TCS_FOCUSNEVER), WINDOW_EX_STYLE(0), 0)?
+        let style = WINDOW_STYLE(TCS_FOCUSNEVER) | WS_CLIPCHILDREN;
+        child(parent, WC_TABCONTROLW, w!(""), style, WINDOW_EX_STYLE(0), 0)?
     };
     // Roomier tabs than the control's default.
     let (x, y) = (super::scale(parent, 16), super::scale(parent, 4));
     unsafe {
         SendMessageW(strip, TCM_SETPADDING, None, Some(LPARAM(((y << 16) | x) as isize)));
         SendMessageW(strip, TCM_SETMINTABWIDTH, None, Some(LPARAM(super::scale(parent, 96) as isize)));
-        let _ = windows::Win32::UI::Shell::SetWindowSubclass(strip, Some(middle_click), 3, 0);
+        child(strip, w!("BUTTON"), w!("New tab"), WINDOW_STYLE(0), WINDOW_EX_STYLE(0), NEW_TAB)?;
+        let _ = windows::Win32::UI::Shell::SetWindowSubclass(strip, Some(strip_proc), 3, 0);
     }
     insert_label(strip, 0, "");
     Ok(strip)
+}
+
+/// Keeps the "+" button just right of the last tab; hidden once the tabs fill the strip.
+fn place_new_tab_button(strip: HWND) {
+    unsafe {
+        let Ok(button) = GetDlgItem(Some(strip), NEW_TAB as i32) else { return };
+        let count = SendMessageW(strip, TCM_GETITEMCOUNT, None, None).0;
+        let mut r = RECT::default();
+        SendMessageW(
+            strip,
+            TCM_GETITEMRECT,
+            Some(WPARAM(count.max(1) as usize - 1)),
+            Some(LPARAM(&mut r as *mut _ as isize)),
+        );
+        let mut client = RECT::default();
+        let _ = GetClientRect(strip, &mut client);
+        let top = super::scale(strip, 4);
+        let size = (client.bottom - top - super::scale(strip, 2)).max(0);
+        let x = r.right + super::scale(strip, 4);
+        // ponytail: with more tabs than fit, the strip's scroll arrows take this spot; Ctrl+T still works.
+        let fits = x + size <= client.right;
+        let _ = ShowWindow(button, if fits { SW_SHOWNA } else { SW_HIDE });
+        let _ = MoveWindow(button, x, top, size, size, true);
+    }
 }
 fn insert_label(strip: HWND, index: usize, text: &str) {
     let text = HSTRING::from(text);
@@ -228,8 +257,9 @@ pub(super) fn switch_to(to: usize) {
     }
 }
 
-/// Middle-clicking a tab closes it, as in browsers.
-unsafe extern "system" fn middle_click(
+/// Middle-clicking a tab closes it, as in browsers. Also runs the "+" button, a child
+/// of the strip, and moves it whenever the tabs change.
+unsafe extern "system" fn strip_proc(
     strip: HWND,
     msg: u32,
     wp: WPARAM,
@@ -237,17 +267,41 @@ unsafe extern "system" fn middle_click(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
-    if msg == WM_MBUTTONUP {
-        let pt = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
-        let mut hit = TCHITTESTINFO { pt, ..Default::default() };
-        let tab =
-            unsafe { SendMessageW(strip, TCM_HITTEST, None, Some(LPARAM(&mut hit as *mut _ as isize))) }.0;
-        if let Ok(tab) = usize::try_from(tab) {
-            crate::crash::guard(|| close_tab(tab));
+    match msg {
+        WM_MBUTTONUP => {
+            let pt = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
+            let mut hit = TCHITTESTINFO { pt, ..Default::default() };
+            let tab =
+                unsafe { SendMessageW(strip, TCM_HITTEST, None, Some(LPARAM(&mut hit as *mut _ as isize))) }
+                    .0;
+            if let Ok(tab) = usize::try_from(tab) {
+                crate::crash::guard(|| close_tab(tab));
+                return LRESULT(0);
+            }
+        }
+        WM_COMMAND if wp.0 & 0xFFFF == NEW_TAB => {
+            crate::crash::guard(|| new_tab(None));
             return LRESULT(0);
         }
+        WM_NOTIFY => {
+            let hdr = unsafe { &*(lp.0 as *const NMHDR) };
+            if hdr.code == NM_CUSTOMDRAW
+                && hdr.idFrom == NEW_TAB
+                && let Some(r) = crate::crash::guard(|| unsafe {
+                    super::chrome::draw_button(&*(lp.0 as *const NMCUSTOMDRAW))
+                })
+                .flatten()
+            {
+                return r;
+            }
+        }
+        _ => {}
     }
-    unsafe { windows::Win32::UI::Shell::DefSubclassProc(strip, msg, wp, lp) }
+    let result = unsafe { windows::Win32::UI::Shell::DefSubclassProc(strip, msg, wp, lp) };
+    if matches!(msg, TCM_INSERTITEMW | TCM_DELETEITEM | TCM_SETITEMW | WM_SIZE | WM_SETFONT) {
+        place_new_tab_button(strip);
+    }
+    result
 }
 
 /// Notifications from the tab strip.

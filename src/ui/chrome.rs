@@ -41,6 +41,7 @@ fn glyph(id: usize) -> Option<char> {
         toolbar::MORE => '\u{E712}',
         toolbar::SETTINGS => '\u{E713}',
         toolbar::HELP => '\u{E897}',
+        super::tabbar::NEW_TAB => '\u{E710}',
         _ => return None,
     })
 }
@@ -52,7 +53,7 @@ fn opens_menu(id: usize) -> bool {
 
 /// Icon-only buttons: the label is still the window text, for screen readers.
 fn icon_only(id: usize) -> bool {
-    matches!(id, ID_BACK | ID_FORWARD | ID_UP | breadcrumbs::EDIT)
+    matches!(id, ID_BACK | ID_FORWARD | ID_UP | breadcrumbs::EDIT | super::tabbar::NEW_TAB)
 }
 
 thread_local! {

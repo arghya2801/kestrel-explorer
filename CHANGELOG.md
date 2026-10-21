@@ -7,6 +7,7 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 ## [Unreleased]
 
 ### Added
+- A + button after the last tab opens a new tab.
 - Duplicate tab, from a tab's right-click menu or Ctrl+Shift+K.
 - View > Show in sidebar (Ctrl+Shift+E) expands the sidebar to the open folder.
 
