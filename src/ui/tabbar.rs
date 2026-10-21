@@ -123,6 +123,20 @@ pub(super) fn new_tab(dir: Option<PathBuf>) {
         super::go(dir);
     }
 }
+/// Opens a new tab on the folder that tab `index` shows.
+pub(super) fn duplicate(index: usize) {
+    let dir = with_app(|a| {
+        let view = match a.tabs.items().get(index)?.workspace.as_ref() {
+            Some(w) => &w.view,
+            None => &a.view,
+        };
+        view.browser.requested_location().map(|l| l.dir)
+    })
+    .flatten();
+    if let Some(dir) = dir {
+        new_tab(Some(dir));
+    }
+}
 pub(super) fn close_tab(index: usize) {
     let Some((active, len, strip)) = with_app(|a| (a.tabs.active(), a.tabs.len(), a.tab_strip)) else {
         return;
@@ -257,6 +271,8 @@ pub(super) fn on_notify(hdr: &NMHDR) -> Option<LRESULT> {
                 let tab = SendMessageW(strip, TCM_HITTEST, None, Some(LPARAM(&mut hit as *mut _ as isize))).0;
                 let Ok(menu) = CreatePopupMenu() else { return Some(LRESULT(1)) };
                 let _ = AppendMenuW(menu, MF_STRING, 1, w!("&New tab\tCtrl+T"));
+                let on_tab = if tab >= 0 { MF_ENABLED } else { MF_GRAYED };
+                let _ = AppendMenuW(menu, MF_STRING | on_tab, 3, w!("&Duplicate tab\tCtrl+Shift+K"));
                 let flags = if tab >= 0 && with_app(|a| a.tabs.len()).unwrap_or(1) > 1 {
                     MF_ENABLED
                 } else {
@@ -278,6 +294,7 @@ pub(super) fn on_notify(hdr: &NMHDR) -> Option<LRESULT> {
                 match cmd {
                     1 => new_tab(None),
                     2 => close_tab(tab as usize),
+                    3 => duplicate(tab as usize),
                     _ => {}
                 }
             }

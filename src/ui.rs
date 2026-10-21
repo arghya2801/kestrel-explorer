@@ -698,6 +698,7 @@ fn on_key(msg: &MSG) -> bool {
         }
         VK_ESCAPE => cancel_loading(),
         VK_T if ctrl => tabbar::new_tab(None),
+        VK_K if ctrl && shift => tabbar::duplicate(with_app(|a| a.tabs.active()).unwrap_or(0)),
         VK_N if ctrl && !shift => open_side_by_side(with_app(|a| a.hwnd).unwrap_or_default()),
         VK_W if ctrl => tabbar::close_active(),
         VK_TAB if ctrl => tabbar::cycle(shift_held()),
