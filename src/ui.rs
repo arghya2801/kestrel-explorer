@@ -571,6 +571,15 @@ pub fn translate(msg: &MSG) -> bool {
         grid::zoom((msg.wParam.0 >> 16) as i16 > 0);
         return true;
     }
+    // Shift+mouse wheel over a file list scrolls it sideways, as in Explorer.
+    if msg.message == WM_MOUSEWHEEL
+        && msg.wParam.0 & windows::Win32::System::SystemServices::MK_SHIFT.0 as usize != 0
+        && with_app(|a| a.views().any(|v| v.list == msg.hwnd)) == Some(true)
+    {
+        let delta = (msg.wParam.0 >> 16) as i16 as isize;
+        unsafe { SendMessageW(msg.hwnd, LVM_SCROLL, Some(WPARAM(-delta as usize)), Some(LPARAM(0))) };
+        return true;
+    }
     if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
         return false;
     }

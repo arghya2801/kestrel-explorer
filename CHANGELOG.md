@@ -6,6 +6,9 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ## [Unreleased]
 
+### Fixed
+- Shift+mouse wheel scrolls the file list sideways.
+
 ## [1.2.1] - 2026-10-15
 
 ### Added
