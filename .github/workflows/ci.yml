@@ -1,4 +1,5 @@
-# Every push and PR is linted, tested and built. A tag like v1.2.0 also builds a draft GitHub release.
+# Every push and PR is linted, tested and built, installer included. A tag like v1.2.0 also builds
+# a draft GitHub release with the exe, the MSI installer, symbols and checksums.
 name: ci
 
 on:
@@ -43,18 +44,27 @@ jobs:
       - name: Build
         run: cargo build --locked --release --bin kestrel
 
-      - name: Sign
+      # Before the installer is built, so the program inside it is signed too.
+      - name: Sign program
         if: startsWith(github.ref, 'refs/tags/v') && env.SIGNING_PFX != ''
         env:
           SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: ./.github/sign.ps1 target/release/kestrel.exe
+
+      # Per-user MSI from installer/kestrel.wxs. WiX 7 asks for a license acceptance; 6 doesn't.
+      - name: Installer
         run: |
-          $pfx = Join-Path $env:RUNNER_TEMP signing.pfx
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX))
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
-          & $signtool.FullName sign /f $pfx /p $env:SIGNING_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 target/release/kestrel.exe
-          $failed = $LASTEXITCODE
-          Remove-Item $pfx
-          if ($failed) { throw "signtool failed" }
+          $wix = Join-Path $env:RUNNER_TEMP wix
+          dotnet tool install wix --version 6.0.2 --tool-path $wix
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          & "$wix/wix.exe" build installer/kestrel.wxs -arch x64 -d Version=$version -o target/kestrel.msi
+          if ($LASTEXITCODE) { throw "wix build failed" }
+
+      - name: Sign installer
+        if: startsWith(github.ref, 'refs/tags/v') && env.SIGNING_PFX != ''
+        env:
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: ./.github/sign.ps1 target/kestrel.msi
 
       # The .pdb symbolicates crash dumps users send from %LOCALAPPDATA%\Kestrel\crashes.
       - name: Package
@@ -62,6 +72,7 @@ jobs:
         run: |
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item target/release/kestrel.exe "dist/kestrel-$env:VERSION-x64.exe"
+          Copy-Item target/kestrel.msi "dist/kestrel-$env:VERSION-x64.msi"
           Compress-Archive target/release/kestrel.pdb "dist/kestrel-$env:VERSION-x64-symbols.zip"
           Get-ChildItem dist | Get-FileHash -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)`n" } |

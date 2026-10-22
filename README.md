@@ -155,6 +155,14 @@ folder-sizes, group-by-date, reveal-in-sidebar, sync-panes, compare-panes, open-
 copy-to-other-pane, move-to-other-pane, swap-panes, mirror-pane, vertical-tabs and check-for-updates.
 Problems with the file are written to log.txt.
 
+## Install
+
+Each [release](https://github.com/arghya2801/kestrel-explorer/releases) has `kestrel-X.Y.Z-x64.msi`,
+an installer that needs no administrator rights: it puts Kestrel in %LOCALAPPDATA%\Programs\Kestrel
+and adds it to the Start menu. Installing a newer MSI replaces the older version, and uninstalling (from
+Settings > Apps) keeps your settings. The release also has the bare `kestrel-X.Y.Z-x64.exe`, which runs
+from anywhere.
+
 ## Build
 
 Requires Windows 10/11, Rust stable with the MSVC toolchain, and Visual Studio Build Tools.
@@ -162,6 +170,12 @@ Requires Windows 10/11, Rust stable with the MSVC toolchain, and Visual Studio B
 ~~~powershell
 cargo build --release
 target\release\kestrel.exe [folder]
+~~~
+
+The installer needs [WiX](https://wixtoolset.org) 6 (`dotnet tool install --global wix --version 6.0.2`):
+
+~~~powershell
+wix build installer/kestrel.wxs -arch x64 -d Version=1.3.1 -o target/kestrel.msi
 ~~~
 
 Closing the windows leaves the process running until pending copies and moves finish.
