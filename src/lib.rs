@@ -16,6 +16,7 @@ pub mod preview;
 pub mod search;
 pub mod session;
 pub mod settings;
+pub mod sevenzip;
 pub mod shell;
 pub mod shellmenu;
 pub mod sort;

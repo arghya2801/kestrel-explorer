@@ -1,0 +1,61 @@
+<!--
+  Kestrel's installer: a per-user MSI (no administrator rights) that puts kestrel.exe in
+  %LOCALAPPDATA%\Programs\Kestrel and adds a Start menu shortcut. Each version replaces the
+  last. Uninstalling keeps settings and sessions in %LOCALAPPDATA%\Kestrel.
+
+  From the repository root, after a release build of kestrel.exe, with WiX 6 installed as a dotnet tool:
+    wix build installer/kestrel.wxs -arch x64 -d Version=1.3.1 -o target/kestrel.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <?ifndef Exe?>
+  <?define Exe = target\release\kestrel.exe ?>
+  <?endif?>
+  <!-- Never change UpgradeCode: it is how a new version finds the old one to replace. -->
+  <Package
+      Name="Kestrel"
+      Manufacturer="Arghya Chakrabarty"
+      Version="$(Version)"
+      UpgradeCode="36A91D72-92A4-4E11-AC6A-352FA869151B"
+      Scope="perUser">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Kestrel is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="kestrel.ico" SourceFile="res\app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="kestrel.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/arghya2801/kestrel-explorer" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <!-- A folder chosen at install time (INSTALLFOLDER=...) is remembered, so upgrades and
+         uninstalls act on it rather than on the default folder. -->
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch Id="RememberedFolder" Root="HKCU" Key="Software\Kestrel\Installer" Name="InstallFolder" Type="raw" />
+    </Property>
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Kestrel" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- In the user's profile a component's key is a registry value, not the file. -->
+    <Component Id="Program" Directory="INSTALLFOLDER" Guid="AB5805A4-DDE7-4DF2-8D6D-55BCF6A53F3C">
+      <File Id="KestrelExe" Source="$(Exe)" Name="kestrel.exe" />
+      <RegistryValue Root="HKCU" Key="Software\Kestrel\Installer" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+      <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+      <!-- Only removed when empty: other per-user programs live there too. -->
+      <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
+      <!-- Settings > Startup > "Open in Kestrel" adds these; they would point at a removed program. -->
+      <RemoveRegistryKey Root="HKCU" Key="Software\Classes\Directory\shell\Kestrel" Action="removeOnUninstall" />
+      <RemoveRegistryKey Root="HKCU" Key="Software\Classes\Directory\Background\shell\Kestrel" Action="removeOnUninstall" />
+      <RemoveRegistryKey Root="HKCU" Key="Software\Classes\Drive\shell\Kestrel" Action="removeOnUninstall" />
+      <RemoveRegistryKey Root="HKCU" Key="Software\Kestrel\Installer" Action="removeOnUninstall" />
+    </Component>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="KestrelShortcut" Name="Kestrel" Description="File explorer" Target="[INSTALLFOLDER]kestrel.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\Kestrel\Installer" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+  </Package>
+</Wix>

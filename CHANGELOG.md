@@ -6,12 +6,16 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-22
+
 ### Added
+- An MSI installer in each release. It needs no administrator rights, installs to %LOCALAPPDATA%\Programs\Kestrel with a Start menu shortcut, replaces older versions, and keeps your settings when uninstalled.
 - This PC: click it in the sidebar, or type it in the address bar, for a page listing the drives with their type, free space and size. Up from a drive's root goes there, and a drive that disappears while open falls back to it. (#19)
 - Tabs above the sidebar: View > Tabs above the sidebar, or a tab's right-click menu, lists the tabs in a column above the sidebar instead of along the top. Each window remembers the choice. (#16)
 - Split panes: Open in other pane for folders in the list and the sidebar (it splits the view if needed); Copy to other pane (Shift+F5) and Move to other pane (Shift+F6); View > Swap panes (Ctrl+U); View > Show this folder in the other pane (Ctrl+Shift+U). (#17)
 - Pin to Quick access and Unpin from Quick access on the right-click menus of the file list and the sidebar. The sidebar's menu also opens a folder in a new tab, in the other pane, or its Properties. (#15)
 - Hovering a tab or a sidebar item shows its full path. (#18)
+- A 7-Zip submenu on the file list's right-click menu when 7-Zip is installed: Open archive, Extract files…, Extract Here, Extract to "name\", Test archive, Add to archive…, Add to "name.7z" and Add to "name.zip". It runs 7-Zip's own programs, which show their progress and errors; Undo doesn't cover them.
 
 ### Changed
 - Tabs on different folders of the same name add the parent folders that tell them apart ("MFA221 · bin", "MFA221 · target"). Quick access names pinned folders the same way instead of by their full path. (#18)
