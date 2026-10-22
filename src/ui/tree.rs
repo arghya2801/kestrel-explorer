@@ -1,11 +1,15 @@
 //! Sidebar: Quick access folders and drives, folders loaded on expand by a worker.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Controls::*;
-use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_TABSTOP};
-use windows::core::{HSTRING, PWSTR, Result, w};
+use windows::Win32::UI::WindowsAndMessaging::{
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, MF_SEPARATOR, MF_STRING, SendMessageW,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WS_TABSTOP,
+};
+use windows::core::{HSTRING, PCWSTR, PWSTR, Result, w};
 
 use super::{Event, child, go, set_status, spawn, with_app};
 use crate::places::{self, DriveKind};
@@ -34,7 +38,7 @@ pub(super) struct Node {
 
 pub(super) unsafe fn create(parent: HWND) -> Result<HWND> {
     unsafe {
-        let style = TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT;
+        let style = TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | TVS_INFOTIP;
         let tree =
             child(parent, WC_TREEVIEWW, w!(""), WS_TABSTOP | WINDOW_STYLE(style), WINDOW_EX_STYLE(0), 0)?;
         let ex = TVS_EX_DOUBLEBUFFER as usize;
@@ -47,15 +51,14 @@ pub(super) unsafe fn create(parent: HWND) -> Result<HWND> {
 /// Adds the root groups and returns the "This PC" node. Call once the app state exists.
 pub(super) fn populate() -> usize {
     let quick = insert(None, "Quick access", None, true);
-    for (name, path) in places::known_folders() {
-        let node = insert(Some(quick), name, Some(path.clone()), true);
-        with_app(|a| a.view.icons.request_node((a.tree_epoch << 32) | node, path));
+    let shown = quick_access();
+    for (path, name) in shown.iter().zip(places::short_names(&shown)) {
+        let node = insert(Some(quick), &name, Some(path.clone()), true);
+        with_app(|a| a.view.icons.request_node((a.tree_epoch << 32) | node, path.clone()));
     }
-    for path in with_app(|a| a.pins.clone()).unwrap_or_default() {
-        let node = insert(Some(quick), &path.display().to_string(), Some(path.clone()), true);
-        with_app(|a| a.view.icons.request_node((a.tree_epoch << 32) | node, path));
-    }
-    let pc = insert(None, "This PC", None, true);
+    // This PC opens the drives page; its drives are already below it, so it never loads.
+    let pc = insert(None, places::THIS_PC, Some(places::this_pc()), true);
+    with_app(|a| a.nodes[pc].state = State::Loaded);
     add_drives(pc);
     for group in [quick, pc] {
         expand(group);
@@ -180,14 +183,35 @@ fn set_expandable(node: usize, expandable: bool) {
 
 /// `None` = not handled.
 pub(super) unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
-    let nm = unsafe { &*(lp.0 as *const NMTREEVIEWW) };
-    let node = nm.itemNew.lParam.0 as usize;
+    // Only expanding and selecting carry this larger structure.
+    let tree_view = || unsafe { &*(lp.0 as *const NMTREEVIEWW) };
+    let nm = matches!(hdr.code, TVN_ITEMEXPANDINGW | TVN_SELCHANGEDW).then(tree_view);
+    let node = nm.map_or(0, |nm| nm.itemNew.lParam.0 as usize);
+    let action = nm.map(|nm| nm.action);
     match hdr.code {
-        TVN_ITEMEXPANDINGW if nm.action.0 & TVE_EXPAND.0 != 0 => {
+        TVN_ITEMEXPANDINGW if action.is_some_and(|a| a.0 & TVE_EXPAND.0 != 0) => {
             start_loading(node);
             Some(LRESULT(0))
         }
-        TVN_SELCHANGEDW if nm.action == TVC_BYMOUSE || nm.action == TVC_BYKEYBOARD => {
+        // Hovering an item shows its full path.
+        TVN_GETINFOTIPW => {
+            let tip = unsafe { &mut *(lp.0 as *mut NMTVGETINFOTIPW) };
+            let path =
+                with_app(|a| a.nodes.get(tip.lParam.0 as usize).and_then(|n| n.path.clone())).flatten();
+            if let Some(path) = path
+                && tip.cchTextMax > 0
+                && !tip.pszText.is_null()
+            {
+                let text: Vec<u16> = path.display().to_string().encode_utf16().collect();
+                let n = text.len().min(tip.cchTextMax as usize - 1);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(text.as_ptr(), tip.pszText.0, n);
+                    *tip.pszText.0.add(n) = 0;
+                }
+            }
+            Some(LRESULT(0))
+        }
+        TVN_SELCHANGEDW if action == Some(TVC_BYMOUSE) || action == Some(TVC_BYKEYBOARD) => {
             if let Some(parent) =
                 with_app(|a| a.nodes.get(node).filter(|n| n.more).and_then(|n| n.parent)).flatten()
             {
@@ -200,6 +224,91 @@ pub(super) unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
             Some(LRESULT(0))
         }
         _ => None,
+    }
+}
+
+/// The folders Quick access shows, in order.
+fn quick_access() -> Vec<PathBuf> {
+    let known: Vec<PathBuf> = places::known_folders().into_iter().map(|k| k.1).collect();
+    with_app(|a| places::quick_access(&known, &a.pins, &a.unpinned)).unwrap_or_default()
+}
+
+pub(super) fn is_pinned(dir: &Path) -> bool {
+    quick_access().iter().any(|p| crate::browser::same_dir(p, dir))
+}
+
+/// Adds `dir` to Quick access or takes it out, in every window, and saves the change.
+pub(super) fn set_pinned(dir: &Path, on: bool) {
+    if !crate::settings::rememberable(dir) {
+        return;
+    }
+    let known: Vec<PathBuf> = places::known_folders().into_iter().map(|k| k.1).collect();
+    let Some(hwnd) = with_app(|a| {
+        places::set_quick_access(dir, on, &known, &mut a.pins, &mut a.unpinned);
+        a.hwnd
+    }) else {
+        return;
+    };
+    reload();
+    if let Some(s) = super::current_settings(hwnd) {
+        super::save_preferences(s);
+    }
+}
+
+/// Right-click (or Shift+F10) on the sidebar. `lp` is the screen point, or -1 from the keyboard.
+pub(super) fn context_menu(hwnd: HWND, lp: LPARAM) {
+    let Some(tree) = with_app(|a| a.tree) else { return };
+    let mut at = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
+    let item = unsafe {
+        if lp.0 == -1 {
+            let _ = GetCursorPos(&mut at);
+            SendMessageW(tree, TVM_GETNEXTITEM, Some(WPARAM(TVGN_CARET as usize)), None).0
+        } else {
+            let mut hit = TVHITTESTINFO { pt: at, ..Default::default() };
+            let _ = ScreenToClient(tree, &mut hit.pt);
+            SendMessageW(tree, TVM_HITTEST, None, Some(LPARAM(&mut hit as *mut _ as isize))).0
+        }
+    };
+    if item == 0 {
+        return;
+    }
+    let Some(path) =
+        with_app(|a| a.nodes.iter().find(|n| n.item == item).and_then(|n| n.path.clone())).flatten()
+    else {
+        return;
+    };
+    let pinned = is_pinned(&path);
+    const NEW_TAB: usize = 1;
+    const OTHER_PANE: usize = 2;
+    const PIN: usize = 3;
+    const PROPERTIES: usize = 4;
+    let picked = unsafe {
+        // Marks the item the menu is for, as Explorer does.
+        SendMessageW(tree, TVM_SELECTITEM, Some(WPARAM(TVGN_DROPHILITE as usize)), Some(LPARAM(item)));
+        let Ok(menu) = CreatePopupMenu() else { return };
+        let _ = AppendMenuW(menu, MF_STRING, NEW_TAB, w!("Open in new &tab"));
+        let _ = AppendMenuW(menu, MF_STRING, OTHER_PANE, w!("Open in other &pane"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let pin = if pinned { w!("&Unpin from Quick access") } else { w!("P&in to Quick access") };
+        let _ = AppendMenuW(menu, MF_STRING, PIN, pin);
+        if !places::is_this_pc(&path) {
+            let _ = AppendMenuW(menu, MF_STRING, PROPERTIES, w!("P&roperties"));
+        }
+        let picked = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, None, hwnd, None).0;
+        let _ = DestroyMenu(menu);
+        SendMessageW(tree, TVM_SELECTITEM, Some(WPARAM(TVGN_DROPHILITE as usize)), Some(LPARAM(0)));
+        picked as usize
+    };
+    match picked {
+        NEW_TAB => super::tabbar::new_tab(Some(path)),
+        OTHER_PANE => super::panes::open_in_other(path),
+        PIN => set_pinned(&path, !pinned),
+        PROPERTIES => {
+            if let Err(e) = crate::shellmenu::launch(at.x, at.y, &[path], true) {
+                set_status(&format!("Couldn't show properties: {e}"));
+            }
+        }
+        _ => {}
     }
 }
 

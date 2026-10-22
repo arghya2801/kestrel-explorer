@@ -210,7 +210,8 @@ impl Browser {
         if query.is_empty() {
             return None;
         }
-        let at = Location { dir: self.dir()?.to_path_buf(), query: Some(query.to_string()) };
+        let dir = self.dir().filter(|d| !crate::places::is_this_pc(d))?.to_path_buf();
+        let at = Location { dir, query: Some(query.to_string()) };
         let nav = if self.location().as_ref() == Some(&at) { Nav::Refresh } else { Nav::Go };
         Some(self.start(at, nav))
     }
@@ -348,8 +349,12 @@ impl Browser {
         };
         let (snap, order) = match result {
             Ok(ok) => ok,
-            Err(_) if matches!(nav, Nav::Changed | Nav::Escape) && at.dir.parent().is_some() => {
-                let parent = at.dir.parent().unwrap().to_path_buf();
+            // A removed drive climbs out to This PC.
+            Err(_)
+                if matches!(nav, Nav::Changed | Nav::Escape)
+                    && crate::network::up_from(&at.dir).is_some() =>
+            {
+                let parent = crate::network::up_from(&at.dir).unwrap();
                 return Applied::Gone(self.start(Location { dir: parent, query: None }, Nav::Escape));
             }
             Err(e) => {
@@ -525,7 +530,11 @@ impl Browser {
     pub fn path_at(&self, row: usize) -> Option<(PathBuf, bool)> {
         let s = self.snapshot()?;
         let i = *self.order.get(row)? as usize;
-        Some((s.dir.join(s.name_string(i)), s.is_dir(i)))
+        let path = match s.drives.get(i) {
+            Some(drive) => drive.root.clone(),
+            None => s.dir.join(s.name_string(i)),
+        };
+        Some((path, s.is_dir(i)))
     }
 
     /// `status` plus the selection's count and file size, and the drive's free space.
@@ -583,6 +592,9 @@ pub fn parse_location(input: &str, current: Option<&Path>) -> Option<PathBuf> {
         return None;
     }
     let s = expand_env(s);
+    if crate::places::is_this_pc(Path::new(&s)) {
+        return Some(crate::places::this_pc());
+    }
     let b = s.as_bytes();
     // A computer on the network: `\\srv` lists its shares.
     if crate::network::server_of(Path::new(&s)).is_some() {

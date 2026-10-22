@@ -31,6 +31,10 @@ pub struct Settings {
     pub tabs: Vec<SavedTab>,
     pub active_tab: usize,
     pub pins: Vec<PathBuf>,
+    /// Known folders (Desktop, Downloads...) removed from Quick access.
+    pub unpinned: Vec<PathBuf>,
+    /// Tabs listed above the sidebar instead of along the top.
+    pub vertical_tabs: bool,
     pub recent: Vec<PathBuf>,
     /// Folders shown grouped by date.
     pub grouped: Vec<PathBuf>,
@@ -59,6 +63,8 @@ impl Default for Settings {
             tabs: Vec::new(),
             active_tab: 0,
             pins: Vec::new(),
+            unpinned: Vec::new(),
+            vertical_tabs: false,
             recent: Vec::new(),
             grouped: Vec::new(),
             folder_sorts: Vec::new(),
@@ -143,6 +149,12 @@ impl Settings {
                         s.pins.push(p);
                     }
                 }
+                "unpin" => {
+                    if let Some(p) = decode_path(value).filter(|p| rememberable(p)) {
+                        s.unpinned.push(p);
+                    }
+                }
+                "vertical_tabs" => s.vertical_tabs = flag(value).unwrap_or(false),
                 "folder_sort" => {
                     let mut parts = value.splitn(3, ',');
                     if let (Some(p), Some(k), Some(d)) = (parts.next(), parts.next(), parts.next())
@@ -208,6 +220,10 @@ impl Settings {
         for p in self.pins.iter().filter(|p| rememberable(p)) {
             out += &format!("pin={}\n", encode_path(p));
         }
+        for p in self.unpinned.iter().filter(|p| rememberable(p)) {
+            out += &format!("unpin={}\n", encode_path(p));
+        }
+        out += &format!("vertical_tabs={}\n", self.vertical_tabs);
         for (p, sort) in self.folder_sorts.iter().filter(|(p, _)| rememberable(p)) {
             let key = KEYS.iter().find(|(k, _)| *k == sort.key).map_or("Name", |k| k.1);
             out += &format!("folder_sort={},{key},{}\n", encode_path(p), sort.descending);
@@ -282,6 +298,9 @@ pub fn rememberable(path: &Path) -> bool {
     if text.contains("://") || text.contains(['\r', '\n', '\0']) {
         return false;
     }
+    if crate::places::is_this_pc(path) {
+        return true;
+    }
     if let Some(rest) = text.strip_prefix(r"\\") {
         return !rest.split('\\').next().unwrap_or_default().contains('@');
     }
@@ -327,6 +346,8 @@ mod tests {
             }],
             active_tab: 0,
             pins: vec![PathBuf::from(r"C:\pinned,=Ü")],
+            unpinned: vec![PathBuf::from(r"C:\Users\me\Music")],
+            vertical_tabs: true,
             recent: vec![PathBuf::from(r"D:\recent")],
             grouped: vec![PathBuf::from(r"C:\Users\me\Downloads")],
             folder_sorts: vec![(

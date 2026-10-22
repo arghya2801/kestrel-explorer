@@ -29,14 +29,17 @@ fn main() {
     if !windows.is_empty() {
         let theme = settings.theme;
         let pins = settings.pins.clone();
+        let unpinned = settings.unpinned.clone();
         let recent = settings.recent.clone();
         settings = windows.remove(0);
         settings.theme = theme;
         settings.pins = pins.clone();
+        settings.unpinned = unpinned.clone();
         settings.recent = recent.clone();
         for window in &mut windows {
             window.theme = theme;
             window.pins = pins.clone();
+            window.unpinned = unpinned.clone();
             window.recent = recent.clone();
         }
     } else {

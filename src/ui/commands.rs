@@ -34,9 +34,33 @@ pub const CMD_OPEN_NEW_TAB: usize = 112;
 pub const CMD_PROPERTIES: usize = 113;
 pub const CMD_UNDO: usize = 114;
 pub const CMD_REDO: usize = 115;
+pub const CMD_PIN: usize = 116;
+pub const CMD_OPEN_OTHER_PANE: usize = 117;
+pub const CMD_COPY_TO_OTHER: usize = 118;
+pub const CMD_MOVE_TO_OTHER: usize = 119;
+
+/// Commands that change files. This PC lists drives, not files: they don't apply there.
+const CHANGES_FILES: [usize; 9] = [
+    CMD_CUT,
+    CMD_COPY,
+    CMD_PASTE,
+    CMD_RENAME,
+    CMD_DELETE,
+    CMD_DELETE_PERMANENTLY,
+    CMD_NEW_FOLDER,
+    CMD_COPY_TO_OTHER,
+    CMD_MOVE_TO_OTHER,
+];
+
+pub(super) fn on_this_pc() -> bool {
+    current_dir().is_some_and(|d| crate::places::is_this_pc(&d))
+}
 
 /// Runs a menu command. Returns false for ids that aren't ours.
 pub(super) fn run(cmd: usize) -> bool {
+    if CHANGES_FILES.contains(&cmd) && on_this_pc() {
+        return true;
+    }
     match cmd {
         CMD_OPEN => open_selected(),
         CMD_CUT => copy_selection(true),
@@ -62,9 +86,40 @@ pub(super) fn run(cmd: usize) -> bool {
                 super::tabbar::new_tab(Some(dir));
             }
         }
+        CMD_OPEN_OTHER_PANE => {
+            if let Some((dir, true)) = selected_paths().into_iter().next() {
+                super::panes::open_in_other(dir);
+            }
+        }
+        CMD_PIN => {
+            if let Some(dir) = pin_target() {
+                super::tree::set_pinned(&dir, !super::tree::is_pinned(&dir));
+            }
+        }
+        CMD_COPY_TO_OTHER | CMD_MOVE_TO_OTHER => to_other_pane(cmd == CMD_MOVE_TO_OTHER),
         _ => return false,
     }
     true
+}
+
+/// The folder Pin acts on: the selected folder, or with nothing selected, the open one.
+fn pin_target() -> Option<PathBuf> {
+    match selected_paths().first() {
+        Some((dir, true)) => Some(dir.clone()),
+        Some(_) => None,
+        None => current_dir(),
+    }
+}
+
+/// Copies or moves the selection into the folder shown in the other pane.
+fn to_other_pane(move_: bool) {
+    let paths: Vec<PathBuf> = selected_paths().into_iter().map(|p| p.0).collect();
+    let Some(dest) = super::panes::other_dir() else {
+        return set_status("Open a second pane (Split) to copy or move there.");
+    };
+    if !paths.is_empty() {
+        transfer(paths, dest, move_);
+    }
 }
 
 fn current_dir() -> Option<PathBuf> {
@@ -89,8 +144,11 @@ pub(super) fn context_menu(hwnd: HWND, lp: LPARAM) {
         return more_options(Some(at), false);
     }
     let has_selection = !selected_rows().is_empty();
+    let files = !on_this_pc();
     // Only asks whether files are there; doesn't make the copying app render anything.
-    let can_paste = unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_ok();
+    let can_paste = files && unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_ok();
+    let changes = has_selection && files;
+    let other_pane = super::panes::other_dir().is_some();
     let (mut x, mut y) = ((lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
     if lp.0 == -1 {
         // Shift+F10 / menu key: under the focused row, or the list's corner.
@@ -125,14 +183,25 @@ pub(super) fn context_menu(hwnd: HWND, lp: LPARAM) {
         add(CMD_OPEN, w!("&Open\tEnter"), has_selection);
         let folder_selected = selected_paths().first().is_some_and(|p| p.1);
         add(CMD_OPEN_NEW_TAB, w!("Open in new &tab"), folder_selected);
+        add(CMD_OPEN_OTHER_PANE, w!("Open in other pa&ne"), folder_selected);
+        let pin = pin_target();
+        let pin_text = match &pin {
+            Some(dir) if super::tree::is_pinned(dir) => w!("Unpin from &Quick access"),
+            _ => w!("Pin to &Quick access"),
+        };
+        add(CMD_PIN, pin_text, pin.is_some());
         line();
-        add(CMD_CUT, w!("Cu&t\tCtrl+X"), has_selection);
-        add(CMD_COPY, w!("&Copy\tCtrl+C"), has_selection);
+        add(CMD_CUT, w!("Cu&t\tCtrl+X"), changes);
+        add(CMD_COPY, w!("&Copy\tCtrl+C"), changes);
         add(CMD_PASTE, w!("&Paste\tCtrl+V"), can_paste);
+        if other_pane {
+            add(CMD_COPY_TO_OTHER, w!("Copy to other pane\tShift+F5"), changes);
+            add(CMD_MOVE_TO_OTHER, w!("Move to other pane\tShift+F6"), changes);
+        }
         line();
-        add(CMD_RENAME, w!("Rena&me\tF2"), has_selection);
-        add(CMD_DELETE, w!("&Delete\tDel"), has_selection);
-        add(CMD_NEW_FOLDER, w!("New &folder\tCtrl+Shift+N"), true);
+        add(CMD_RENAME, w!("Rena&me\tF2"), changes);
+        add(CMD_DELETE, w!("&Delete\tDel"), changes);
+        add(CMD_NEW_FOLDER, w!("New &folder\tCtrl+Shift+N"), files);
         let (can_undo, can_redo) = ops::can_undo_redo();
         add(CMD_UNDO, w!("&Undo\tCtrl+Z"), can_undo);
         add(CMD_REDO, w!("Red&o\tCtrl+Y"), can_redo);
@@ -153,7 +222,7 @@ pub(super) fn context_menu(hwnd: HWND, lp: LPARAM) {
 /// helper process so its add-ons can't crash or hang this window.
 fn more_options(at: Option<(i32, i32)>, properties: bool) {
     let mut paths: Vec<PathBuf> = selected_paths().into_iter().map(|p| p.0).collect();
-    if paths.is_empty() {
+    if paths.is_empty() && !on_this_pc() {
         paths.extend(current_dir());
     }
     if paths.is_empty() {
@@ -247,6 +316,7 @@ fn select_all() {
 fn show_in_explorer() {
     let target = match selected_paths().into_iter().next() {
         Some((p, _)) => format!("/select,\"{}\"", p.display()),
+        None if on_this_pc() => "shell:MyComputerFolder".into(),
         None => match current_dir() {
             Some(d) => format!("\"{}\"", d.display()),
             None => return,

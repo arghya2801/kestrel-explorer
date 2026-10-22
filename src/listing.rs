@@ -32,11 +32,13 @@ pub struct Snapshot {
     names: Vec<u16>,
     /// Free bytes on the folder's volume, looked up by the listing worker.
     pub free: Option<u64>,
+    /// This PC only: each entry's drive.
+    pub drives: Vec<crate::places::DriveRow>,
 }
 
 impl Snapshot {
     pub fn new(dir: PathBuf) -> Self {
-        Snapshot { dir, entries: Vec::new(), names: Vec::new(), free: None }
+        Snapshot { dir, entries: Vec::new(), names: Vec::new(), free: None, drives: Vec::new() }
     }
     pub fn add(&mut self, name: &[u16], attrs: u32, size: u64, modified: u64) {
         self.entries.push(Entry {

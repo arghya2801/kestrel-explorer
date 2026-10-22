@@ -20,6 +20,10 @@ use crate::dnd::{self, MOVE, NONE};
 
 /// Starts dragging the selected items out of the list.
 pub(super) fn begin_drag() {
+    // This PC's rows are whole drives: not something to drag around.
+    if commands::on_this_pc() {
+        return;
+    }
     let rows = selected_rows();
     let Some((list, paths)) = with_app(|a| {
         (a.view.list, rows.iter().filter_map(|&r| a.view.browser.path_at(r).map(|p| p.0)).collect::<Vec<_>>())
@@ -67,7 +71,10 @@ impl DropTarget {
             let over = usize::try_from(row).ok().and_then(|r| a.view.browser.path_at(r).map(|p| (r, p)));
             match over {
                 Some((r, (dir, true))) if !paths.contains(&dir) => (Some(r), Some(dir)),
-                _ => (None, a.view.browser.dir().map(|d| d.to_path_buf())),
+                _ => (
+                    None,
+                    a.view.browser.dir().filter(|d| !crate::places::is_this_pc(d)).map(|d| d.to_path_buf()),
+                ),
             }
         })
         .unwrap_or((None, None));

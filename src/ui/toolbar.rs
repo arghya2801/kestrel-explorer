@@ -39,6 +39,9 @@ pub const SYNC_PANES: usize = 232;
 pub const COMPARE: usize = 233;
 pub const REVEAL: usize = 234;
 pub const GROUP: usize = 235;
+pub const SWAP_PANES: usize = 236;
+pub const MIRROR_PANE: usize = 237;
+pub const VERTICAL_TABS: usize = 238;
 const RELEASES: &str = "https://github.com/arghya2801/kestrel-explorer/releases/latest";
 
 /// Logical y where the toolbar row ends and the tab strip starts.
@@ -131,19 +134,22 @@ pub(super) fn separators(parent: HWND) -> Vec<RECT> {
 pub(super) fn enabled(id: usize) -> bool {
     use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
     use windows::Win32::System::Ole::CF_HDROP;
-    let Some((list, has_folder)) = with_app(|a| (a.view.list, a.view.browser.dir().is_some())) else {
+    let Some((list, dir)) = with_app(|a| (a.view.list, a.view.browser.dir().map(std::path::PathBuf::from)))
+    else {
         return false;
     };
+    // This PC lists drives: nothing there to cut, paste into, or measure.
+    let has_folder = dir.as_deref().is_some_and(|d| !crate::places::is_this_pc(d));
+    let selected = unsafe { SendMessageW(list, LVM_GETSELECTEDCOUNT, None, None).0 > 0 };
     match id {
-        commands::CMD_CUT
-        | commands::CMD_COPY
-        | commands::CMD_RENAME
-        | commands::CMD_DELETE
-        | commands::CMD_COPY_PATH
-        | commands::CMD_OPEN => unsafe { SendMessageW(list, LVM_GETSELECTEDCOUNT, None, None).0 > 0 },
+        commands::CMD_CUT | commands::CMD_COPY | commands::CMD_RENAME | commands::CMD_DELETE => {
+            has_folder && selected
+        }
+        commands::CMD_COPY_PATH | commands::CMD_OPEN => selected,
         commands::CMD_PASTE => has_folder && unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_ok(),
-        commands::CMD_NEW_FOLDER | REFRESH => has_folder,
-        SYNC_PANES | COMPARE => with_app(|a| a.split_view) == Some(true),
+        commands::CMD_NEW_FOLDER | FOLDER_SIZES | TERMINAL => has_folder,
+        REFRESH => dir.is_some(),
+        SYNC_PANES | COMPARE | SWAP_PANES | MIRROR_PANE => with_app(|a| a.split_view) == Some(true),
         _ => true,
     }
 }
@@ -161,24 +167,8 @@ pub(super) fn execute(id: usize) -> bool {
     let Some(hwnd) = with_app(|a| a.hwnd) else { return false };
     match id {
         PIN => {
-            with_app(|a| {
-                if let Some(dir) = a
-                    .view
-                    .browser
-                    .dir()
-                    .map(std::path::PathBuf::from)
-                    .filter(|p| crate::settings::rememberable(p))
-                {
-                    if a.pins.contains(&dir) {
-                        a.pins.retain(|p| p != &dir);
-                    } else {
-                        a.pins.push(dir);
-                    }
-                }
-            });
-            super::tree::reload();
-            if let Some(s) = super::current_settings(hwnd) {
-                super::save_preferences(s);
+            if let Some(dir) = with_app(|a| a.view.browser.dir().map(std::path::PathBuf::from)).flatten() {
+                super::tree::set_pinned(&dir, !super::tree::is_pinned(&dir));
             }
         }
         RECENT | PARENTS => locations(hwnd, id == RECENT),
@@ -194,8 +184,11 @@ pub(super) fn execute(id: usize) -> bool {
             });
         }
         TERMINAL => {
-            if let Some((dir, events)) =
-                with_app(|a| a.view.browser.dir().map(|p| (p.to_path_buf(), a.events.clone()))).flatten()
+            if let Some((dir, events)) = with_app(|a| {
+                let dir = a.view.browser.dir().filter(|d| !crate::places::is_this_pc(d))?;
+                Some((dir.to_path_buf(), a.events.clone()))
+            })
+            .flatten()
             {
                 super::spawn("terminal", move || {
                     if let Err(e) = crate::shell::terminal(&dir) {
@@ -219,6 +212,9 @@ pub(super) fn execute(id: usize) -> bool {
         PREVIEW => preview::toggle(hwnd),
         FOLDER_SIZES => super::calculate_folder_sizes(),
         SYNC_PANES => _ = with_app(|a| a.sync_panes = !a.sync_panes),
+        SWAP_PANES => super::panes::swap(),
+        MIRROR_PANE => super::panes::mirror(),
+        VERTICAL_TABS => super::tabbar::set_vertical(with_app(|a| !a.vertical_tabs).unwrap_or(false)),
         COMPARE => super::panes::compare(),
         REVEAL => super::tree::reveal(),
         GROUP => {
@@ -319,6 +315,9 @@ fn popup(hwnd: HWND, kind: usize) {
                 add(FOLDER_SIZES, "Calculate folder sizes", false);
                 add(SYNC_PANES, "Sync pane navigation", with_app(|a| a.sync_panes).unwrap_or(false));
                 add(COMPARE, "Compare panes", false);
+                add(SWAP_PANES, "Swap panes\tCtrl+U", false);
+                add(MIRROR_PANE, "Show this folder in the other pane\tCtrl+Shift+U", false);
+                add(VERTICAL_TABS, "Tabs above the sidebar", with_app(|a| a.vertical_tabs).unwrap_or(false));
             }
             HELP => {
                 add(SHORTCUTS, "Keyboard shortcuts\tF1", false);
@@ -328,10 +327,11 @@ fn popup(hwnd: HWND, kind: usize) {
                 for &(id, label, _) in BUTTONS.iter().filter(|b| !matches!(b.0, MORE | SETTINGS | HELP)) {
                     add(id, label, false);
                 }
-                let pinned =
-                    with_app(|a| a.view.browser.dir().is_some_and(|p| a.pins.iter().any(|pin| pin == p)))
-                        .unwrap_or(false);
-                add(PIN, if pinned { "Unpin current folder" } else { "Pin current folder" }, pinned);
+                let pinned = with_app(|a| a.view.browser.dir().map(std::path::PathBuf::from))
+                    .flatten()
+                    .is_some_and(|d| super::tree::is_pinned(&d));
+                let pin = if pinned { "Unpin from Quick access" } else { "Pin to Quick access" };
+                add(PIN, pin, pinned);
                 add(RECENT, "Recent folders", false);
                 add(PARENTS, "Parent folders", false);
                 add(TERMINAL, "Open terminal here", false);

@@ -1,18 +1,19 @@
 # Kestrel handoff
 
-Updated 2026-10-21. Version 1.3.0; see CHANGELOG.md.
+Updated 2026-10-22. Version 1.3.0 plus Unreleased changes; see CHANGELOG.md.
 [ROADMAP.md](ROADMAP.md) holds what is built, what remains and the measurements.
 
 ## Validation
 
-Latest full applicable run: **143 unit tests, 50 window tests and the key-binding test passed**.
+Latest full applicable run: **154 unit tests, 59 window tests and the key-binding test passed**.
 Clippy passed across all targets with warnings denied; formatting passed.
 
 Tests cover independent panes and tab switching, session round trips and sign-out saving, missing
 startup folders, dead-share cancellation, stale work, narrow layouts, sidebar paging past 5,000 children,
 large selection restoration, thumbnail resources and sizes, Settings validation/Cancel, guide opening,
-pins/breadcrumbs, operation history, undo of every recorded operation (including Recycle Bin restore),
-optional columns, and closing a window during a verified 8 MiB copy.
+pins/breadcrumbs, unpinning standard Quick access folders, This PC, same-name tab labels, vertical tabs,
+copy/move/swap/mirror between panes, operation history, undo of every recorded operation (including
+Recycle Bin restore), optional columns, and closing a window during a verified 8 MiB copy.
 
 Exclusions:
 - One unit and one window SMB test are explicitly ignored because readable localhost C$ is unavailable.

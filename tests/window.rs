@@ -1542,6 +1542,8 @@ fn lists_in(hwnd: HWND) -> Vec<HWND> {
         lists.push(list);
         after = Some(list);
     }
+    // File lists only, not the vertical tab list.
+    lists.retain(|&l| ui::tab_list() != Some(l));
     lists
 }
 fn focus_pane(hwnd: HWND, list: HWND) {
@@ -1946,16 +1948,10 @@ fn pins_breadcrumbs_and_address_editing_work_together() {
     command(hwnd, ui::toolbar::PIN);
     let tree = tree_of(hwnd);
     let quick = tv_children(tree, 0)[0].1;
-    assert!(
-        tv_children(tree, quick).iter().any(|(p, _)| p == &t.0.join("one").join("two").display().to_string())
-    );
+    assert!(tv_children(tree, quick).iter().any(|(name, _)| name == "two"));
     command(hwnd, ui::toolbar::PIN);
     let quick = tv_children(tree, 0)[0].1;
-    assert!(
-        !tv_children(tree, quick)
-            .iter()
-            .any(|(p, _)| p == &t.0.join("one").join("two").display().to_string())
-    );
+    assert!(!tv_children(tree, quick).iter().any(|(name, _)| name == "two"));
     let parent = (400..405)
         .find(|&id| unsafe { GetDlgItem(Some(hwnd), id) }.ok().is_some_and(|h| window_text_of(h) == "one"))
         .unwrap();
@@ -1970,6 +1966,215 @@ fn pins_breadcrumbs_and_address_editing_work_together() {
     let saved = ui::take_final_settings().unwrap();
     assert_eq!(saved.recent.first(), Some(&t.0));
     assert!(saved.pins.is_empty());
+    assert!(pump_until(WAIT, || ui::running_operations() == 0));
+}
+
+#[test]
+fn quick_access_pins_folders_and_takes_out_known_ones() {
+    let _desktop = desktop();
+    let t = TempDir::new("quick");
+    std::fs::create_dir_all(t.0.join("a").join("work")).unwrap();
+    std::fs::create_dir_all(t.0.join("b").join("work")).unwrap();
+    let hwnd = open(&t.0.join("a"));
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["work"]));
+    let tree = tree_of(hwnd);
+    let quick = || -> Vec<String> {
+        let group = tv_children(tree, 0)[0].1;
+        tv_children(tree, group).into_iter().map(|c| c.0).collect()
+    };
+    let desktop_name = quick()[0].clone();
+    // The selected folder, from the list's right-click menu.
+    select_row(list, 0);
+    command(hwnd, ui::CMD_PIN);
+    assert!(quick().contains(&"work".to_string()), "{:?}", quick());
+    // A second folder of the same name: both show their parent.
+    navigate_to(hwnd, &t.0.join("b"));
+    assert!(pump_until(WAIT, || rows(list) == ["work"]));
+    select_row(list, 0);
+    command(hwnd, ui::CMD_PIN);
+    let names = quick();
+    assert!(names.contains(&"work · a".to_string()) && names.contains(&"work · b".to_string()), "{names:?}");
+    command(hwnd, ui::CMD_PIN);
+    navigate_to(hwnd, &t.0.join("a").join("work"));
+    assert!(pump_until(WAIT, || rows(list).is_empty()));
+    // Nothing selected: the open folder.
+    command(hwnd, ui::CMD_PIN);
+    assert!(!quick().iter().any(|n| n.starts_with("work")), "{:?}", quick());
+    // A known folder can be taken out, and put back.
+    let desktop = places::known_folders()[0].1.clone();
+    navigate_to(hwnd, &desktop);
+    assert!(pump_until(WAIT, || ui_dir(hwnd) == desktop.display().to_string()));
+    command(hwnd, ui::toolbar::PIN);
+    assert!(!quick().contains(&desktop_name), "{:?}", quick());
+    command(hwnd, ui::toolbar::PIN);
+    assert_eq!(quick()[0], desktop_name);
+    close(hwnd);
+    let saved = ui::take_final_settings().unwrap();
+    assert!(saved.pins.is_empty() && saved.unpinned.is_empty(), "{:?} {:?}", saved.pins, saved.unpinned);
+    assert!(pump_until(WAIT, || ui::running_operations() == 0));
+}
+
+/// The folder in the address bar.
+fn ui_dir(hwnd: HWND) -> String {
+    window_text_of(find(hwnd, w!("Edit")))
+}
+
+#[test]
+fn this_pc_lists_drives_and_is_above_each_drive() {
+    let _desktop = desktop();
+    let t = TempDir::new("thispc");
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    navigate_to(hwnd, Path::new("this pc"));
+    let sys = format!("({})", std::env::var("SystemDrive").unwrap());
+    assert!(pump_until(WAIT, || rows(list).iter().any(|r| r.ends_with(&sys))), "{:?}", rows(list));
+    assert!(pump_until(WAIT, || ui_dir(hwnd) == "This PC"));
+    let row = rows(list).iter().position(|r| r.ends_with(&sys)).unwrap();
+    assert!(cell(list, row, 2).contains("free"), "{}", cell(list, row, 2));
+    assert!(!cell(list, row, 3).is_empty());
+    // Drives can't be deleted or renamed from here.
+    select_row(list, row);
+    let button = |text| unsafe { FindWindowExW(Some(hwnd), None, w!("Button"), text) }.unwrap();
+    assert!(!unsafe { IsWindowEnabled(button(w!("Delete"))) }.as_bool());
+    assert!(!unsafe { IsWindowEnabled(button(w!("New folder"))) }.as_bool());
+    activate(hwnd, list, row as i32);
+    let root = std::env::var("SystemDrive").unwrap() + "\\";
+    assert!(pump_until(WAIT, || ui_dir(hwnd) == root), "{}", ui_dir(hwnd));
+    alt_key(list, VK_UP);
+    assert!(pump_until(WAIT, || ui_dir(hwnd) == "This PC"), "{}", ui_dir(hwnd));
+    // The sidebar's This PC opens the page too.
+    navigate_to(hwnd, &t.0);
+    assert!(pump_until(WAIT, || ui_dir(hwnd) == t.0.display().to_string()));
+    let tree = tree_of(hwnd);
+    let pc = tv_children(tree, 0).into_iter().find(|(name, _)| name == "This PC").unwrap().1;
+    click_node(hwnd, tree, pc);
+    assert!(pump_until(WAIT, || ui_dir(hwnd) == "This PC"));
+    close(hwnd);
+}
+
+/// A mouse click on a sidebar item, as the tree reports it.
+fn click_node(hwnd: HWND, tree: HWND, item: isize) {
+    unsafe { SendMessageW(tree, TVM_SELECTITEM, Some(WPARAM(TVGN_CARET as usize)), Some(LPARAM(item))) };
+    let mut nm = NMTREEVIEWW { hdr: hdr(tree, TVN_SELCHANGEDW), action: TVC_BYMOUSE, ..Default::default() };
+    nm.itemNew.hItem = HTREEITEM(item);
+    nm.itemNew.lParam = LPARAM(tv_item(tree, item).1);
+    notify(hwnd, nm);
+}
+
+#[test]
+fn tabs_on_folders_of_the_same_name_show_their_parents() {
+    let _desktop = desktop();
+    let t = TempDir::new("samename");
+    for parent in ["bin", "target"] {
+        std::fs::create_dir_all(t.0.join(parent).join("MFA221")).unwrap();
+    }
+    let hwnd = open(&t.0.join("bin").join("MFA221"));
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || tab_labels(hwnd) == ["MFA221"]));
+    ctrl_key(list, VK_T, false);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
+    navigate_to(hwnd, &t.0.join("target").join("MFA221"));
+    assert!(
+        pump_until(WAIT, || tab_labels(hwnd) == ["MFA221 · bin", "MFA221 · target"]),
+        "{:?}",
+        tab_labels(hwnd)
+    );
+    navigate_to(hwnd, &t.0.join("target"));
+    assert!(pump_until(WAIT, || tab_labels(hwnd) == ["MFA221", "target"]), "{:?}", tab_labels(hwnd));
+    close(hwnd);
+}
+
+#[test]
+fn vertical_tabs_list_the_tabs_above_the_sidebar() {
+    let _desktop = desktop();
+    let t = TempDir::new("vertical");
+    for name in ["one", "two"] {
+        std::fs::create_dir(t.0.join(name)).unwrap();
+    }
+    let hwnd = open(&t.0.join("one"));
+    let list = list_of(hwnd);
+    ctrl_key(list, VK_T, false);
+    navigate_to(hwnd, &t.0.join("two"));
+    assert!(pump_until(WAIT, || tab_labels(hwnd) == ["one", "two"]));
+    let strip = find(hwnd, w!("SysTabControl32"));
+    let tabs = ui::tab_list().unwrap();
+    // The test window itself is never shown: look at the controls' own visibility.
+    let visible = |h: HWND| unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0;
+    assert!(visible(strip) && !visible(tabs));
+    command(hwnd, ui::toolbar::VERTICAL_TABS);
+    assert!(!visible(strip) && visible(tabs));
+    assert_eq!(rows(tabs), ["one", "two", "+  New tab"]);
+    assert_eq!(selected(tabs), ["two"]);
+    // The sidebar starts below the tab list.
+    let rect = |h: HWND| {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        unsafe { GetWindowRect(h, &mut r) }.unwrap();
+        r
+    };
+    assert!(rect(tree_of(hwnd)).top >= rect(tabs).bottom);
+    // Choosing a row switches tabs; the last row opens a new one.
+    select_row(tabs, 0);
+    assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()).is_empty() && ui_dir(hwnd).ends_with("one")));
+    select_row(tabs, 2);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 3 && rows(tabs).len() == 4));
+    close(hwnd);
+    assert!(ui::take_final_settings().unwrap().vertical_tabs);
+}
+
+#[test]
+fn split_panes_copy_move_swap_and_mirror() {
+    let _desktop = desktop();
+    let t = TempDir::new("panes");
+    std::fs::create_dir_all(t.0.join("from").join("sub")).unwrap();
+    std::fs::create_dir(t.0.join("to")).unwrap();
+    std::fs::write(t.0.join("to").join("old.txt"), "").unwrap();
+    for name in ["a.txt", "b.txt"] {
+        std::fs::write(t.0.join("from").join(name), name).unwrap();
+    }
+    let hwnd = open(&t.0);
+    let left = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(left) == ["from", "to"]));
+    // Open in other pane splits the view and shows the folder on the other side.
+    select_row(left, 1);
+    command(hwnd, ui::CMD_OPEN_OTHER_PANE);
+    let right = lists_in(hwnd).into_iter().find(|&h| h != left).unwrap();
+    assert!(pump_until(WAIT, || rows(right) == ["old.txt"] && rows(left) == ["from", "to"]));
+    navigate_to(hwnd, &t.0.join("from"));
+    assert!(pump_until(WAIT, || rows(left) == ["sub", "a.txt", "b.txt"]));
+    select_row(left, 1);
+    command(hwnd, ui::CMD_COPY_TO_OTHER);
+    assert!(pump_until(WAIT, || rows(right) == ["a.txt", "old.txt"]), "{:?}", rows(right));
+    assert!(t.0.join("from").join("a.txt").exists());
+    // Only b.txt: a.txt is in the other folder now, and Windows would ask before replacing it.
+    let none = LVITEMW { stateMask: LVIS_SELECTED, ..Default::default() };
+    unsafe {
+        SendMessageW(
+            left,
+            LVM_SETITEMSTATE,
+            Some(WPARAM(usize::MAX)),
+            Some(LPARAM(&none as *const _ as isize)),
+        )
+    };
+    select_row(left, 2);
+    command(hwnd, ui::CMD_MOVE_TO_OTHER);
+    assert!(
+        pump_until(WAIT, || rows(right) == ["a.txt", "b.txt", "old.txt"] && rows(left) == ["sub", "a.txt"])
+    );
+    // Swap: the panes change sides and keep their folders.
+    let x = |h: HWND| {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        unsafe { GetWindowRect(h, &mut r) }.unwrap();
+        r.left
+    };
+    assert!(x(left) < x(right));
+    command(hwnd, ui::toolbar::SWAP_PANES);
+    assert!(x(left) > x(right));
+    assert_eq!(rows(left), ["sub", "a.txt"]);
+    // Mirror: the other pane shows the active pane's folder.
+    command(hwnd, ui::toolbar::MIRROR_PANE);
+    assert!(pump_until(WAIT, || rows(right) == ["sub", "a.txt"]));
+    close(hwnd);
     assert!(pump_until(WAIT, || ui::running_operations() == 0));
 }
 

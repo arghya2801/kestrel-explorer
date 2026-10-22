@@ -64,8 +64,14 @@ pub(crate) fn preferences(settings: Settings) -> Vec<isize> {
     s.preferences = Some(settings);
     s.windows.iter().map(|(h, _)| *h).collect()
 }
-pub(crate) fn pins() -> Option<Vec<std::path::PathBuf>> {
-    SESSION.lock().unwrap_or_else(|e| e.into_inner()).preferences.as_ref().map(|s| s.pins.clone())
+/// Quick access as last saved: the pins and the known folders taken out.
+pub(crate) fn pins() -> Option<(Vec<std::path::PathBuf>, Vec<std::path::PathBuf>)> {
+    SESSION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .preferences
+        .as_ref()
+        .map(|s| (s.pins.clone(), s.unpinned.clone()))
 }
 pub(crate) fn theme() -> Option<crate::theme::ThemeChoice> {
     SESSION.lock().unwrap_or_else(|e| e.into_inner()).preferences.as_ref().map(|s| s.theme)
