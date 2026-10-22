@@ -1,6 +1,6 @@
 # Kestrel handoff
 
-Updated 2026-10-22. Version 1.3.0 plus Unreleased changes; see CHANGELOG.md.
+Updated 2026-10-22. Version 1.3.1; see CHANGELOG.md.
 [ROADMAP.md](ROADMAP.md) holds what is built, what remains and the measurements.
 
 ## Validation
@@ -40,8 +40,14 @@ Do not use the real user data directory for regression tests; the sign-out windo
 
 .github/workflows/ci.yml lints, unit-tests and builds every push to main and every PR.
 Pushing a tag `vX.Y.Z` that matches Cargo.toml also builds a draft GitHub release with the exe,
-a symbols zip (for crash dumps) and SHA256SUMS. Window tests need a desktop, so run them locally
-before tagging. Set the `SIGNING_PFX` (base64) and `SIGNING_PASSWORD` secrets to sign releases.
+the MSI installer (installer/kestrel.wxs, WiX 6), a symbols zip (for crash dumps) and SHA256SUMS.
+The MSI is also built on every push. Window tests need a desktop, so run them locally before tagging.
+Set the `SIGNING_PFX` (base64) and `SIGNING_PASSWORD` secrets to sign the exe and the MSI.
+
+The MSI is per-user, in %LOCALAPPDATA%\Programs\Kestrel. Never change its UpgradeCode. To test an
+install without touching a real one, pass `INSTALLFOLDER=<folder>` to msiexec; the folder is remembered
+for upgrade and uninstall. Before that was remembered, an uninstall removed the default folder's
+kestrel.exe, so keep a copy of a real install when testing installer changes.
 
 ## Remaining release checks and known limits
 

@@ -6,7 +6,10 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-22
+
 ### Added
+- An MSI installer in each release. It needs no administrator rights, installs to %LOCALAPPDATA%\Programs\Kestrel with a Start menu shortcut, replaces older versions, and keeps your settings when uninstalled.
 - This PC: click it in the sidebar, or type it in the address bar, for a page listing the drives with their type, free space and size. Up from a drive's root goes there, and a drive that disappears while open falls back to it. (#19)
 - Tabs above the sidebar: View > Tabs above the sidebar, or a tab's right-click menu, lists the tabs in a column above the sidebar instead of along the top. Each window remembers the choice. (#16)
 - Split panes: Open in other pane for folders in the list and the sidebar (it splits the view if needed); Copy to other pane (Shift+F5) and Move to other pane (Shift+F6); View > Swap panes (Ctrl+U); View > Show this folder in the other pane (Ctrl+Shift+U). (#17)
