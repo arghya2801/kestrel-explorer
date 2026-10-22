@@ -34,6 +34,10 @@ pub(super) fn update() {
             paths.push(parent);
         }
         paths.reverse();
+        // Deep paths keep their drive rather than This PC.
+        if paths.len() > 5 && paths.first().is_some_and(|p| crate::places::is_this_pc(p)) {
+            paths.remove(0);
+        }
         if paths.len() > 5 {
             paths.drain(1..paths.len() - 4);
         }

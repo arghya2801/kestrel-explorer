@@ -60,8 +60,9 @@ mod rename;
 mod tabbar;
 pub mod toolbar;
 pub use commands::{
-    CMD_COPY, CMD_COPY_PATH, CMD_CUT, CMD_DELETE, CMD_DELETE_PERMANENTLY, CMD_MORE_OPTIONS, CMD_NEW_FOLDER,
-    CMD_OPEN, CMD_OPEN_NEW_TAB, CMD_PASTE, CMD_RENAME, CMD_SELECT_ALL, CMD_SHOW_IN_EXPLORER,
+    CMD_COPY, CMD_COPY_PATH, CMD_COPY_TO_OTHER, CMD_CUT, CMD_DELETE, CMD_DELETE_PERMANENTLY,
+    CMD_MORE_OPTIONS, CMD_MOVE_TO_OTHER, CMD_NEW_FOLDER, CMD_OPEN, CMD_OPEN_NEW_TAB, CMD_OPEN_OTHER_PANE,
+    CMD_PASTE, CMD_PIN, CMD_RENAME, CMD_SELECT_ALL, CMD_SHOW_IN_EXPLORER,
 };
 mod tree;
 
@@ -83,6 +84,13 @@ const COMMAND_NAMES: &[(&str, usize)] = &[
     ("properties", commands::CMD_PROPERTIES),
     ("undo", commands::CMD_UNDO),
     ("redo", commands::CMD_REDO),
+    ("pin-selected", commands::CMD_PIN),
+    ("open-in-other-pane", commands::CMD_OPEN_OTHER_PANE),
+    ("copy-to-other-pane", commands::CMD_COPY_TO_OTHER),
+    ("move-to-other-pane", commands::CMD_MOVE_TO_OTHER),
+    ("swap-panes", toolbar::SWAP_PANES),
+    ("mirror-pane", toolbar::MIRROR_PANE),
+    ("vertical-tabs", toolbar::VERTICAL_TABS),
     ("refresh", toolbar::REFRESH),
     ("hidden-items", toolbar::HIDDEN),
     ("preview", toolbar::PREVIEW),
@@ -224,6 +232,8 @@ struct App {
     startup_override: Option<Option<PathBuf>>,
     restore_session: bool,
     pins: Vec<PathBuf>,
+    /// Known folders taken out of Quick access.
+    unpinned: Vec<PathBuf>,
     recent: Vec<PathBuf>,
     /// Folders shown grouped by date (View > Group by date).
     grouped: Vec<PathBuf>,
@@ -234,6 +244,9 @@ struct App {
     events: Arc<Events<Event>>,
     tabs: Tabs<tabbar::TabSlot>,
     tab_strip: HWND,
+    /// The tabs listed above the sidebar, shown instead of the strip with `vertical_tabs`.
+    tab_list: HWND,
+    vertical_tabs: bool,
     next_tab_id: u64,
     theme: ThemeChoice,
     palette: Palette,
@@ -284,6 +297,7 @@ impl App {
             self.filter,
             self.tree,
             self.tab_strip,
+            self.tab_list,
             b0,
             b1,
             b2,
@@ -474,13 +488,17 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let status = child(hwnd, STATUSCLASSNAMEW, w!(""), WINDOW_STYLE(SBARS_SIZEGRIP), none, 0)?;
         let tree = tree::create(hwnd)?;
         let tab_strip = tabbar::create(hwnd)?;
+        let tab_list = tabbar::create_list(hwnd)?;
         startup_mark("sidebar controls");
         let preview_pane = preview::create(hwnd)?;
         startup_mark("preview controls");
         let toolbar_buttons = toolbar::create(hwnd)?;
         startup_mark("toolbar controls");
 
-        set_font(&[list, status, address, filter, tree, tab_strip, buttons[0], buttons[1], buttons[2]], font);
+        set_font(
+            &[list, status, address, filter, tree, tab_strip, tab_list, buttons[0], buttons[1], buttons[2]],
+            font,
+        );
         set_font(&preview::controls(&preview_pane), font);
         set_font(&toolbar_buttons, font);
 
@@ -509,6 +527,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 startup_override: None,
                 restore_session: settings.restore_session,
                 pins: settings.pins.clone(),
+                unpinned: settings.unpinned.clone(),
                 recent: settings.recent.clone(),
                 grouped: settings.grouped.clone(),
                 sorts,
@@ -517,6 +536,8 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 events,
                 tabs: Tabs::new(tabbar::TabSlot::active(0)),
                 tab_strip,
+                tab_list,
+                vertical_tabs: false,
                 next_tab_id: 1,
                 theme: settings.theme,
                 palette: Palette::new(false),
@@ -538,6 +559,11 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         });
 
         let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener(hwnd);
+        if settings.vertical_tabs {
+            with_app(|a| a.vertical_tabs = true);
+            let _ = ShowWindow(tab_strip, SW_HIDE);
+            let _ = ShowWindow(tab_list, SW_SHOWNA);
+        }
         layout(hwnd);
         update_sort_arrows();
         preview::restore(hwnd, settings.preview);
@@ -652,7 +678,16 @@ fn on_key(msg: &MSG) -> bool {
     }
     match key {
         VK_BACK if !in_address && msg.hwnd != filter => run(Browser::back),
+        VK_F5 if in_list && shift => _ = commands::run(commands::CMD_COPY_TO_OTHER),
+        VK_F6 if in_list && shift => _ = commands::run(commands::CMD_MOVE_TO_OTHER),
         VK_F6 => panes::focus_other(),
+        VK_U if ctrl && !in_address && msg.hwnd != filter => {
+            if shift {
+                panes::mirror()
+            } else {
+                panes::swap()
+            }
+        }
         VK_S if ctrl && shift => panes::toggle(),
         VK_F2 if in_list => _ = commands::run(commands::CMD_RENAME),
         VK_DELETE if in_list && shift => _ = commands::run(commands::CMD_DELETE_PERMANENTLY),
@@ -757,10 +792,11 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
             WM_APP_PREFERENCES => {
-                if let Some(pins) = crate::session::pins() {
+                if let Some((pins, unpinned)) = crate::session::pins() {
                     let changed = with_app(|a| {
-                        let changed = a.pins != pins;
+                        let changed = a.pins != pins || a.unpinned != unpinned;
                         a.pins = pins;
+                        a.unpinned = unpinned;
                         changed
                     });
                     if changed == Some(true) {
@@ -827,7 +863,10 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     ID_FORWARD if from_button => run(Browser::forward),
                     ID_UP if from_button => run(Browser::up),
                     id if (from == 0 || from_button)
-                        && (breadcrumbs::execute(id) || toolbar::execute(id) || commands::run(id)) => {}
+                        && (breadcrumbs::execute(id)
+                            || toolbar::execute(id)
+                            || commands::run(id)
+                            || tabbar::execute(id)) => {}
                     _ => return DefWindowProcW(hwnd, msg, wp, lp),
                 }
                 if !matches!(id, toolbar::SETTINGS | toolbar::SHORTCUTS | toolbar::HELP | breadcrumbs::EDIT)
@@ -846,6 +885,10 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     _ => return DefWindowProcW(hwnd, msg, wp, lp),
                 }
                 LRESULT(1)
+            }
+            WM_CTLCOLORSTATIC if let Some(active) = panes::label_is_active(HWND(lp.0 as _)) => {
+                dark::label_colors(HDC(wp.0 as _), active)
+                    .unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
             }
             WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
                 dark::edit_colors(HDC(wp.0 as _)).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
@@ -958,6 +1001,10 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
                 LRESULT(0)
             }
+            WM_CONTEXTMENU if with_app(|a| a.tree.0 as usize == wp.0) == Some(true) => {
+                tree::context_menu(hwnd, lp);
+                LRESULT(0)
+            }
             WM_CONTEXTMENU if with_app(|a| a.views().any(|v| v.list.0 as usize == wp.0)) == Some(true) => {
                 panes::activate(HWND(wp.0 as _));
                 commands::context_menu(hwnd, lp);
@@ -1014,9 +1061,17 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
     if hdr.code == NM_CUSTOMDRAW && chrome::is_top_button(hdr.hwndFrom) {
         return unsafe { chrome::draw_button(&*(lp.0 as *const NMCUSTOMDRAW)) };
     }
-    let (_list, tree, strip) = with_app(|a| (a.view.list, a.tree, a.tab_strip))?;
+    if hdr.code == TTN_GETDISPINFOW
+        && let Some(done) = tabbar::tooltip(hdr, lp)
+    {
+        return Some(done);
+    }
+    let (_list, tree, strip, tab_list) = with_app(|a| (a.view.list, a.tree, a.tab_strip, a.tab_list))?;
     if hdr.hwndFrom == strip {
         return tabbar::on_notify(hdr);
+    }
+    if hdr.hwndFrom == tab_list {
+        return tabbar::on_list_notify(hdr, lp);
     }
     if hdr.hwndFrom == tree {
         return unsafe { tree::on_notify(hdr, lp) };
@@ -1127,8 +1182,11 @@ fn fill(v: &mut panes::FolderView, item: &mut LVITEMW) {
         item.state.0 |= LVIS_DROPHILITED.0;
         item.stateMask.0 |= LVIS_DROPHILITED.0;
     }
+    let drive = s.drives.get(i);
     if item.mask.contains(LVIF_IMAGE) {
-        item.iImage = if grid.enabled {
+        item.iImage = if let Some(d) = drive.filter(|_| !grid.enabled) {
+            d.icon
+        } else if grid.enabled {
             grid.icon(b.shown_generation(), entry, row, b.path_at(row).map(|p| p.0).unwrap_or_default())
         } else {
             icons.icon(b.shown_generation(), entry, s.name(i), s.is_dir(i), &s.dir)
@@ -1138,8 +1196,12 @@ fn fill(v: &mut panes::FolderView, item: &mut LVITEMW) {
     match COLUMNS.get(item.iSubItem as usize).map(|c| c.2) {
         Some(SortKey::Name) => write(item, s.name(i)),
         Some(SortKey::Modified) => write(item, &wide(format::time(s.entries[i].modified))),
+        Some(SortKey::Type) if drive.is_some() => write(item, &wide(drive.unwrap().detail.clone())),
         Some(SortKey::Type) => {
             write(item, &wide(icons.type_name(s.name(i), s.is_dir(i)).unwrap_or_default()))
+        }
+        Some(SortKey::Size) if drive.is_some_and(|_| s.entries[i].size > 0) => {
+            write(item, &wide(format::bytes(s.entries[i].size)))
         }
         Some(SortKey::Size) if !s.is_dir(i) => write(item, &wide(format::size(s.entries[i].size))),
         Some(SortKey::Size) => match v.sizes.get(s.name(i)) {
@@ -1233,7 +1295,7 @@ fn apply(ev: Event) {
                 _ => {}
             }
             start_queued_lists();
-            tabbar::update_label_for(id);
+            tabbar::refresh();
             panes::update_labels();
             if let Some(job) = with_view(id, |v| v.browser.follow_up()).flatten() {
                 spawn_list(job);
@@ -1439,10 +1501,16 @@ fn late_init() {
     };
     panes::enable_drop();
     // Names for screen readers; after first paint because it loads oleacc.
-    if let Some((address, filter, strip)) = with_app(|a| (a.address, a.filter, a.tab_strip)) {
-        for (control, name) in
-            [(address, w!("Address")), (filter, w!("Filter")), (tree, w!("Folders")), (strip, w!("Tabs"))]
-        {
+    if let Some((address, filter, strip, tab_list)) =
+        with_app(|a| (a.address, a.filter, a.tab_strip, a.tab_list))
+    {
+        for (control, name) in [
+            (address, w!("Address")),
+            (filter, w!("Filter")),
+            (tree, w!("Folders")),
+            (strip, w!("Tabs")),
+            (tab_list, w!("Tabs")),
+        ] {
             set_accessible_name(control, name);
         }
         for &list in &lists {
@@ -1467,6 +1535,14 @@ fn late_init() {
                 Some(WPARAM(TVSIL_NORMAL as usize)),
                 Some(LPARAM(image_list.0)),
             );
+            if let Some(tab_list) = with_app(|a| a.tab_list) {
+                SendMessageW(
+                    tab_list,
+                    LVM_SETIMAGELIST,
+                    Some(WPARAM(LVSIL_SMALL as usize)),
+                    Some(LPARAM(image_list.0)),
+                );
+            }
         }
     }
     let ids = with_app(|a| a.views().map(|v| v.id).collect::<Vec<_>>()).unwrap_or_default();
@@ -1477,6 +1553,7 @@ fn late_init() {
     startup_mark("sidebar");
     with_app(|a| a.this_pc = this_pc);
     tree::sync();
+    tabbar::refresh();
     for list in lists {
         unsafe {
             let _ = InvalidateRect(Some(list), None, false);
@@ -1537,6 +1614,8 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
             theme: a.theme,
             restore_session: a.restore_session,
             pins: a.pins.clone(),
+            unpinned: a.unpinned.clone(),
+            vertical_tabs: a.vertical_tabs,
             recent: a.recent.clone(),
             grouped: a.grouped.clone(),
             ..Default::default()
@@ -1669,6 +1748,10 @@ fn watch_view(view: u64) {
     .flatten() else {
         return;
     };
+    // This PC is no folder; drives coming and going refresh it instead (`on_device_change`).
+    if crate::places::is_this_pc(&dir) {
+        return;
+    }
     let ready = events.clone();
     let watcher = Watcher::start(
         dir,
@@ -1748,6 +1831,18 @@ fn on_device_change(event: u32, lp: LPARAM) {
         && (event == DBT_DEVICEARRIVAL || event == DBT_DEVICEREMOVECOMPLETE)
     {
         tree::refresh_drives();
+        let pcs = with_app(|a| {
+            a.views()
+                .filter(|v| v.browser.dir().is_some_and(crate::places::is_this_pc))
+                .map(|v| v.id)
+                .collect()
+        })
+        .unwrap_or_else(Vec::new);
+        for id in pcs {
+            if let Some(job) = with_view(id, |v| v.browser.refresh()).flatten() {
+                spawn_list(job);
+            }
+        }
     }
 }
 
@@ -1755,7 +1850,7 @@ fn on_device_change(event: u32, lp: LPARAM) {
 fn calculate_folder_sizes() {
     let Some((view, dir, names, events, cancel)) = with_app(|a| {
         let v = &mut a.view;
-        let s = v.browser.snapshot()?;
+        let s = v.browser.snapshot().filter(|s| !crate::places::is_this_pc(&s.dir))?;
         let names: Vec<Vec<u16>> = v
             .browser
             .order
@@ -2039,7 +2134,7 @@ fn update_chrome() {
     tree::sync();
     show_location();
     breadcrumbs::update();
-    tabbar::update_label();
+    tabbar::refresh();
     show_status();
 }
 
@@ -2192,7 +2287,17 @@ fn layout(hwnd: HWND) {
         let h = (client.bottom - (sr.bottom - sr.top) - top).max(0);
         let split = tree::clamp_split(split, client.right, GetDpiForWindow(hwnd));
         let gap = splitter_width(hwnd);
-        let _ = MoveWindow(tree, 0, top, split, h, true);
+        // Vertical tabs sit above the sidebar, a gap apart.
+        let tabs_h = match with_app(|a| a.vertical_tabs.then_some(a.tab_list)).flatten() {
+            Some(tab_list) => {
+                let tabs_h = tabbar::list_height(tab_list, h);
+                let _ = MoveWindow(tab_list, 0, top, split, tabs_h, true);
+                tabbar::fit_list_column(tab_list);
+                tabs_h + gap
+            }
+            None => 0,
+        };
+        let _ = MoveWindow(tree, 0, top + tabs_h, split, (h - tabs_h).max(0), true);
         let rest = (client.right - split - gap).max(0);
         // Preview pane, when shown: a third of the space right of the sidebar.
         let preview_w = if preview::is_visible() {
@@ -2312,8 +2417,9 @@ fn drag_splitter(hwnd: HWND, kind: SplitKind, x: i32) {
     }
 }
 
+/// The tab strip's height; none with the tabs above the sidebar.
 fn tab_height(hwnd: HWND) -> i32 {
-    scale(hwnd, 30)
+    if with_app(|a| a.vertical_tabs) == Some(true) { 0 } else { scale(hwnd, 30) }
 }
 
 /// Where the sidebar and list start: below the toolbar and the tab strip.
@@ -2426,6 +2532,11 @@ fn view_visible(id: u64) -> bool {
 /// Active folder list, also used by the window tests and stress runner.
 pub fn active_list() -> Option<HWND> {
     with_app(|a| a.view.list)
+}
+
+/// The tab list shown above the sidebar with vertical tabs, for the window tests.
+pub fn tab_list() -> Option<HWND> {
+    with_app(|a| a.tab_list)
 }
 
 #[cfg(test)]

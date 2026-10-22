@@ -340,6 +340,52 @@ pub(super) fn compare() {
     ));
 }
 
+/// Shows `dir` in the other pane, splitting the view first if needed.
+pub(super) fn open_in_other(dir: PathBuf) {
+    if with_app(|a| a.split_view) != Some(true) {
+        toggle();
+    }
+    if let Some(job) = with_app(|a| a.other.as_mut().map(|v| v.browser.go(dir))).flatten() {
+        super::spawn_list(job);
+    }
+}
+
+/// View > Show this folder in the other pane.
+pub(super) fn mirror() {
+    if let Some(dir) = with_app(|a| a.view.browser.requested_location().map(|l| l.dir)).flatten() {
+        open_in_other(dir);
+    }
+}
+
+/// View > Swap panes: each pane takes the other's place, keeping its folder and history.
+pub(super) fn swap() {
+    let Some((hwnd, true)) = with_app(|a| (a.hwnd, a.split_view && a.other.is_some())) else { return };
+    with_app(|a| a.right_active = !a.right_active);
+    super::layout(hwnd);
+    update_labels();
+}
+
+/// The folder shown in the other pane, when both panes are shown.
+pub(super) fn other_dir() -> Option<PathBuf> {
+    with_app(|a| {
+        let other = a.other.as_ref().filter(|_| a.split_view)?;
+        other.browser.dir().filter(|d| !crate::places::is_this_pc(d)).map(PathBuf::from)
+    })
+    .flatten()
+}
+
+/// Whether `label` is the active pane's path label; `None` if it isn't a pane label.
+pub(super) fn label_is_active(label: HWND) -> Option<bool> {
+    with_app(|a| {
+        if a.view.label == label {
+            Some(true)
+        } else {
+            a.other.as_ref().filter(|v| v.label == label).map(|_| false)
+        }
+    })
+    .flatten()
+}
+
 pub(super) fn focus_other() {
     if let Some(list) =
         with_app(|a| a.split_view.then(|| a.other.as_ref().map(|v| v.list)).flatten()).flatten()

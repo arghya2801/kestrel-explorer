@@ -21,14 +21,20 @@ pub fn server_of(path: &Path) -> Option<String> {
     (!rest.is_empty() && !rest.contains('\\')).then(|| rest.to_string())
 }
 
-/// The folder above `dir`; above a share's root (`\\srv\share`) is its computer.
+/// The folder above `dir`; above a share's root (`\\srv\share`) is its computer, and above
+/// a drive's root is This PC.
 pub fn up_from(dir: &Path) -> Option<PathBuf> {
     // A computer is the top. Rust reads a bare `\\srv` as a folder "srv" under the root `\`.
-    if server_of(dir).is_some() {
+    if server_of(dir).is_some() || crate::places::is_this_pc(dir) {
         return None;
     }
     if let Some(parent) = dir.parent() {
         return Some(parent.to_path_buf());
+    }
+    if let Some(std::path::Component::Prefix(p)) = dir.components().next()
+        && matches!(p.kind(), std::path::Prefix::Disk(_))
+    {
+        return Some(crate::places::this_pc());
     }
     let s = dir.to_string_lossy();
     let rest = s.strip_prefix(r"\\").filter(|_| !s.starts_with(r"\\?\"))?;
@@ -74,10 +80,11 @@ pub fn list_shares(server: &str) -> io::Result<Snapshot> {
     Ok(snap)
 }
 
-/// Lists a folder, a computer's shares for `\\server`, or the inside of a .zip.
+/// Lists a folder, a computer's shares for `\\server`, This PC's drives, or the inside of a .zip.
 pub fn list_location(dir: &Path) -> io::Result<Snapshot> {
     match server_of(dir) {
         Some(server) => list_shares(&server),
+        None if crate::places::is_this_pc(dir) => crate::places::list_this_pc(),
         None if crate::shell::in_archive(dir) => crate::shell::list_archive(dir),
         None => list_dir(dir),
     }
@@ -146,7 +153,8 @@ mod tests {
         assert_eq!(up_from(Path::new(r"\\srv\share")), Some(PathBuf::from(r"\\srv")));
         assert_eq!(up_from(Path::new(r"\\srv\share\dir")), Some(PathBuf::from(r"\\srv\share")));
         assert_eq!(up_from(Path::new(r"C:\a")), Some(PathBuf::from(r"C:\")));
-        assert_eq!(up_from(Path::new(r"C:\")), None);
+        assert_eq!(up_from(Path::new(r"C:\")), Some(crate::places::this_pc()));
+        assert_eq!(up_from(&crate::places::this_pc()), None);
         assert_eq!(up_from(Path::new(r"\\srv")), None);
     }
 

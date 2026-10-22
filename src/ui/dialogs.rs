@@ -98,10 +98,14 @@ Ctrl+T    New tab\r\n\
 Ctrl+Shift+K    Duplicate the active tab\r\n\
 Ctrl+W    Close the active tab (the last tab stays)\r\n\
 Middle-click a tab    Close that tab\r\n\
+Right-click a tab    Tabs above the sidebar, or back along the top\r\n\
 Ctrl+Tab / Ctrl+Shift+Tab    Next / previous tab\r\n\
 Ctrl+N    New window, side by side\r\n\
 Ctrl+Shift+S    Toggle two folder panes\r\n\
-F6    Focus the other folder pane\r\n\r\n\
+F6    Focus the other folder pane\r\n\
+Shift+F5 / Shift+F6    Copy / move the selection to the other pane\r\n\
+Ctrl+U    Swap the two panes\r\n\
+Ctrl+Shift+U    Show this folder in the other pane too\r\n\r\n\
 View and help\r\n\
 Ctrl+H    Toggle hidden items\r\n\
 Alt+P    Toggle preview\r\n\

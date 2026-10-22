@@ -37,6 +37,21 @@ toolbar and preview follow the active pane. Each tab remembers its panes; drag t
 to change their widths. Turning Split off preserves the second pane for reopening.
 With **View > Sync pane navigation** on, entering a subfolder or going up in one pane does the same in
 the other. **View > Compare panes** selects the files each pane lacks or has with another size or date.
+The active pane's path label is tinted with your accent color. Right-click a folder (in the list or the
+sidebar) and choose **Open in other pane** to show it there, splitting the view if needed. With two panes,
+**Copy to other pane** (**Shift+F5**) and **Move to other pane** (**Shift+F6**) send the selection to the
+other pane's folder. **View > Swap panes** (**Ctrl+U**) trades their sides, and **View > Show this folder
+in the other pane** (**Ctrl+Shift+U**) opens the active folder in both.
+
+Tabs on different folders with the same name add the parent folder that tells them apart
+("MFA221 · bin", "MFA221 · target"); hover a tab for its full path. **View > Tabs above the sidebar**, also
+on a tab's right-click menu, lists the tabs in a column above the sidebar instead of along the top.
+
+**Quick access** starts with your Desktop, Downloads, Documents, Pictures, Music and Videos. Right-click a
+folder in the list or the sidebar to **Pin to Quick access** or **Unpin from Quick access**; the standard
+folders can be unpinned too. Hover a sidebar item for its full path. Click **This PC** in the sidebar
+(or type it in the address bar) for a page of drives with their free space and size; **Up** from a drive's
+root goes there.
 
 **View** offers Details, four thumbnail sizes, sorting, hidden items and preview visibility.
 Each folder remembers the sort you choose in it (a column header or **View**); folders you haven't
@@ -47,7 +62,7 @@ week, Last week…), keeping the chosen sort inside each group; each folder reme
 can stay grouped while other folders don't. **View > Show in sidebar** (**Ctrl+Shift+E**) expands the
 sidebar to the open folder; it doesn't follow navigation on its own.
 Right-click the column headers to show Date created or Attributes, or hide other columns.
-**More** includes pin/unpin, recent folders, parent folders, Open terminal here and File operations.
+**More** includes Pin to Quick access, recent folders, parent folders, Open terminal here and File operations.
 The filter (**Ctrl+F**) matches names and also understands `size:>10MB`, `size:<1KB`, `modified:<7d`
 (changed within a week) and `modified:>2w`. Press **Enter** to search subfolders; there,
 `content:word` also finds files containing the word. **View > Calculate folder sizes** fills in folder sizes.
@@ -103,6 +118,8 @@ Press **F1**, or choose **Help > Keyboard shortcuts**, for the in-app guide.
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+N | New window, side by side |
 | Ctrl+Shift+S / F6 | Toggle split / focus the other pane |
+| Shift+F5 / Shift+F6 | Copy / move the selection to the other pane |
+| Ctrl+U / Ctrl+Shift+U | Swap panes / show this folder in the other pane |
 | Alt+P | Toggle preview |
 | Ctrl+Shift+E | Show the open folder in the sidebar |
 | Ctrl+mouse wheel | Thumbnail size; past the smallest, back to Details |
@@ -130,8 +147,10 @@ and Alt with a letter, digit, F1-F24, Left, Right, Up, Down, Home, End, PageUp, 
 Backspace, Enter, Space, Tab or Esc. In the address and filter boxes, keys without Ctrl or Alt keep typing.
 Commands: open, cut, copy, paste, rename, delete, delete-permanently, new-folder, copy-path,
 show-in-explorer, select-all, windows-menu, open-in-new-tab, properties, undo, redo, refresh, hidden-items,
-preview, split, settings, shortcuts, details, thumbnails, pin, terminal, file-operations, folder-sizes,
-sync-panes, compare-panes and check-for-updates. Problems with the file are written to log.txt.
+preview, split, settings, shortcuts, details, thumbnails, pin, pin-selected, terminal, file-operations,
+folder-sizes, group-by-date, reveal-in-sidebar, sync-panes, compare-panes, open-in-other-pane,
+copy-to-other-pane, move-to-other-pane, swap-panes, mirror-pane, vertical-tabs and check-for-updates.
+Problems with the file are written to log.txt.
 
 ## Build
 

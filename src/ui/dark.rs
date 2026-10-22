@@ -19,6 +19,8 @@ use crate::theme::Palette;
 pub(super) struct Brushes {
     pub(super) chrome: HBRUSH,
     pub(super) field: HBRUSH,
+    /// Behind the active pane's path label.
+    active: HBRUSH,
 }
 
 impl Brushes {
@@ -27,6 +29,7 @@ impl Brushes {
             Brushes {
                 chrome: CreateSolidBrush(COLORREF(p.chrome)),
                 field: CreateSolidBrush(COLORREF(p.field)),
+                active: CreateSolidBrush(COLORREF(active_label(p))),
             }
         }
     }
@@ -37,15 +40,21 @@ impl Drop for Brushes {
         unsafe {
             let _ = DeleteObject(HGDIOBJ(self.chrome.0));
             let _ = DeleteObject(HGDIOBJ(self.field.0));
+            let _ = DeleteObject(HGDIOBJ(self.active.0));
         }
     }
+}
+
+/// A tint of the accent color, so the active pane stands out from the other.
+fn active_label(p: &Palette) -> u32 {
+    crate::theme::mix(p.window, p.accent, if p.dark { 35 } else { 22 })
 }
 
 /// Applies `palette` to the window and its controls.
 pub(super) fn apply(hwnd: HWND, palette: Palette) {
     let Some((lists, tree, strip, status, address, filter, buttons)) = with_app(|a| {
         (
-            a.views().map(|v| v.list).collect::<Vec<_>>(),
+            a.views().map(|v| v.list).chain(std::iter::once(a.tab_list)).collect::<Vec<_>>(),
             a.tree,
             a.tab_strip,
             a.status,
@@ -119,6 +128,26 @@ pub(super) fn edit_colors(hdc: HDC) -> Option<LRESULT> {
         SetBkColor(hdc, COLORREF(palette.field));
     }
     Some(LRESULT(brush?.0 as isize))
+}
+
+/// Pane path labels (WM_CTLCOLORSTATIC): the active pane's on an accent tint, the other's
+/// dimmed. `None` in high contrast: Windows' colors.
+pub(super) fn label_colors(hdc: HDC, active: bool) -> Option<LRESULT> {
+    let (palette, brushes) = with_app(|a| (a.palette, a.brushes.as_ref().map(|b| (b.active, b.chrome))))?;
+    let (active_brush, chrome) = brushes?;
+    if crate::theme::high_contrast() {
+        return None;
+    }
+    unsafe {
+        let (back, text) = if active {
+            (active_label(&palette), palette.text)
+        } else {
+            (palette.chrome, crate::theme::mix(palette.chrome, palette.text, 60))
+        };
+        SetTextColor(hdc, COLORREF(text));
+        SetBkColor(hdc, COLORREF(back));
+    }
+    Some(LRESULT(if active { active_brush.0 } else { chrome.0 } as isize))
 }
 
 /// Main window background (WM_ERASEBKGND).
