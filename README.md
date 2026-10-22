@@ -49,7 +49,10 @@ on a tab's right-click menu, lists the tabs in a column above the sidebar instea
 
 **Quick access** starts with your Desktop, Downloads, Documents, Pictures, Music and Videos. Right-click a
 folder in the list or the sidebar to **Pin to Quick access** or **Unpin from Quick access**; the standard
-folders can be unpinned too. Hover a sidebar item for its full path. Click **This PC** in the sidebar
+folders can be unpinned too. Hover a sidebar item for its full path.
+
+With 7-Zip installed, the file list's right-click menu has a **7-Zip** submenu: open, extract, test
+and create archives as 7-Zip's own menu does. 7-Zip shows its progress and errors; Undo doesn't cover them. Click **This PC** in the sidebar
 (or type it in the address bar) for a page of drives with their free space and size; **Up** from a drive's
 root goes there.
 

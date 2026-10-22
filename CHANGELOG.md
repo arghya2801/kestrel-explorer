@@ -12,6 +12,7 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 - Split panes: Open in other pane for folders in the list and the sidebar (it splits the view if needed); Copy to other pane (Shift+F5) and Move to other pane (Shift+F6); View > Swap panes (Ctrl+U); View > Show this folder in the other pane (Ctrl+Shift+U). (#17)
 - Pin to Quick access and Unpin from Quick access on the right-click menus of the file list and the sidebar. The sidebar's menu also opens a folder in a new tab, in the other pane, or its Properties. (#15)
 - Hovering a tab or a sidebar item shows its full path. (#18)
+- A 7-Zip submenu on the file list's right-click menu when 7-Zip is installed: Open archive, Extract files…, Extract Here, Extract to "name\", Test archive, Add to archive…, Add to "name.7z" and Add to "name.zip". It runs 7-Zip's own programs, which show their progress and errors; Undo doesn't cover them.
 
 ### Changed
 - Tabs on different folders of the same name add the parent folders that tell them apart ("MFA221 · bin", "MFA221 · target"). Quick access names pinned folders the same way instead of by their full path. (#18)

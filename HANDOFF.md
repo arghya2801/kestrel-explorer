@@ -5,7 +5,7 @@ Updated 2026-10-22. Version 1.3.0 plus Unreleased changes; see CHANGELOG.md.
 
 ## Validation
 
-Latest full applicable run: **154 unit tests, 59 window tests and the key-binding test passed**.
+Latest full applicable run: **157 unit tests, 60 window tests and the key-binding test passed**.
 Clippy passed across all targets with warnings denied; formatting passed.
 
 Tests cover independent panes and tab switching, session round trips and sign-out saving, missing

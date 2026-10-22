@@ -2460,3 +2460,29 @@ fn group_by_date_heads_sections_and_is_remembered_per_folder() {
     assert_eq!(unsafe { SendMessageW(list, LVM_ISGROUPVIEWENABLED, None, None) }.0, 0);
     close(hwnd);
 }
+
+#[test]
+fn seven_zip_commands_compress_and_extract() {
+    use kestrel::sevenzip::{ACTIONS, Action};
+    if kestrel::sevenzip::install_dir().is_none() {
+        return; // 7-Zip isn't installed here: its menu doesn't show either.
+    }
+    let _desktop = desktop();
+    let t = TempDir::new("7zip");
+    std::fs::write(t.0.join("notes.txt"), "seven").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["notes.txt"]));
+    let run = |action| command(hwnd, ui::CMD_7ZIP + ACTIONS.iter().position(|a| *a == action).unwrap());
+    select_row(list, 0);
+    run(Action::AddZip);
+    let slow = Duration::from_secs(30);
+    assert!(pump_until(slow, || rows(list) == ["notes.txt", "notes.zip"]), "{:?}", rows(list));
+    std::fs::remove_file(t.0.join("notes.txt")).unwrap();
+    assert!(pump_until(WAIT, || rows(list) == ["notes.zip"]));
+    select_row(list, 0);
+    run(Action::ExtractToFolder);
+    let out = t.0.join("notes").join("notes.txt");
+    assert!(pump_until(slow, || std::fs::read_to_string(&out).is_ok_and(|s| s == "seven")));
+    close(hwnd);
+}

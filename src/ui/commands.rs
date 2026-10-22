@@ -12,7 +12,7 @@ use windows::Win32::System::Ole::CF_HDROP;
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
 use super::{Event, go, open_file, selected_rows, set_status, spawn, spawn_list, with_app};
 use crate::ops::{self, Mode, Op};
@@ -38,6 +38,8 @@ pub const CMD_PIN: usize = 116;
 pub const CMD_OPEN_OTHER_PANE: usize = 117;
 pub const CMD_COPY_TO_OTHER: usize = 118;
 pub const CMD_MOVE_TO_OTHER: usize = 119;
+/// First of the 7-Zip commands, one per `sevenzip::ACTIONS` entry (120..=127).
+pub const CMD_7ZIP: usize = 120;
 
 /// Commands that change files. This PC lists drives, not files: they don't apply there.
 const CHANGES_FILES: [usize; 9] = [
@@ -58,7 +60,12 @@ pub(super) fn on_this_pc() -> bool {
 
 /// Runs a menu command. Returns false for ids that aren't ours.
 pub(super) fn run(cmd: usize) -> bool {
-    if CHANGES_FILES.contains(&cmd) && on_this_pc() {
+    let seven_zip = cmd.checked_sub(CMD_7ZIP).and_then(|i| crate::sevenzip::ACTIONS.get(i).copied());
+    if (CHANGES_FILES.contains(&cmd) || seven_zip.is_some()) && on_this_pc() {
+        return true;
+    }
+    if let Some(action) = seven_zip {
+        run_seven_zip(action);
         return true;
     }
     match cmd {
@@ -100,6 +107,47 @@ pub(super) fn run(cmd: usize) -> bool {
         _ => return false,
     }
     true
+}
+
+/// Runs a 7-Zip command on the selection, on a worker: 7-Zip shows its own progress and errors.
+fn run_seven_zip(action: crate::sevenzip::Action) {
+    let selected = selected_paths();
+    let Some(dir) = crate::sevenzip::install_dir() else { return };
+    if !crate::sevenzip::applies(action, &selected) {
+        return;
+    }
+    let items: Vec<PathBuf> = selected.into_iter().map(|p| p.0).collect();
+    let Some(events) = with_app(|a| a.events.clone()) else { return };
+    spawn("7-zip", move || {
+        if let Err(e) = crash::guard(|| crate::sevenzip::run(dir, action, &items))
+            .unwrap_or_else(|| Err("Internal error while running 7-Zip.".into()))
+        {
+            events.send(Event::Message(e));
+        }
+    });
+}
+
+/// Adds the 7-Zip submenu for the selection, when 7-Zip is installed and the items are files
+/// on disk (not drives, nor the inside of a .zip shown as a folder).
+unsafe fn add_seven_zip(menu: HMENU, selected: &[(PathBuf, bool)]) {
+    let in_zip = current_dir().is_some_and(|d| d.ancestors().any(crate::shell::is_zip));
+    if crate::sevenzip::install_dir().is_none() || selected.is_empty() || on_this_pc() || in_zip {
+        return;
+    }
+    let items: Vec<PathBuf> = selected.iter().map(|p| p.0.clone()).collect();
+    unsafe {
+        let Ok(sub) = CreatePopupMenu() else { return };
+        for (i, &action) in crate::sevenzip::ACTIONS.iter().enumerate() {
+            if action == crate::sevenzip::Action::AddDialog && GetMenuItemCount(Some(sub)) > 0 {
+                let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null());
+            }
+            if crate::sevenzip::applies(action, selected) {
+                let text = HSTRING::from(crate::sevenzip::label(action, &items));
+                let _ = AppendMenuW(sub, MF_STRING, CMD_7ZIP + i, &text);
+            }
+        }
+        let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("7-&Zip"));
+    }
 }
 
 /// The folder Pin acts on: the selected folder, or with nothing selected, the open one.
@@ -190,6 +238,7 @@ pub(super) fn context_menu(hwnd: HWND, lp: LPARAM) {
             _ => w!("Pin to &Quick access"),
         };
         add(CMD_PIN, pin_text, pin.is_some());
+        add_seven_zip(menu, &selected_paths());
         line();
         add(CMD_CUT, w!("Cu&t\tCtrl+X"), changes);
         add(CMD_COPY, w!("&Copy\tCtrl+C"), changes);
