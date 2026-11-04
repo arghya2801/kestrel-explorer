@@ -147,8 +147,7 @@ fn label_of(strip: HWND, index: usize) -> String {
     String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)])
 }
 
-/// Each tab's label and tooltip. Tabs on different folders of the same name add the parent
-/// folders that tell them apart; the tooltip is the full path.
+/// Each tab includes its parent folder; deeper collisions add ancestors. The tooltip is the full path.
 fn labels() -> Vec<(String, String)> {
     let shown = with_app(|a| {
         (0..a.tabs.len())
@@ -163,7 +162,7 @@ fn labels() -> Vec<(String, String)> {
     })
     .unwrap_or_default();
     let folders: Vec<PathBuf> = shown.iter().filter(|s| s.1.is_none()).filter_map(|s| s.0.clone()).collect();
-    let mut names = crate::places::short_names(&folders).into_iter();
+    let mut names = crate::places::tab_names(&folders).into_iter();
     shown
         .into_iter()
         .map(|(dir, query)| match (dir, query) {
@@ -373,6 +372,10 @@ fn menu(owner: HWND, tab: Option<usize>, at: POINT) {
     }
 }
 pub(super) fn new_tab(dir: Option<PathBuf>) {
+    if let Some(device) = dir.as_ref().filter(|p| crate::places::is_shell_device(p)) {
+        super::go(device.clone());
+        return;
+    }
     let Some((hwnd, id, settings, events, font, dir)) = with_app(|a| {
         let id = a.next_tab_id;
         a.next_tab_id += 1;

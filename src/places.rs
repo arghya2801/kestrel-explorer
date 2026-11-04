@@ -2,7 +2,7 @@
 //! tree node shows when expanded. Also This PC, the page listing the drives.
 
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use windows::Win32::Storage::FileSystem::{
@@ -64,7 +64,57 @@ pub fn list_this_pc() -> io::Result<Snapshot> {
         let icon = crate::icons::file_icon(&d.root).unwrap_or(0);
         snap.drives.push(DriveRow { root: d.root, detail, icon });
     }
+    let devices = devices().unwrap_or_else(|e| {
+        crate::crash::log(&format!("Devices unavailable: {e}"));
+        Vec::new()
+    });
+    for (name, device) in devices {
+        snap.add(&name.encode_utf16().collect::<Vec<_>>(), FILE_ATTRIBUTE_DIRECTORY.0, 0, 0);
+        snap.drives.push(device);
+    }
     Ok(snap)
+}
+
+/// Shell devices such as MTP phones have parsing names instead of drive letters.
+pub fn is_shell_device(path: &Path) -> bool {
+    path.as_os_str().to_string_lossy().starts_with("::{")
+}
+
+/// Devices exposed by This PC without a filesystem path. Worker threads only.
+pub fn devices() -> io::Result<Vec<(String, DriveRow)>> {
+    use windows::Win32::System::SystemServices::{SFGAO_FILESYSTEM, SFGAO_FOLDER};
+    use windows::Win32::UI::Shell::{
+        BHID_EnumItems, IEnumShellItems, IShellItem, SHCreateItemFromParsingName,
+        SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_NORMALDISPLAY,
+    };
+    use windows::core::w;
+    let _com = crate::shell::Com::init();
+    let mut devices = Vec::new();
+    unsafe {
+        let pc: IShellItem = SHCreateItemFromParsingName(w!("shell:MyComputerFolder"), None)?;
+        let items: IEnumShellItems = pc.BindToHandler(None, &BHID_EnumItems)?;
+        loop {
+            let mut item = [None];
+            items.Next(&mut item, None)?;
+            let Some(item) = item[0].take() else { break };
+            let attrs = item.GetAttributes(SFGAO_FILESYSTEM | SFGAO_FOLDER)?;
+            if attrs.contains(SFGAO_FILESYSTEM) || !attrs.contains(SFGAO_FOLDER) {
+                continue;
+            }
+            let name = item.GetDisplayName(SIGDN_NORMALDISPLAY)?;
+            let label = String::from_utf16_lossy(name.as_wide());
+            CoTaskMemFree(Some(name.0 as _));
+            let parsing = item.GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING)?;
+            let root = PathBuf::from(std::ffi::OsString::from_wide(parsing.as_wide()));
+            CoTaskMemFree(Some(parsing.0 as _));
+            if !is_shell_device(&root) {
+                continue;
+            }
+            let icon = crate::icons::file_icon(&root).unwrap_or(0);
+            devices.push((label, DriveRow { root, detail: "Device (opens in Windows)".into(), icon }));
+        }
+    }
+    Ok(devices)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -225,6 +275,24 @@ pub fn short_names(paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
+/// Tab labels always include the parent; deeper collisions keep the existing disambiguation.
+pub fn tab_names(paths: &[PathBuf]) -> Vec<String> {
+    short_names(paths)
+        .into_iter()
+        .zip(paths)
+        .map(|(name, path)| {
+            let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+            match (path.file_name(), parent) {
+                (Some(leaf), Some(parent)) if name == leaf.to_string_lossy() => {
+                    let parent = parent.file_name().unwrap_or(parent.as_os_str());
+                    format!("{name} · {}", parent.to_string_lossy())
+                }
+                _ => name,
+            }
+        })
+        .collect()
+}
+
 /// Names of the folders directly inside `dir`, in display order.
 pub fn subfolders(dir: &Path, show_hidden: bool) -> io::Result<Vec<String>> {
     let s = list_dir(dir)?;
@@ -237,6 +305,25 @@ pub fn subfolders(dir: &Path, show_hidden: bool) -> io::Result<Vec<String>> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn shell_devices_have_launchable_targets_and_labels() {
+        for (name, device) in devices().unwrap() {
+            assert!(!name.is_empty());
+            assert!(is_shell_device(&device.root));
+        }
+    }
+
+    #[test]
+    fn tabs_identify_the_parent_even_when_only_one_folder_is_open() {
+        let paths = [PathBuf::from(r"C:\mkv\CAF\LOG")];
+        assert_eq!(tab_names(&paths), ["LOG · CAF"]);
+        assert_eq!(tab_names(&[PathBuf::from(r"C:\LOG")]), [r"LOG · C:\"]);
+        let paths = [r"C:\mkv\CAF\LOG", r"C:\mkv\PERF\LOG", r"C:\", THIS_PC].map(PathBuf::from);
+        assert_eq!(tab_names(&paths), ["LOG · CAF", "LOG · PERF", r"C:\", THIS_PC]);
+        let paths = [r"C:\a\CAF\LOG", r"C:\b\CAF\LOG"].map(PathBuf::from);
+        assert_eq!(tab_names(&paths), [r"LOG · a\CAF", r"LOG · b\CAF"]);
+    }
 
     #[test]
     fn drive_mask_bits_map_to_letters() {
@@ -299,7 +386,7 @@ mod tests {
     fn this_pc_lists_the_drives_with_their_roots() {
         assert!(is_this_pc(Path::new("this pc")) && !is_this_pc(Path::new(r"C:\This PC")));
         let pc = list_this_pc().unwrap();
-        assert_eq!(pc.len(), drives().len());
+        assert!(pc.len() >= drives().len());
         assert_eq!(pc.drives.len(), pc.len());
         let sys = std::env::var("SystemDrive").unwrap() + "\\";
         let c = pc.drives.iter().position(|d| d.root == Path::new(&sys)).expect("system drive listed");

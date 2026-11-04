@@ -61,6 +61,15 @@ thread_local! {
     static ICONS: Cell<(u32, HFONT)> = const { Cell::new((0, HFONT(std::ptr::null_mut()))) };
 }
 
+pub(super) fn shutdown() {
+    let (_, font) = ICONS.with(|cell| cell.replace((0, HFONT::default())));
+    if !font.is_invalid() {
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(font.0));
+        }
+    }
+}
+
 /// Windows 11's icon font, or Windows 10's, sized for `hwnd`'s DPI.
 /// ponytail: one font per thread; windows on monitors with different DPIs re-create it as they paint.
 fn icon_font(hwnd: HWND) -> HFONT {
@@ -375,4 +384,24 @@ pub(super) fn stroke(p: &Palette) -> u32 {
 /// Where the filter's text starts, after its search icon.
 pub(super) fn filter_inset(hwnd: HWND) -> i32 {
     scale(hwnd, 8 + ICON + 6)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closing_a_window_releases_its_icon_font_and_clears_the_cache() {
+        crate::ui::init_process().unwrap();
+        for _ in 0..2 {
+            let hwnd = crate::ui::create_main_window(&std::env::temp_dir(), &Default::default()).unwrap();
+            let font = icon_font(hwnd);
+            unsafe {
+                assert_eq!(GetObjectType(HGDIOBJ(font.0)), OBJ_FONT.0 as u32);
+                DestroyWindow(hwnd).unwrap();
+                assert_eq!(GetObjectType(HGDIOBJ(font.0)), 0, "the icon font outlived its window");
+            }
+            assert!(ICONS.with(|cell| cell.get().1.is_invalid()));
+        }
+    }
 }

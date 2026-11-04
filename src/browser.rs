@@ -595,6 +595,9 @@ pub fn parse_location(input: &str, current: Option<&Path>) -> Option<PathBuf> {
     if crate::places::is_this_pc(Path::new(&s)) {
         return Some(crate::places::this_pc());
     }
+    if crate::places::is_shell_device(Path::new(&s)) {
+        return Some(PathBuf::from(s));
+    }
     let b = s.as_bytes();
     // A computer on the network: `\\srv` lists its shares.
     if crate::network::server_of(Path::new(&s)).is_some() {
@@ -656,6 +659,24 @@ mod tests {
 
     fn shown(select: &[usize], new_folder: bool) -> Applied {
         Applied::Shown { select: select.to_vec(), new_folder }
+    }
+
+    #[test]
+    fn device_rows_keep_the_shell_target_instead_of_joining_the_display_name() {
+        let device = PathBuf::from(r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\::{phone}");
+        assert_eq!(
+            parse_location(&device.display().to_string(), Some(Path::new(r"C:\work"))),
+            Some(device.clone())
+        );
+        let mut b = Browser::default();
+        let job = b.go(crate::places::this_pc());
+        let mut s = Snapshot::new(job.dir);
+        s.add(&w("Android phone"), windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY.0, 0, 0);
+        s.drives.push(crate::places::DriveRow { root: device.clone(), detail: "Device".into(), icon: 0 });
+        b.on_listed(job.generation, Ok((s, vec![0])), &[]);
+        assert_eq!(b.path_at(0), Some((device, true)));
+        assert!(!crate::places::is_shell_device(Path::new(r"E:\")));
+        assert!(!crate::places::is_shell_device(Path::new(r"\\server\share")));
     }
 
     #[test]

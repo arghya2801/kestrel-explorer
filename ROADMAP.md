@@ -35,8 +35,25 @@ Moving drag-target creation and registration after first paint removed an 18 to 
 Preview control creation measured 2 to 4 ms and theme application 0 to 1 ms, so both stayed in place.
 DLL delay-loading was not justified by the measurements.
 
+Release-check measurements on 2026-11-02, with the pending issue fixes:
 
-A 120-second follow-up used the same light theme and settled grid state at each resource sample.
+| Measurement | Result |
+|---|---|
+| Release first paint, seven launches | 272, 156, 114, 173, 151, 143, 140 ms; median 151 ms |
+| Release executable | 1,453,056 bytes |
+| Working set at first paint | 14,664 to 14,896 KiB |
+| Applicable regression suite | 165 unit tests, 63 window tests and 1 key-binding test passed |
+| Final 120-second stress | 1,620 UI actions; 41,389 file changes; longest UI interval 406.8 ms; normal exit |
+| Resource change versus normalized warm-up | Handles +9, GDI +3, USER +1 |
+
+These launches did not clear caches. Other desktop activity and the stalled first stress run
+were present, so they do not establish a startup regression against the older measurements.
+The stress check found a toolbar icon font retained after closing secondary windows. Releasing it
+on window teardown reduced GDI growth from +37 in the preceding 120-second run to +3. A regression
+checks the font handle directly; this short stress sample does not establish long-run resource bounds.
+
+
+The earlier 120-second follow-up used the same light theme and settled grid state at each resource sample.
 It completed 1,483 actions and 42,405 file changes. Samples of handles/GDI/USER were
 (528,80,58), (525,80,58), (528,79,58), and final (523,79,56), giving changes -5/-1/-2.
 No sustained resource growth was observed. This supports state variation as the explanation for
@@ -87,7 +104,8 @@ Items are ordered by priority inside each phase.
 - [x] CI on push to main and on PRs: the same fmt/clippy/unit-test/build steps
 - [x] Save the session on Windows sign-out/restart (`WM_QUERYENDSESSION`/`WM_ENDSESSION`)
 - [x] Checkpoint the session every 30 seconds, so a crash or kill keeps the tabs
-- [ ] Finish the manual checks: cold-cache startup, physical high-DPI/monitors, SMB and clipboard
+- [ ] Finish the manual checks: cold-cache startup, physical high-DPI/monitors, a connected phone
+      and MSI setup on the affected office machine. SMB and clipboard checks passed on 2026-11-02
 - [x] Tag a release through the job: v1.2.0, 2026-10-15
 
 ### 1.2: everyday-use gaps versus Explorer

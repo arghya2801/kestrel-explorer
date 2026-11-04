@@ -6,6 +6,14 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ## [Unreleased]
 
+### Fixed
+- Closing a window releases its toolbar icon font, preventing GDI resource growth when repeatedly opening windows.
+- The stress runner clears keyboard modifiers when refreshing, so a held Shift key cannot trigger a pane copy. Shutdown now reports background operations that fail to finish within ten seconds.
+- Periodic session saves run on a background worker. Settings and session writes no longer hold the window state lock during disk I/O. (#23)
+- Tabs always include their parent folder, even when there is no other matching tab. (#24)
+- This PC and the sidebar include connected phones and other shell devices without drive letters. Opening a device uses Windows' device browser. (#25)
+- MSI setup now has destination, progress and completion screens. The installer previously had no setup dialogs. The office machine's reported failure still needs retesting. (#22)
+
 ## [1.3.1] - 2026-10-22
 
 ### Added

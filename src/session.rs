@@ -2,7 +2,7 @@
 use crate::settings::Settings;
 use std::sync::Mutex;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Session {
     enabled: bool,
     windows: Vec<(isize, Settings)>,
@@ -19,6 +19,9 @@ static SESSION: Mutex<Session> = Mutex::new(Session {
     preferences: None,
     written: String::new(),
 });
+
+// Serialize disk writes without holding the state lock that window threads need.
+static WRITER: Mutex<()> = Mutex::new(());
 
 pub fn begin() {
     *SESSION.lock().unwrap_or_else(|e| e.into_inner()) = Session { enabled: true, ..Default::default() };
@@ -77,14 +80,16 @@ pub(crate) fn theme() -> Option<crate::theme::ThemeChoice> {
     SESSION.lock().unwrap_or_else(|e| e.into_inner()).preferences.as_ref().map(|s| s.theme)
 }
 pub(crate) fn flush_preferences() -> std::io::Result<()> {
-    let s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(p) = &s.preferences {
+    let _writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+    let preferences = SESSION.lock().unwrap_or_else(|e| e.into_inner()).preferences.clone();
+    if let Some(p) = preferences {
         p.save_to(&Settings::file())?;
     }
     Ok(())
 }
 pub fn finish() -> std::io::Result<()> {
-    let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let _writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+    let s = SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if !s.enabled {
         return Ok(());
     }
@@ -97,14 +102,15 @@ pub fn finish() -> std::io::Result<()> {
         }
         p.save_to(&Settings::file())?;
     }
-    write_windows(&mut s)
+    write_windows(&s)
 }
 /// Writes the open windows to session.txt, so a crash or kill restores them on the next launch.
 pub(crate) fn checkpoint() -> std::io::Result<()> {
-    let mut s = SESSION.lock().unwrap_or_else(|e| e.into_inner());
-    if !s.enabled { Ok(()) } else { write_windows(&mut s) }
+    let _writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+    let s = SESSION.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if !s.enabled { Ok(()) } else { write_windows(&s) }
 }
-fn write_windows(s: &mut Session) -> std::io::Result<()> {
+fn write_windows(s: &Session) -> std::io::Result<()> {
     let mut text = String::new();
     for (_, window) in &s.windows {
         text += "[window]
@@ -123,13 +129,46 @@ fn write_windows(s: &mut Session) -> std::io::Result<()> {
     file.sync_all()?;
     drop(file);
     std::fs::rename(tmp, path)?;
-    s.written = text;
+    SESSION.lock().unwrap_or_else(|e| e.into_inner()).written = text;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn periodic_saves_leave_the_ui_responsive_and_do_not_queue_more_writers() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, SendMessageW, WM_TIMER};
+        crate::ui::init_process().unwrap();
+        let hwnd = crate::ui::create_main_window(&std::env::temp_dir(), &Settings::default()).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let slow_disk = std::thread::spawn(move || {
+            let _writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+            ready_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+        });
+        ready_rx.recv().unwrap();
+        let operations = crate::ui::running_operations();
+        let started = Instant::now();
+        unsafe {
+            SendMessageW(hwnd, WM_TIMER, Some(WPARAM(8)), Some(LPARAM(0)));
+            SendMessageW(hwnd, WM_TIMER, Some(WPARAM(8)), Some(LPARAM(0)));
+        }
+        let elapsed = started.elapsed();
+        let writers = crate::ui::running_operations() - operations;
+        let state_available = SESSION.try_lock().is_ok();
+        let _ = release_tx.send(());
+        slow_disk.join().unwrap();
+        unsafe { DestroyWindow(hwnd).unwrap() };
+        assert!(elapsed < Duration::from_secs(1), "UI waited for storage: {elapsed:?}");
+        assert_eq!(writers, 1, "only one periodic writer per window");
+        assert!(state_available, "the window state lock must remain available");
+    }
+
     #[test]
     fn windows_keep_distinct_tab_records() {
         let a = Settings::parse("last_folder=C:\\a\n");
