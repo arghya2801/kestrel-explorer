@@ -611,7 +611,14 @@ mod tests {
         let device = || {
             vec![(
                 "Test phone".into(),
-                places::DriveRow { root: root.clone(), detail: "Device".into(), icon: 0 },
+                places::DriveRow {
+                    root: root.clone(),
+                    detail: "Device".into(),
+                    icon: 0,
+                    free: 0,
+                    total: 0,
+                    network: false,
+                },
             )]
         };
         on_devices(generation - 1, Ok(device()));

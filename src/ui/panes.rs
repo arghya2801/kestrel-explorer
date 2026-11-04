@@ -274,7 +274,7 @@ fn fit_split_columns() {
         SendMessageW(list, LVM_SETCOLUMNWIDTH, Some(WPARAM(0)), Some(LPARAM(cx as isize)));
     };
     for (id, list) in views {
-        let details = unsafe { GetWindowLongPtrW(list, GWL_STYLE) } as u32 & LVS_TYPEMASK == LVS_REPORT;
+        let details = unsafe { SendMessageW(list, LVM_GETVIEW, None, None) }.0 as u32 == LV_VIEW_DETAILS;
         if !split {
             if let Some(cx) = with_app(|a| a.view_mut(id).and_then(|v| v.name_before_split.take())).flatten()
             {

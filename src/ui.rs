@@ -1228,7 +1228,9 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
             with_app(|a| Some((a.view_mut(view)?.groups.clone(), a.palette))).flatten()?;
         let cd = unsafe { &*(lp.0 as *const NMLVCUSTOMDRAW) };
         return unsafe {
-            groups::draw_header(cd, &groups, palette).or_else(|| dark::column_lines(cd, palette))
+            this_pc_tile(cd, view, palette)
+                .or_else(|| groups::draw_header(cd, &groups, palette))
+                .or_else(|| dark::column_lines(cd, palette))
         };
     }
     if hdr.code == LVN_ODCACHEHINT {
@@ -2201,10 +2203,29 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool, focus: Option<&[u16
         }
         unsafe { SendMessageW(list, LVM_CANCELEDITLABEL, None, None) };
     }
-    // Group by date, in folders that asked for it.
-    let Some((sections, view_groups)) = with_app(|a| {
+    // Group by date, in folders that asked for it; This PC by kind of drive.
+    let Some((sections, view_groups, this_pc, grid)) = with_app(|a| {
         let v = a.views().find(|v| v.id == id)?;
         let grouped = v.browser.dir().is_some_and(|d| a.grouped.iter().any(|g| g == d));
+        let this_pc = v.browser.dir().is_some_and(crate::places::is_this_pc);
+        if this_pc {
+            let s = v.browser.snapshot()?;
+            let (mut local, mut network) = (Vec::new(), Vec::new());
+            for (row, &e) in v.browser.order.iter().enumerate() {
+                let on_network = s.drives.get(e as usize).is_some_and(|d| d.network);
+                if on_network { &mut network } else { &mut local }.push(row as u32);
+            }
+            // By drive letter, as Explorer lists them, whatever the sort.
+            let root =
+                |row: &u32| s.drives.get(v.browser.order[*row as usize] as usize).map(|d| d.root.clone());
+            local.sort_by_key(root);
+            network.sort_by_key(root);
+            let sections = [("Devices and drives", local), ("Network locations", network)]
+                .into_iter()
+                .filter(|(_, rows)| !rows.is_empty())
+                .collect();
+            return Some((Some(sections), v.groups.clone(), true, v.grid.enabled));
+        }
         let sections = grouped.then(|| {
             let today = crate::groups::today();
             let s = v.browser.snapshot();
@@ -2213,7 +2234,7 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool, focus: Option<&[u16
             let groups = crate::groups::by_date(days, today);
             groups.into_iter().map(|(b, rows)| (crate::groups::LABELS[b], rows)).collect()
         });
-        Some((sections, v.groups.clone()))
+        Some((sections, v.groups.clone(), false, v.grid.enabled))
     })
     .flatten() else {
         return;
@@ -2239,6 +2260,7 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool, focus: Option<&[u16
         };
         set(-1, 0);
         groups::show(list, &view_groups, sections);
+        this_pc_view(list, this_pc, grid);
         let flags = if new_folder { 0 } else { LVSICF_NOSCROLL };
         SendMessageW(list, LVM_SETITEMCOUNT, Some(WPARAM(count)), Some(LPARAM(flags as isize)));
         if select.len() == count && count > 0 {
@@ -2403,6 +2425,136 @@ fn column_menu(hwnd: HWND, list: HWND, lp: LPARAM) {
             SendMessageW(list, LVM_SETCOLUMNWIDTH, Some(WPARAM(picked)), Some(LPARAM(cx as isize)));
         }
     }
+}
+
+/// This PC shows its drives as tiles, as Explorer does; other folders use the chosen view.
+fn this_pc_view(list: HWND, this_pc: bool, grid: bool) {
+    let want = if this_pc {
+        LV_VIEW_TILE
+    } else if grid {
+        LV_VIEW_ICON
+    } else {
+        LV_VIEW_DETAILS
+    };
+    unsafe {
+        if SendMessageW(list, LVM_GETVIEW, None, None).0 as u32 == want {
+            return;
+        }
+        if this_pc {
+            let info = LVTILEVIEWINFO {
+                cbSize: size_of::<LVTILEVIEWINFO>() as u32,
+                dwMask: LVTVIM_TILESIZE | LVTVIM_COLUMNS,
+                dwFlags: LVTVIF_FIXEDSIZE,
+                sizeTile: windows::Win32::Foundation::SIZE { cx: scale(list, 300), cy: scale(list, 64) },
+                cLines: 1,
+                ..Default::default()
+            };
+            SendMessageW(list, LVM_SETTILEVIEWINFO, None, Some(LPARAM(&info as *const _ as isize)));
+        }
+        SendMessageW(list, LVM_SETVIEW, Some(WPARAM(want as usize)), None);
+    }
+}
+
+/// Paints a This PC tile: the drive's icon and name, a bar for the space used (red when
+/// less than a tenth is free), and "X free of Y". `None` outside This PC and in high contrast.
+unsafe fn this_pc_tile(cd: &NMLVCUSTOMDRAW, view: u64, p: Palette) -> Option<LRESULT> {
+    use crate::theme::mix;
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Graphics::Gdi::*;
+    let list = cd.nmcd.hdr.hwndFrom;
+    if crate::theme::high_contrast()
+        || cd.dwItemType == LVCDI_GROUP
+        || unsafe { SendMessageW(list, LVM_GETVIEW, None, None) }.0 as u32 != LV_VIEW_TILE
+    {
+        return None;
+    }
+    match cd.nmcd.dwDrawStage {
+        CDDS_PREPAINT => return Some(LRESULT(CDRF_NOTIFYITEMDRAW as isize)),
+        CDDS_ITEMPREPAINT => {}
+        _ => return None,
+    }
+    let row = cd.nmcd.dwItemSpec;
+    let drive = with_view(view, |v| {
+        let e = *v.browser.order.get(row)?;
+        v.browser.snapshot()?.drives.get(e as usize).cloned()
+    })
+    .flatten()?;
+    let s = |n| scale(list, n);
+    unsafe {
+        let hdc = cd.nmcd.hdc;
+        let mut r = RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
+        SendMessageW(list, LVM_GETITEMRECT, Some(WPARAM(row)), Some(LPARAM(&mut r as *mut _ as isize)));
+        let state =
+            SendMessageW(list, LVM_GETITEMSTATE, Some(WPARAM(row)), Some(LPARAM(LVIS_SELECTED.0 as isize))).0;
+        let selected = state as u32 & LVIS_SELECTED.0 != 0;
+        let hot = cd.nmcd.uItemState.contains(CDIS_HOT);
+        let back = if selected {
+            mix(p.window, p.accent, if p.dark { 32 } else { 20 })
+        } else if hot {
+            mix(p.window, p.text, 7)
+        } else {
+            p.window
+        };
+        let tile =
+            RECT { left: r.left + s(2), top: r.top + s(2), right: r.right - s(2), bottom: r.bottom - s(2) };
+        chrome::round_outline(hdc, &tile, back, back, s(5));
+        if let Some(images) = crate::icons::large_image_list() {
+            let y = (tile.top + tile.bottom) / 2 - 16;
+            let _ = ImageList_Draw(images, drive.icon, hdc, tile.left + s(10), y, ILD_TRANSPARENT);
+        }
+        let mut name = [0u16; 260];
+        let mut item = LVITEMW {
+            pszText: windows::core::PWSTR(name.as_mut_ptr()),
+            cchTextMax: 260,
+            ..Default::default()
+        };
+        let len = SendMessageW(
+            list,
+            LVM_GETITEMTEXTW,
+            Some(WPARAM(row)),
+            Some(LPARAM(&mut item as *mut _ as isize)),
+        )
+        .0 as usize;
+        let font = HFONT(SendMessageW(list, WM_GETFONT, None, None).0 as _);
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        SetBkMode(hdc, TRANSPARENT);
+        let left = tile.left + s(10) + 32 + s(12);
+        let right = tile.right - s(10);
+        let flags = DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX;
+        let mut line = RECT { left, top: tile.top + s(6), right, bottom: tile.top + s(24) };
+        SetTextColor(hdc, COLORREF(p.text));
+        DrawTextW(hdc, &mut name[..len.min(260)], &mut line, flags | DT_VCENTER);
+        let quiet = mix(back, p.text, 65);
+        if drive.total > 0 {
+            let bar = RECT { left, top: tile.top + s(28), right, bottom: tile.top + s(33) };
+            let track = CreateSolidBrush(COLORREF(mix(back, p.text, 16)));
+            FillRect(hdc, &bar, track);
+            let _ = DeleteObject(HGDIOBJ(track.0));
+            let used = drive.total.saturating_sub(drive.free);
+            let width = ((bar.right - bar.left) as u64 * used / drive.total) as i32;
+            // #E81123, Windows' "almost full" red, as a COLORREF (0x00BBGGRR).
+            let full = drive.free * 10 < drive.total;
+            let ink = CreateSolidBrush(COLORREF(if full { 0x0023_11E8 } else { p.accent }));
+            FillRect(hdc, &RECT { right: bar.left + width, ..bar }, ink);
+            let _ = DeleteObject(HGDIOBJ(ink.0));
+            let text =
+                format!("{} free of {}", crate::format::bytes(drive.free), crate::format::bytes(drive.total));
+            let mut text: Vec<u16> = text.encode_utf16().collect();
+            let mut line = RECT { left, top: tile.top + s(36), right, bottom: tile.bottom - s(4) };
+            SetTextColor(hdc, COLORREF(quiet));
+            DrawTextW(hdc, &mut text, &mut line, flags);
+        } else {
+            let mut text: Vec<u16> = drive.detail.encode_utf16().collect();
+            let mut line = RECT { left, top: tile.top + s(28), right, bottom: tile.bottom - s(4) };
+            SetTextColor(hdc, COLORREF(quiet));
+            DrawTextW(hdc, &mut text, &mut line, flags);
+        }
+        SelectObject(hdc, old);
+        if cd.nmcd.uItemState.contains(CDIS_FOCUS) && GetFocus() == list {
+            chrome::outline(hdc, &tile, p.text, s(5), 1);
+        }
+    }
+    Some(LRESULT(CDRF_SKIPDEFAULT as isize))
 }
 
 fn scale(hwnd: HWND, px: i32) -> i32 {

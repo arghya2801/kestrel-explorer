@@ -508,7 +508,7 @@ pub(super) unsafe fn column_lines(cd: &NMLVCUSTOMDRAW, p: Palette) -> Option<LRE
     }
     let (list, hdc) = (cd.nmcd.hdr.hwndFrom, cd.nmcd.hdc);
     unsafe {
-        if GetWindowLongPtrW(list, GWL_STYLE) as u32 & LVS_TYPEMASK != LVS_REPORT {
+        if SendMessageW(list, LVM_GETVIEW, None, None).0 as u32 != LV_VIEW_DETAILS {
             return None;
         }
         let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as _);

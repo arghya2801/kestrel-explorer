@@ -2165,9 +2165,14 @@ fn this_pc_lists_drives_and_is_above_each_drive() {
     let button = |text| unsafe { FindWindowExW(Some(hwnd), None, w!("Button"), text) }.unwrap();
     assert!(!unsafe { IsWindowEnabled(button(w!("Delete"))) }.as_bool());
     assert!(!unsafe { IsWindowEnabled(button(w!("New folder"))) }.as_bool());
+    // Tiles in sections, as in Explorer; a drive's folder goes back to the chosen view.
+    let view = || unsafe { SendMessageW(list, LVM_GETVIEW, None, None) }.0 as u32;
+    assert_eq!(view(), LV_VIEW_TILE);
+    assert_eq!(group_headers(list).first().map(String::as_str), Some("Devices and drives"));
     activate(hwnd, list, row as i32);
     let root = std::env::var("SystemDrive").unwrap() + "\\";
     assert!(pump_until(WAIT, || ui_dir(hwnd) == root), "{}", ui_dir(hwnd));
+    assert!(pump_until(WAIT, || view() == LV_VIEW_DETAILS));
     alt_key(list, VK_UP);
     assert!(pump_until(WAIT, || ui_dir(hwnd) == "This PC"), "{}", ui_dir(hwnd));
     // The sidebar's This PC opens the page too.

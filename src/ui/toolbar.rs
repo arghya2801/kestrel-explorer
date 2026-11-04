@@ -114,12 +114,19 @@ pub(super) fn layout(parent: HWND, width: i32) {
         .zip(BUTTONS)
         .map(|(&b, &(id, _, _))| super::chrome::button_width(parent, b, id))
         .collect();
-    // The pinned last group, plus the separator before it.
-    let reserve: i32 = widths.iter().rev().take(3).map(|w| w + gap).sum::<i32>() + group_gap;
+    // The last group always stays; Sort and View too while there's room, else they move into
+    // More with the other buttons that don't fit. `reserve` is the room the pinned ones need.
+    let room = |ids: &[usize]| {
+        BUTTONS.iter().zip(&widths).filter(|(b, _)| ids.contains(&b.0)).map(|(_, w)| w + gap).sum::<i32>()
+    };
+    let last = [MORE, SETTINGS, HELP];
+    let sort_view = room(&[SORT_MENU, VIEW]) + room(&last) + 2 * group_gap + scale(parent, 6) <= width;
+    let pinned = |id: usize| last.contains(&id) || (sort_view && matches!(id, SORT_MENU | VIEW));
+    let reserve = room(&last) + group_gap + if sort_view { room(&[SORT_MENU, VIEW]) + group_gap } else { 0 };
     let mut x = scale(parent, 6);
     let mut group = BUTTONS[0].2;
     for (i, &(id, _, g)) in BUTTONS.iter().enumerate() {
-        let pinned = matches!(id, MORE | SETTINGS | HELP);
+        let pinned = pinned(id);
         if g != group {
             x += group_gap - gap;
         }
@@ -355,6 +362,22 @@ fn submenu(menu: HMENU, text: &str, fill: impl FnOnce(HMENU)) {
 /// sort key, its direction and grouping; View has the layout, then what to show, the panes and
 /// the tabs. Each item names its shortcut.
 fn popup(hwnd: HWND, kind: usize) {
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        fill(menu, kind);
+        let button = GetDlgItem(Some(hwnd), kind as i32).unwrap_or(hwnd);
+        let mut r = RECT::default();
+        let _ = GetWindowRect(button, &mut r);
+        let id = TrackPopupMenu(menu, TPM_RETURNCMD, r.left, r.bottom, None, hwnd, None).0 as usize;
+        let _ = DestroyMenu(menu);
+        if id != 0 {
+            let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(id), LPARAM(0));
+        }
+    }
+}
+
+/// Puts the items of menu `kind` (Sort, View, More or Help) into `menu`.
+fn fill(menu: HMENU, kind: usize) {
     let Some((sort, hidden, preview, grid, size, grouped, split, sync, vertical)) = with_app(|a| {
         (
             a.view.browser.sort,
@@ -371,7 +394,6 @@ fn popup(hwnd: HWND, kind: usize) {
         return;
     };
     unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
         match kind {
             SORT_MENU => {
                 for (id, label, key) in [
@@ -445,10 +467,11 @@ fn popup(hwnd: HWND, kind: usize) {
                 })
                 .unwrap_or_default();
                 for &(id, label) in &hidden_buttons {
-                    if matches!(id, VIEW | SORT_MENU) {
-                        continue;
+                    match id {
+                        VIEW => submenu(menu, "&View", |sub| fill(sub, VIEW)),
+                        SORT_MENU => submenu(menu, "&Sort", |sub| fill(sub, SORT_MENU)),
+                        _ => item(menu, id, label, false),
                     }
-                    item(menu, id, label, false);
                 }
                 if !hidden_buttons.is_empty() {
                     separator(menu);
@@ -474,14 +497,6 @@ fn popup(hwnd: HWND, kind: usize) {
                 item(menu, OPERATIONS, "File &operations", false);
                 item(menu, NEW_WINDOW, "New &window", false);
             }
-        }
-        let button = GetDlgItem(Some(hwnd), kind as i32).unwrap_or(hwnd);
-        let mut r = RECT::default();
-        let _ = GetWindowRect(button, &mut r);
-        let id = TrackPopupMenu(menu, TPM_RETURNCMD, r.left, r.bottom, None, hwnd, None).0 as usize;
-        let _ = DestroyMenu(menu);
-        if id != 0 {
-            let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(id), LPARAM(0));
         }
     }
 }
