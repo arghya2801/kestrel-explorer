@@ -270,13 +270,15 @@ struct App {
     tab_strip: HWND,
     /// Tooltips for the top bar's buttons, naming each command's shortcut.
     tips: HWND,
-    /// The strip's "+" and "all tabs" buttons.
-    tab_buttons: [HWND; 2],
+    /// The "+", "all tabs" and (vertical) collapse buttons.
+    tab_buttons: [HWND; 3],
     /// The tabs listed above the sidebar, shown instead of the strip with `vertical_tabs`.
     tab_list: HWND,
     vertical_tabs: bool,
-    /// The tab list's height (96-DPI pixels) once its divider was dragged.
-    tab_list_height: Option<i32>,
+    /// The vertical tab column's width (96-DPI pixels) once its edge was dragged, and whether
+    /// it's collapsed to badges.
+    tab_list_width: Option<i32>,
+    tabs_collapsed: bool,
     /// The window font, and the bold copy made from it for the active vertical tab.
     tab_bold: Option<(HFONT, HFONT)>,
     /// Recently closed tabs, newest last, for Ctrl+Shift+T.
@@ -336,6 +338,7 @@ impl App {
             self.tab_list,
             self.tab_buttons[0],
             self.tab_buttons[1],
+            self.tab_buttons[2],
             b0,
             b1,
             b2,
@@ -545,6 +548,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 tab_list,
                 tab_buttons[0],
                 tab_buttons[1],
+                tab_buttons[2],
                 buttons[0],
                 buttons[1],
                 buttons[2],
@@ -604,7 +608,8 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 tab_buttons,
                 tab_list,
                 vertical_tabs: false,
-                tab_list_height: settings.tabs_height,
+                tab_list_width: settings.tabs_width,
+                tabs_collapsed: settings.tabs_collapsed,
                 tab_bold: None,
                 closed_tabs: Vec::new(),
                 next_tab_id: 1,
@@ -1038,7 +1043,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             // The only bare client area below the toolbar is the splitter gap.
             WM_LBUTTONDOWN => {
                 if let Some((kind, edge)) = splitter_at(hwnd, lp) {
-                    let x = axis(kind, lp);
+                    let x = (lp.0 & 0xFFFF) as i16 as i32;
                     with_app(|a| {
                         a.drag_offset = Some(x - edge);
                         a.drag_kind = kind;
@@ -1050,7 +1055,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_MOUSEMOVE => {
                 if let Some((offset, kind)) = with_app(|a| a.drag_offset.map(|o| (o, a.drag_kind))).flatten()
                 {
-                    let x = axis(kind, lp);
+                    let x = (lp.0 & 0xFFFF) as i16 as i32;
                     drag_splitter(hwnd, kind, x - offset);
                     layout(hwnd);
                 }
@@ -1069,9 +1074,8 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let _ = GetCursorPos(&mut pt);
                 let _ = ScreenToClient(hwnd, &mut pt);
                 let at = LPARAM(((pt.y as isize & 0xFFFF) << 16) | (pt.x as isize & 0xFFFF));
-                if let Some((kind, _)) = splitter_at(hwnd, at) {
-                    let shape = if matches!(kind, SplitKind::Tabs) { IDC_SIZENS } else { IDC_SIZEWE };
-                    SetCursor(LoadCursorW(None, shape).ok());
+                if splitter_at(hwnd, at).is_some() {
+                    SetCursor(LoadCursorW(None, IDC_SIZEWE).ok());
                     return LRESULT(1);
                 }
                 DefWindowProcW(hwnd, msg, wp, lp)
@@ -1175,6 +1179,16 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 stop_watching();
                 if let Some(app) = APP.with(|cell| cell.try_borrow_mut().ok().and_then(|mut a| a.take())) {
                     let _ = DeleteObject(HGDIOBJ(app.font.0));
+                    let spacer = SendMessageW(
+                        app.tab_list,
+                        LVM_GETIMAGELIST,
+                        Some(WPARAM(LVSIL_SMALL as usize)),
+                        None,
+                    )
+                    .0;
+                    if spacer != 0 {
+                        let _ = ImageList_Destroy(Some(HIMAGELIST(spacer)));
+                    }
                     if let Some((_, bold)) = app.tab_bold {
                         let _ = DeleteObject(HGDIOBJ(bold.0));
                     }
@@ -1674,12 +1688,15 @@ fn late_init() {
                 Some(WPARAM(TVSIL_NORMAL as usize)),
                 Some(LPARAM(image_list.0)),
             );
+            // The tab list draws its own rows; a blank image list only sets their height.
+            // ponytail: sized at startup DPI; recreate on WM_DPICHANGED if rows look off.
             if let Some(tab_list) = with_app(|a| a.tab_list) {
+                let spacer = ImageList_Create(1, scale(tab_list, 30), ILC_COLOR32, 1, 1);
                 SendMessageW(
                     tab_list,
                     LVM_SETIMAGELIST,
                     Some(WPARAM(LVSIL_SMALL as usize)),
-                    Some(LPARAM(image_list.0)),
+                    Some(LPARAM(spacer.0)),
                 );
             }
         }
@@ -1755,7 +1772,8 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
             pins: a.pins.clone(),
             unpinned: a.unpinned.clone(),
             vertical_tabs: a.vertical_tabs,
-            tabs_height: a.tab_list_height,
+            tabs_width: a.tab_list_width,
+            tabs_collapsed: a.tabs_collapsed,
             recent: a.recent.clone(),
             grouped: a.grouped.clone(),
             ..Default::default()
@@ -2441,21 +2459,23 @@ fn layout(hwnd: HWND) {
         tabbar::place_buttons();
         let top = content_top(hwnd);
         let h = (client.bottom - (sr.bottom - sr.top) - top).max(0);
-        let split = tree::clamp_split(split, client.right, GetDpiForWindow(hwnd));
         let gap = splitter_width(hwnd);
-        // Vertical tabs sit above the sidebar, a gap apart.
-        let vertical = with_app(|a| a.vertical_tabs.then_some((a.tab_list, a.tab_list_height))).flatten();
-        let tabs_h = match vertical {
-            Some((tab_list, chosen)) => {
+        // Vertical tabs: a full-height column at the far left, with the sidebar right of it.
+        let vertical = with_app(|a| a.vertical_tabs.then_some(a.tab_list)).flatten();
+        let left = match vertical {
+            Some(tab_list) => {
+                let width = tabbar::column_width(hwnd, client.right);
                 let head = tabbar::heading_height(hwnd);
-                let tabs_h = tabbar::list_height(tab_list, h - head, chosen);
-                let _ = MoveWindow(tab_list, 0, top + head, split, tabs_h, true);
+                let _ = MoveWindow(tab_list, 0, top + head, width, (h - head).max(0), true);
                 tabbar::fit_list_column(tab_list);
-                head + tabs_h + gap
+                width + gap
             }
             None => 0,
         };
-        let _ = MoveWindow(tree, 0, top + tabs_h, split, (h - tabs_h).max(0), true);
+        let sidebar = tree::clamp_split(split, (client.right - left).max(0), GetDpiForWindow(hwnd));
+        let _ = MoveWindow(tree, left, top, sidebar, h, true);
+        // From here, `split` is the sidebar's right edge, where the folder lists start.
+        let split = left + sidebar;
         let rest = (client.right - split - gap).max(0);
         // Preview pane, when shown: a third of the space right of the sidebar.
         let preview_w = if preview::is_visible() {
@@ -2502,16 +2522,8 @@ enum SplitKind {
     Sidebar,
     Panes,
     Preview,
-    /// Between the vertical tab list and the sidebar; dragged up and down.
+    /// The vertical tab column's right edge.
     Tabs,
-}
-
-/// The mouse position along the axis `kind` is dragged on.
-fn axis(kind: SplitKind, lp: LPARAM) -> i32 {
-    match kind {
-        SplitKind::Tabs => ((lp.0 >> 16) & 0xFFFF) as i16 as i32,
-        _ => (lp.0 & 0xFFFF) as i16 as i32,
-    }
 }
 
 fn client_rect_of(parent: HWND, child: HWND) -> RECT {
@@ -2536,10 +2548,12 @@ fn splitter_at(hwnd: HWND, lp: LPARAM) -> Option<(SplitKind, i32)> {
     })?;
     let gap = splitter_width(hwnd);
     let sidebar = client_rect_of(hwnd, tree).right;
-    if let Some(tab_list) = with_app(|a| a.vertical_tabs.then_some(a.tab_list)).flatten() {
-        let bottom = client_rect_of(hwnd, tab_list).bottom;
-        if x < sidebar && (bottom..bottom + gap).contains(&y) {
-            return Some((SplitKind::Tabs, bottom));
+    if let Some(tab_list) =
+        with_app(|a| (a.vertical_tabs && !a.tabs_collapsed).then_some(a.tab_list)).flatten()
+    {
+        let edge = client_rect_of(hwnd, tab_list).right;
+        if (edge..edge + gap).contains(&x) {
+            return Some((SplitKind::Tabs, edge));
         }
     }
     if (sidebar..sidebar + gap).contains(&x) {
@@ -2567,17 +2581,18 @@ fn drag_splitter(hwnd: HWND, kind: SplitKind, x: i32) {
     match kind {
         SplitKind::Sidebar => {
             let dpi = unsafe { GetDpiForWindow(hwnd) };
-            with_app(|a| a.split = tree::clamp_split(x, client.right, dpi));
+            // With vertical tabs the sidebar starts right of their column.
+            let left = with_app(|a| a.vertical_tabs.then_some(a.tab_list))
+                .flatten()
+                .map_or(0, |l| client_rect_of(hwnd, l).right + splitter_width(hwnd));
+            with_app(|a| a.split = tree::clamp_split(x - left, client.right - left, dpi));
         }
         SplitKind::Preview => {
             with_app(|a| a.preview_width = Some((client.right - x - splitter_width(hwnd)).max(100)));
         }
         SplitKind::Tabs => {
-            if let Some(list) = with_app(|a| a.tab_list) {
-                let top = client_rect_of(hwnd, list).top;
-                let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
-                with_app(|a| a.tab_list_height = Some(((x - top) * 96 / dpi.max(1)).max(1)));
-            }
+            let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
+            with_app(|a| a.tab_list_width = Some((x * 96 / dpi.max(1)).max(1)));
         }
         SplitKind::Panes => {
             if let Some((left, right)) = with_app(|a| {

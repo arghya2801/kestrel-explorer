@@ -67,6 +67,8 @@ pub const SORT_UP: usize = 257;
 pub const SORT_DOWN: usize = 258;
 pub const GROUP_NONE: usize = 259;
 pub const GROUP_DATE: usize = 260;
+/// Narrows the vertical tab column to badges, or widens it again.
+pub const TABS_COLLAPSE: usize = 261;
 const RELEASES: &str = "https://github.com/arghya2801/kestrel-explorer/releases/latest";
 
 /// Logical y where the toolbar row ends and the tab strip starts.

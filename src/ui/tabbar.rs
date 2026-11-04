@@ -1,6 +1,6 @@
 //! A tab owns its folder views; switching tabs preserves both panes. Tabs show along the
 //! top in a tab strip, or listed above the sidebar ("vertical tabs").
-use super::toolbar::TAB_LIST;
+use super::toolbar::{TAB_LIST, TABS_COLLAPSE};
 use super::{
     child,
     panes::{self, Workspace},
@@ -45,10 +45,10 @@ impl TabSlot {
     }
 }
 
-/// The tab strip, and its "+" (new tab) and "all tabs" buttons. The buttons are the window's
-/// own children so they stay put when the strip scrolls: "+" follows the last tab until the
-/// strip fills, then waits beside "all tabs" right of the strip.
-pub(super) unsafe fn create(parent: HWND) -> Result<(HWND, [HWND; 2])> {
+/// The tab strip, its "+" (new tab) and "all tabs" buttons, and the vertical column's collapse
+/// button. The buttons are the window's own children so they stay put when the strip scrolls:
+/// "+" follows the last tab until the strip fills, then waits beside "all tabs" right of it.
+pub(super) unsafe fn create(parent: HWND) -> Result<(HWND, [HWND; 3])> {
     let strip = unsafe {
         // Clips the "+" button, which sits over the strip's empty end.
         let style = WINDOW_STYLE(TCS_FOCUSNEVER | TCS_TOOLTIPS) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
@@ -62,10 +62,18 @@ pub(super) unsafe fn create(parent: HWND) -> Result<(HWND, [HWND; 2])> {
         let _ = windows::Win32::UI::Shell::SetWindowSubclass(strip, Some(strip_proc), 3, 0);
         let plus = child(parent, w!("BUTTON"), w!("New tab"), WINDOW_STYLE(0), WINDOW_EX_STYLE(0), NEW_TAB)?;
         let all = child(parent, w!("BUTTON"), w!("All tabs"), WINDOW_STYLE(0), WINDOW_EX_STYLE(0), TAB_LIST)?;
+        let fold = child(
+            parent,
+            w!("BUTTON"),
+            w!("Collapse tabs"),
+            WINDOW_STYLE(0),
+            WINDOW_EX_STYLE(0),
+            TABS_COLLAPSE,
+        )?;
         for b in [plus, all] {
             let _ = SetWindowPos(b, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
-        [plus, all]
+        [plus, all, fold]
     };
     insert_label(strip, 0, "");
     Ok((strip, buttons))
@@ -147,34 +155,47 @@ pub(super) unsafe fn create_list(parent: HWND) -> Result<HWND> {
     }
 }
 
-/// The "Tabs (n)" heading's height above the tab list.
+/// The heading's height above the tab list: one row of buttons, or two (expand, then "+")
+/// when collapsed.
 pub(super) fn heading_height(hwnd: HWND) -> i32 {
-    super::scale(hwnd, 30)
+    let collapsed = with_app(|a| a.tabs_collapsed).unwrap_or(false);
+    super::scale(hwnd, if collapsed { 64 } else { 34 })
 }
 
-/// Height for the tab list within `space`. `chosen` (96-DPI pixels) is the height the
-/// divider was dragged to; otherwise every row, if they fit in two fifths of `space`.
-/// Either way at least one row, and the sidebar keeps some room.
-pub(super) fn list_height(list: HWND, space: i32, chosen: Option<i32>) -> i32 {
-    let rows = unsafe { SendMessageW(list, LVM_GETITEMCOUNT, None, None) }.0.max(1) as usize;
-    let size = |rows: usize| {
-        let r =
-            unsafe { SendMessageW(list, LVM_APPROXIMATEVIEWRECT, Some(WPARAM(rows)), Some(LPARAM(-1))) }.0;
-        ((r >> 16) & 0xFFFF) as i32 + super::scale(list, 4)
-    };
-    let one = size(1);
-    let height = match chosen {
-        Some(h) => super::scale(list, h),
-        None => size(rows).min(space * 2 / 5),
-    };
-    height.min(space - super::scale(list, 100)).max(one)
+/// The vertical tab column's width in a window `client_width` wide: a strip of badges when
+/// collapsed, else the width its edge was dragged to (200 by default), within limits.
+pub(super) fn column_width(hwnd: HWND, client_width: i32) -> i32 {
+    let (chosen, collapsed) = with_app(|a| (a.tab_list_width, a.tabs_collapsed)).unwrap_or_default();
+    if collapsed {
+        return super::scale(hwnd, 44);
+    }
+    let width = super::scale(hwnd, chosen.unwrap_or(200));
+    width.clamp(super::scale(hwnd, 120), (client_width / 3).max(super::scale(hwnd, 120)))
 }
 
-/// Where the "Tabs (n)" heading is drawn, in the window's coordinates.
+/// Where the heading is drawn, in the window's coordinates: above the tab column.
 pub(super) fn heading_rect(hwnd: HWND) -> Option<RECT> {
-    let (vertical, split) = with_app(|a| (a.vertical_tabs, a.split))?;
+    let (vertical, list) = with_app(|a| (a.vertical_tabs, a.tab_list))?;
     let top = super::content_top(hwnd);
-    vertical.then(|| RECT { left: 0, top, right: split, bottom: top + heading_height(hwnd) })
+    let right = super::client_rect_of(hwnd, list).right;
+    vertical.then(|| RECT { left: 0, top, right, bottom: top + heading_height(hwnd) })
+}
+
+/// Collapses the vertical tab column to badges, or widens it again, and remembers the choice.
+pub(super) fn toggle_collapsed() {
+    let Some(hwnd) = with_app(|a| {
+        a.tabs_collapsed = !a.tabs_collapsed;
+        a.hwnd
+    }) else {
+        return;
+    };
+    super::layout(hwnd);
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, true);
+    }
+    if let Some(s) = super::current_settings(hwnd) {
+        super::save_preferences(s);
+    }
 }
 
 /// The heading's text: "Tabs (6)".
@@ -182,7 +203,7 @@ pub(super) fn heading_text() -> String {
     format!("Tabs ({})", with_app(|a| a.tabs.len()).unwrap_or(0))
 }
 
-/// Shows the tabs above the sidebar (`on`) or along the top, and remembers the choice.
+/// Shows the tabs in a column left of the sidebar (`on`) or along the top, and remembers it.
 pub(super) fn set_vertical(on: bool) {
     let Some((hwnd, strip, list)) = with_app(|a| {
         a.vertical_tabs = on;
@@ -207,8 +228,8 @@ pub(super) fn set_vertical(on: bool) {
 /// strip's scroll arrows appear), and "all tabs" at the far right. With the tabs above the
 /// sidebar, both leave the top row.
 pub(super) fn place_buttons() {
-    let Some((hwnd, strip, [plus, all], vertical)) =
-        with_app(|a| (a.hwnd, a.tab_strip, a.tab_buttons, a.vertical_tabs))
+    let Some((hwnd, strip, [plus, all, fold], vertical, collapsed)) =
+        with_app(|a| (a.hwnd, a.tab_strip, a.tab_buttons, a.vertical_tabs, a.tabs_collapsed))
     else {
         return;
     };
@@ -216,16 +237,32 @@ pub(super) fn place_buttons() {
         if vertical {
             let _ = ShowWindow(all, SW_HIDE);
             if let Some(head) = heading_rect(hwnd) {
-                let size = super::scale(hwnd, 24);
-                let (x, y) = (
-                    head.right - size - super::scale(hwnd, 6),
-                    head.top + (head.bottom - head.top - size) / 2,
-                );
-                let _ = MoveWindow(plus, x, y, size, size, true);
-                let _ = ShowWindow(plus, SW_SHOWNA);
+                let (size, gap) = (super::scale(hwnd, 24), super::scale(hwnd, 6));
+                if collapsed {
+                    // Expand on top, "+" below it, centered in the narrow column.
+                    let x = (head.right - size) / 2;
+                    let _ = MoveWindow(fold, x, head.top + gap, size, size, true);
+                    let _ = MoveWindow(plus, x, head.top + 2 * gap + size, size, size, true);
+                } else {
+                    let y = head.top + (head.bottom - head.top - size) / 2;
+                    let _ = MoveWindow(plus, head.right - size - gap, y, size, size, true);
+                    let _ = MoveWindow(
+                        fold,
+                        head.right - 2 * size - gap - super::scale(hwnd, 2),
+                        y,
+                        size,
+                        size,
+                        true,
+                    );
+                }
+                for b in [plus, fold] {
+                    let _ = ShowWindow(b, SW_SHOWNA);
+                    let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(b), None, false);
+                }
             }
             return;
         }
+        let _ = ShowWindow(fold, SW_HIDE);
         let bounds = super::client_rect_of(hwnd, strip);
         let (gap, size) = (super::scale(hwnd, 4), super::scale(hwnd, 24));
         let top = bounds.top + super::scale(hwnd, 4);
@@ -413,13 +450,10 @@ fn fill_list(list: HWND, labels: &[(String, String)], active: usize) {
 
 /// Fits the list's one column to its width, after the list was sized.
 pub(super) fn fit_list_column(list: HWND) {
+    let mut client = RECT::default();
     unsafe {
-        SendMessageW(
-            list,
-            LVM_SETCOLUMNWIDTH,
-            Some(WPARAM(0)),
-            Some(LPARAM(LVSCW_AUTOSIZE_USEHEADER as isize)),
-        );
+        let _ = GetClientRect(list, &mut client);
+        SendMessageW(list, LVM_SETCOLUMNWIDTH, Some(WPARAM(0)), Some(LPARAM(client.right.max(1) as isize)));
     }
 }
 
@@ -430,6 +464,7 @@ pub(super) fn execute(id: usize) -> bool {
     match id {
         NEW_TAB => new_tab(None),
         TAB_LIST => all_tabs_menu(),
+        TABS_COLLAPSE => toggle_collapsed(),
         REOPEN_TAB => reopen(),
         CLOSE_TAB => close_tab(active),
         DUPLICATE_TAB => duplicate(active),
@@ -521,7 +556,11 @@ pub(super) fn on_list_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
         }
         LVN_GETINFOTIPW => {
             let nm = unsafe { &mut *(lp.0 as *mut NMLVGETINFOTIPW) };
-            let text = labels().get(nm.iItem as usize).map(|l| l.1.clone()).unwrap_or_default();
+            let collapsed = with_app(|a| a.tabs_collapsed).unwrap_or(false);
+            let text = labels()
+                .get(nm.iItem as usize)
+                .map(|(label, tip)| if collapsed { format!("{label}\n{tip}") } else { tip.clone() })
+                .unwrap_or_default();
             let wide: Vec<u16> = text.encode_utf16().collect();
             if nm.cchTextMax > 0 && !nm.pszText.is_null() {
                 let n = wide.len().min(nm.cchTextMax as usize - 1);
@@ -546,12 +585,15 @@ pub(super) fn on_list_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
     }
 }
 
-/// Row `row`'s rectangle in the tab list.
+/// Row `row`'s rectangle in the tab list, cut to the list's visible width.
 fn row_rect(list: HWND, row: usize) -> RECT {
     let mut r = RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
+    let mut client = RECT::default();
     unsafe {
-        SendMessageW(list, LVM_GETITEMRECT, Some(WPARAM(row)), Some(LPARAM(&mut r as *mut _ as isize)))
-    };
+        SendMessageW(list, LVM_GETITEMRECT, Some(WPARAM(row)), Some(LPARAM(&mut r as *mut _ as isize)));
+        let _ = GetClientRect(list, &mut client);
+    }
+    r.right = r.right.min(client.right);
     r
 }
 
@@ -624,6 +666,7 @@ unsafe fn draw_row(cd: &NMLVCUSTOMDRAW) {
         p.window
     };
     let s = |n| super::scale(list, n);
+    let collapsed = with_app(|a| a.tabs_collapsed).unwrap_or(false);
     unsafe {
         let brush = CreateSolidBrush(COLORREF(back));
         FillRect(hdc, &r, brush);
@@ -638,6 +681,35 @@ unsafe fn draw_row(cd: &NMLVCUSTOMDRAW) {
             };
             FillRect(hdc, &mark, bar);
             let _ = DeleteObject(HGDIOBJ(bar.0));
+        }
+        if collapsed {
+            // A badge with the folder's first letter; hover the row for its name and path.
+            let size = (r.bottom - r.top - s(4)).min(s(22));
+            let left = r.left + (r.right - r.left - size) / 2 + s(2);
+            let top = (r.top + r.bottom - size) / 2;
+            let badge = RECT { left, top, right: left + size, bottom: top + size };
+            let (fill, ink) = if is_active {
+                (p.accent, if p.dark { 0x0020_2020 } else { 0x00FF_FFFF })
+            } else {
+                (crate::theme::mix(p.window, p.text, 12), p.text)
+            };
+            super::chrome::round_outline(hdc, &badge, fill, fill, s(5));
+            let initial: Vec<u16> = label
+                .chars()
+                .find(|c| c.is_alphanumeric())
+                .unwrap_or('?')
+                .to_uppercase()
+                .collect::<String>()
+                .encode_utf16()
+                .collect();
+            let old = SelectObject(hdc, HGDIOBJ(bold_font().unwrap_or(font).0));
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, COLORREF(ink));
+            let mut text = initial;
+            let mut area = badge;
+            DrawTextW(hdc, &mut text, &mut area, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(hdc, old);
+            return;
         }
         let close = row_close_rect(list, &r);
         let mut area = RECT { left: r.left + s(12), right: close.left - s(4), ..r };
@@ -778,7 +850,7 @@ fn menu(owner: HWND, tab: Option<usize>, at: POINT) {
             (2, "&Close tab\tCtrl+W", tab.is_some() && count > 1),
             (8, "Close &other tabs", tab.is_some() && count > 1),
             (9, "Close tabs &below", tab.is_some() && !last),
-            (4, "Tabs &above the sidebar", true),
+            (4, "Tabs on the &left", true),
         ]
     } else {
         [
@@ -790,7 +862,7 @@ fn menu(owner: HWND, tab: Option<usize>, at: POINT) {
             (2, "&Close tab\tCtrl+W", tab.is_some() && count > 1),
             (8, "Close &other tabs", tab.is_some() && count > 1),
             (9, "Close tabs to the r&ight", tab.is_some() && !last),
-            (4, "Tabs &above the sidebar", true),
+            (4, "Tabs on the &left", true),
         ]
     };
     unsafe {

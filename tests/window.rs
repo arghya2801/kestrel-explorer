@@ -2221,7 +2221,7 @@ fn tabs_on_folders_of_the_same_name_show_their_parents() {
 }
 
 #[test]
-fn vertical_tabs_list_the_tabs_above_the_sidebar() {
+fn vertical_tabs_get_their_own_column_left_of_the_sidebar() {
     let _desktop = desktop();
     let t = TempDir::new("vertical");
     for name in ["one", "two"] {
@@ -2243,32 +2243,39 @@ fn vertical_tabs_list_the_tabs_above_the_sidebar() {
     assert!(!visible(strip) && visible(tabs));
     assert_eq!(rows(tabs), [one, two.clone()]);
     assert_eq!(selected(tabs), [two]);
-    // The sidebar starts below the tab list.
+    // The tabs have a full-height column; the sidebar starts right of it.
     let rect = |h: HWND| {
         let mut r = windows::Win32::Foundation::RECT::default();
         unsafe { GetWindowRect(h, &mut r) }.unwrap();
         r
     };
-    assert!(rect(tree_of(hwnd)).top >= rect(tabs).bottom);
+    assert!(rect(tree_of(hwnd)).left >= rect(tabs).right);
+    assert!(rect(tabs).bottom >= rect(tree_of(hwnd)).bottom - 2, "the column runs the full height");
     // "+" moves into the list's heading.
     let plus = unsafe { GetDlgItem(Some(hwnd), 240) }.unwrap();
     assert!(visible(plus) && rect(plus).bottom <= rect(tabs).top, "+ sits in the heading");
-    // Dragging the divider below the list resizes it, and the height is remembered.
+    // Dragging the column's edge widens it, and the width is remembered.
     let client = |h: HWND| {
         let r = rect(h);
-        let mut pt = windows::Win32::Foundation::POINT { x: r.left, y: r.bottom };
+        let mut pt = windows::Win32::Foundation::POINT { x: r.right, y: (r.top + r.bottom) / 2 };
         unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt) }.unwrap();
         pt
     };
-    let before = rect(tabs).bottom - rect(tabs).top;
+    let width = || rect(tabs).right - rect(tabs).left;
+    let before = width();
     let edge = client(tabs);
     unsafe {
-        SendMessageW(hwnd, WM_LBUTTONDOWN, None, Some(at(edge.x + 10, edge.y + 1)));
-        SendMessageW(hwnd, WM_MOUSEMOVE, None, Some(at(edge.x + 10, edge.y + 41)));
-        SendMessageW(hwnd, WM_LBUTTONUP, None, Some(at(edge.x + 10, edge.y + 41)));
+        SendMessageW(hwnd, WM_LBUTTONDOWN, None, Some(at(edge.x + 1, edge.y)));
+        SendMessageW(hwnd, WM_MOUSEMOVE, None, Some(at(edge.x + 41, edge.y)));
+        SendMessageW(hwnd, WM_LBUTTONUP, None, Some(at(edge.x + 41, edge.y)));
     }
-    assert!(rect(tabs).bottom - rect(tabs).top >= before + 30, "the divider didn't resize the list");
-    assert!(rect(tree_of(hwnd)).top >= rect(tabs).bottom);
+    assert!(width() >= before + 30, "dragging the edge didn't widen the column");
+    assert!(rect(tree_of(hwnd)).left >= rect(tabs).right);
+    // Collapsing shrinks it to badges; expanding brings the width back.
+    command(hwnd, ui::toolbar::TABS_COLLAPSE);
+    assert!(width() < before / 2, "collapsed: {}", width());
+    command(hwnd, ui::toolbar::TABS_COLLAPSE);
+    assert!(width() >= before + 30);
     // Moving the selection (as the arrow keys do) only moves the cursor; it never switches or
     // opens a tab. Clicking a row, or Enter, switches.
     select_row(tabs, 0);
@@ -2302,7 +2309,7 @@ fn vertical_tabs_list_the_tabs_above_the_sidebar() {
     assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 1 && ui_dir(hwnd).ends_with("one")));
     close(hwnd);
     let saved = ui::take_final_settings().unwrap();
-    assert!(saved.vertical_tabs && saved.tabs_height.is_some());
+    assert!(saved.vertical_tabs && saved.tabs_width.is_some() && !saved.tabs_collapsed);
 }
 
 #[test]

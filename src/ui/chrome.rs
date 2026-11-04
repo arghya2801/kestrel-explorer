@@ -44,6 +44,13 @@ fn glyph(id: usize) -> Option<char> {
         toolbar::HELP => '\u{E897}',
         super::tabbar::NEW_TAB => '\u{E710}',
         toolbar::TAB_LIST => '\u{E70D}',
+        toolbar::TABS_COLLAPSE => {
+            if with_app(|a| a.tabs_collapsed) == Some(true) {
+                '\u{E76C}'
+            } else {
+                '\u{E76B}'
+            }
+        }
         _ => return None,
     })
 }
@@ -57,7 +64,13 @@ fn opens_menu(id: usize) -> bool {
 fn icon_only(id: usize) -> bool {
     matches!(
         id,
-        ID_BACK | ID_FORWARD | ID_UP | breadcrumbs::EDIT | super::tabbar::NEW_TAB | toolbar::TAB_LIST
+        ID_BACK
+            | ID_FORWARD
+            | ID_UP
+            | breadcrumbs::EDIT
+            | super::tabbar::NEW_TAB
+            | toolbar::TAB_LIST
+            | toolbar::TABS_COLLAPSE
     )
 }
 
@@ -380,19 +393,22 @@ pub(super) fn paint(hwnd: HWND, hdc: HDC) {
         for r in toolbar::separators(hwnd) {
             fill(hdc, &r, stroke);
         }
-        // Vertical tabs: the "Tabs (n)" heading, and a line across the divider below the list.
+        // Vertical tabs: the "Tabs (n)" heading, and a line down the column's edge.
         if let Some(head) = super::tabbar::heading_rect(hwnd)
-            && let Some((font, list)) = with_app(|a| (a.font, a.tab_list))
+            && let Some((font, list, collapsed)) = with_app(|a| (a.font, a.tab_list, a.tabs_collapsed))
         {
-            let old = SelectObject(hdc, HGDIOBJ(font.0));
-            SetBkMode(hdc, TRANSPARENT);
-            let label: Vec<u16> = super::tabbar::heading_text().encode_utf16().collect();
-            let mut r =
-                RECT { left: head.left + scale(hwnd, 12), right: head.right - scale(hwnd, 36), ..head };
-            text(hdc, &label, &mut r, mix(p.chrome, p.text, 70), DT_LEFT | DT_END_ELLIPSIS);
-            SelectObject(hdc, old);
-            let below = super::client_rect_of(hwnd, list).bottom + scale(hwnd, 2);
-            fill(hdc, &RECT { left: head.left, top: below, right: head.right, bottom: below + 1 }, stroke);
+            if !collapsed {
+                let old = SelectObject(hdc, HGDIOBJ(font.0));
+                SetBkMode(hdc, TRANSPARENT);
+                let label: Vec<u16> = super::tabbar::heading_text().encode_utf16().collect();
+                let mut r =
+                    RECT { left: head.left + scale(hwnd, 12), right: head.right - scale(hwnd, 64), ..head };
+                text(hdc, &label, &mut r, mix(p.chrome, p.text, 70), DT_LEFT | DT_END_ELLIPSIS);
+                SelectObject(hdc, old);
+            }
+            let r = super::client_rect_of(hwnd, list);
+            let x = r.right + scale(hwnd, 2);
+            fill(hdc, &RECT { left: x, top: head.top, right: x + 1, bottom: r.bottom }, stroke);
         }
         // The tab strip's base line continues under the "+" and "all tabs" buttons.
         if let Some(strip) = with_app(|a| (!a.vertical_tabs).then_some(a.tab_strip)).flatten() {
