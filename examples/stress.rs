@@ -276,7 +276,7 @@ fn main() {
                     press(edit, VK_RETURN, false, false);
                 }
                 2 => post(list, WM_SYSKEYDOWN, [VK_LEFT, VK_RIGHT][rng.next(2) as usize].0 as usize, 1 << 29),
-                3 => post(list, WM_KEYDOWN, VK_F5.0 as usize, 0),
+                3 => press(list, VK_F5, false, false),
                 4 => {
                     let mut nm = NMLISTVIEW {
                         hdr: NMHDR { hwndFrom: list, idFrom: 0, code: LVN_COLUMNCLICK },
@@ -427,7 +427,9 @@ fn main() {
         end.1 as i64 - b.1 as i64,
         end.2 as i64 - b.2 as i64
     );
+    let deadline = Instant::now() + Duration::from_secs(10);
     while ui::running_operations() > 0 {
+        assert!(Instant::now() < deadline, "background operations did not finish after closing the window");
         std::thread::sleep(Duration::from_millis(10));
     }
     let _ = std::fs::remove_dir_all(&root);

@@ -342,6 +342,10 @@ pub(super) fn compare() {
 
 /// Shows `dir` in the other pane, splitting the view first if needed.
 pub(super) fn open_in_other(dir: PathBuf) {
+    if crate::places::is_shell_device(&dir) {
+        super::go(dir);
+        return;
+    }
     if with_app(|a| a.split_view) != Some(true) {
         toggle();
     }

@@ -57,7 +57,9 @@ jobs:
           $wix = Join-Path $env:RUNNER_TEMP wix
           dotnet tool install wix --version 6.0.2 --tool-path $wix
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          & "$wix/wix.exe" build installer/kestrel.wxs -arch x64 -d Version=$version -o target/kestrel.msi
+          & "$wix/wix.exe" extension add WixToolset.UI.wixext/6.0.2
+          if ($LASTEXITCODE) { throw "wix UI extension install failed" }
+          & "$wix/wix.exe" build -ext WixToolset.UI.wixext installer/kestrel.wxs -arch x64 -d Version=$version -o target/kestrel.msi
           if ($LASTEXITCODE) { throw "wix build failed" }
 
       - name: Sign installer

@@ -497,13 +497,13 @@ mod tests {
         fs::write(d.join("x.txt"), "x").unwrap();
         fs::create_dir(d.join("sub")).unwrap();
         let undo = |op: Op| {
-            let (_, undo) = run_inner(&op, Mode::Silent).unwrap();
+            let (_, undo) = run_inner(&op, Mode::Silent).unwrap_or_else(|e| panic!("{op:?}: {e}"));
             // Same items, but kept out of the real Recycle Bin.
             let undo = match undo.expect("undoable") {
                 Op::Delete { paths, .. } => Op::Delete { paths, recycle: false },
                 undo => undo,
             };
-            run_inner(&undo, Mode::Silent).unwrap();
+            run_inner(&undo, Mode::Silent).unwrap_or_else(|e| panic!("{undo:?}: {e}"));
         };
         let names = || {
             let mut n: Vec<_> = fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();

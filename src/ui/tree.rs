@@ -88,6 +88,12 @@ fn add_drives(pc: usize) {
             });
         }
     }
+    if let Some((events, generation)) = with_app(|a| {
+        a.device_generation += 1;
+        (a.events.clone(), a.device_generation)
+    }) {
+        spawn("devices", move || events.send(Event::Devices { generation, result: places::devices() }));
+    }
 }
 
 /// Drives came or went: rebuild the drive nodes.
@@ -116,6 +122,22 @@ pub(super) fn refresh_drives() {
         unsafe { SendMessageW(tree, TVM_DELETEITEM, None, Some(LPARAM(item))) };
     }
     add_drives(pc);
+}
+
+pub(super) fn on_devices(generation: usize, result: std::io::Result<Vec<(String, places::DriveRow)>>) {
+    let Some(pc) = with_app(|a| (a.device_generation == generation).then_some(a.this_pc)).flatten() else {
+        return;
+    };
+    match result {
+        Ok(devices) => {
+            for (name, device) in devices {
+                let node = insert(Some(pc), &name, Some(device.root), false);
+                with_app(|a| a.nodes[node].state = State::Loaded);
+                on_icon(token(node), device.icon);
+            }
+        }
+        Err(e) => crate::crash::log(&format!("Devices unavailable: {e}")),
+    }
 }
 
 /// The live tree item of `node`, if it still exists.
@@ -574,6 +596,31 @@ fn deselect_elsewhere(tree: HWND, dir: Option<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_results_ignore_old_refreshes_and_keep_the_shell_path() {
+        super::super::init_process().unwrap();
+        let hwnd = super::super::create_main_window(&std::env::temp_dir(), &Default::default()).unwrap();
+        super::super::refresh_devices();
+        assert!(with_app(|a| a.nodes.is_empty()).unwrap());
+        let pc = populate();
+        with_app(|a| a.this_pc = pc);
+        let generation = with_app(|a| a.device_generation).unwrap();
+        let before = with_app(|a| a.nodes.len()).unwrap();
+        let root = PathBuf::from(r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\::{phone}");
+        let device = || {
+            vec![(
+                "Test phone".into(),
+                places::DriveRow { root: root.clone(), detail: "Device".into(), icon: 0 },
+            )]
+        };
+        on_devices(generation - 1, Ok(device()));
+        assert_eq!(with_app(|a| a.nodes.len()), Some(before));
+        on_devices(generation, Ok(device()));
+        assert_eq!(with_app(|a| a.nodes.last().unwrap().path.clone()), Some(Some(root)));
+        assert!(with_app(|a| a.nodes.last().unwrap().state == State::Loaded).unwrap());
+        unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd).unwrap() };
+    }
 
     #[test]
     fn split_keeps_both_panes_usable() {

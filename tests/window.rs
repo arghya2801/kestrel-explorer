@@ -1165,7 +1165,12 @@ fn tabs_keep_their_own_folders() {
     let list = list_of(hwnd);
     let root_rows = ["sub", "a.txt"];
     assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()) == root_rows));
-    let root_name = t.0.file_name().unwrap().to_string_lossy().into_owned();
+    let root_name = format!(
+        "{} · {}",
+        t.0.file_name().unwrap().to_string_lossy(),
+        t.0.parent().unwrap().file_name().unwrap().to_string_lossy()
+    );
+    let sub_name = format!("sub · {}", t.0.file_name().unwrap().to_string_lossy());
     assert_eq!(tab_labels(hwnd), std::slice::from_ref(&root_name));
 
     ctrl_key(list, VK_T, false);
@@ -1181,7 +1186,7 @@ fn tabs_keep_their_own_folders() {
         "{:?}",
         rows(ui::active_list().unwrap())
     );
-    assert_eq!(tab_labels(hwnd), [root_name.clone(), "sub".to_string()]);
+    assert_eq!(tab_labels(hwnd), [root_name.clone(), sub_name]);
 
     ctrl_key(ui::active_list().unwrap(), VK_TAB, false);
     assert!(
@@ -1216,7 +1221,9 @@ fn middle_click_closes_the_tab_under_the_cursor() {
     ctrl_key(ui::active_list().unwrap(), VK_T, false);
     assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
     activate(hwnd, ui::active_list().unwrap(), 0);
-    assert!(pump_until(WAIT, || tab_labels(hwnd).get(1).is_some_and(|l| l == "sub")));
+    assert!(pump_until(WAIT, || tab_labels(hwnd)
+        .get(1)
+        .is_some_and(|l| l == &format!("sub · {}", t.0.file_name().unwrap().to_string_lossy()))));
     // Middle-click the first (inactive) tab.
     let strip = find(hwnd, w!("SysTabControl32"));
     let mut r = windows::Win32::Foundation::RECT::default();
@@ -1225,7 +1232,12 @@ fn middle_click_closes_the_tab_under_the_cursor() {
         let at = ((((r.top + r.bottom) / 2) << 16) | ((r.left + r.right) / 2)) as isize;
         SendMessageW(strip, WM_MBUTTONUP, None, Some(LPARAM(at)));
     }
-    assert!(pump_until(WAIT, || tab_labels(hwnd) == ["sub"]), "{:?}", tab_labels(hwnd));
+    assert!(
+        pump_until(WAIT, || tab_labels(hwnd)
+            == [format!("sub · {}", t.0.file_name().unwrap().to_string_lossy())]),
+        "{:?}",
+        tab_labels(hwnd)
+    );
     close(hwnd);
 }
 
@@ -1242,10 +1254,13 @@ fn plus_button_and_ctrl_shift_k_open_tabs() {
     unsafe { SendMessageW(plus, BM_CLICK, None, None) };
     assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
     activate(hwnd, ui::active_list().unwrap(), 0);
-    assert!(pump_until(WAIT, || tab_labels(hwnd).get(1).is_some_and(|l| l == "sub")));
+    assert!(pump_until(WAIT, || tab_labels(hwnd)
+        .get(1)
+        .is_some_and(|l| l == &format!("sub · {}", t.0.file_name().unwrap().to_string_lossy()))));
     ctrl_key(ui::active_list().unwrap(), VK_K, true);
     assert!(
-        pump_until(WAIT, || tab_labels(hwnd).len() == 3 && tab_labels(hwnd)[2] == "sub"),
+        pump_until(WAIT, || tab_labels(hwnd).len() == 3
+            && tab_labels(hwnd)[2] == format!("sub · {}", t.0.file_name().unwrap().to_string_lossy())),
         "{:?}",
         tab_labels(hwnd)
     );
@@ -2071,7 +2086,7 @@ fn tabs_on_folders_of_the_same_name_show_their_parents() {
     }
     let hwnd = open(&t.0.join("bin").join("MFA221"));
     let list = list_of(hwnd);
-    assert!(pump_until(WAIT, || tab_labels(hwnd) == ["MFA221"]));
+    assert!(pump_until(WAIT, || tab_labels(hwnd) == ["MFA221 · bin"]));
     ctrl_key(list, VK_T, false);
     assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
     navigate_to(hwnd, &t.0.join("target").join("MFA221"));
@@ -2081,7 +2096,15 @@ fn tabs_on_folders_of_the_same_name_show_their_parents() {
         tab_labels(hwnd)
     );
     navigate_to(hwnd, &t.0.join("target"));
-    assert!(pump_until(WAIT, || tab_labels(hwnd) == ["MFA221", "target"]), "{:?}", tab_labels(hwnd));
+    assert!(
+        pump_until(WAIT, || tab_labels(hwnd)
+            == [
+                "MFA221 · bin".to_string(),
+                format!("target · {}", t.0.file_name().unwrap().to_string_lossy())
+            ]),
+        "{:?}",
+        tab_labels(hwnd)
+    );
     close(hwnd);
 }
 
@@ -2096,7 +2119,9 @@ fn vertical_tabs_list_the_tabs_above_the_sidebar() {
     let list = list_of(hwnd);
     ctrl_key(list, VK_T, false);
     navigate_to(hwnd, &t.0.join("two"));
-    assert!(pump_until(WAIT, || tab_labels(hwnd) == ["one", "two"]));
+    let one = format!("one · {}", t.0.file_name().unwrap().to_string_lossy());
+    let two = format!("two · {}", t.0.file_name().unwrap().to_string_lossy());
+    assert!(pump_until(WAIT, || tab_labels(hwnd) == [one.clone(), two.clone()]));
     let strip = find(hwnd, w!("SysTabControl32"));
     let tabs = ui::tab_list().unwrap();
     // The test window itself is never shown: look at the controls' own visibility.
@@ -2104,8 +2129,8 @@ fn vertical_tabs_list_the_tabs_above_the_sidebar() {
     assert!(visible(strip) && !visible(tabs));
     command(hwnd, ui::toolbar::VERTICAL_TABS);
     assert!(!visible(strip) && visible(tabs));
-    assert_eq!(rows(tabs), ["one", "two", "+  New tab"]);
-    assert_eq!(selected(tabs), ["two"]);
+    assert_eq!(rows(tabs), [one, two.clone(), "+  New tab".into()]);
+    assert_eq!(selected(tabs), [two]);
     // The sidebar starts below the tab list.
     let rect = |h: HWND| {
         let mut r = windows::Win32::Foundation::RECT::default();

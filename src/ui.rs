@@ -173,6 +173,10 @@ enum Event {
         node: usize,
         result: io::Result<Vec<String>>,
     },
+    Devices {
+        generation: usize,
+        result: io::Result<Vec<(String, crate::places::DriveRow)>>,
+    },
     DriveLabel {
         node: usize,
         text: String,
@@ -263,6 +267,8 @@ struct App {
     drag_offset: Option<i32>,
     watch_ids: u64,
     this_pc: usize,
+    device_generation: usize,
+    session_writer: Option<JoinHandle<()>>,
 }
 
 impl App {
@@ -555,6 +561,8 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 drag_offset: None,
                 watch_ids: 0,
                 this_pc: 0,
+                device_generation: 0,
+                session_writer: None,
             })
         });
 
@@ -1020,7 +1028,20 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_TIMER if preview::on_timer(hwnd, wp.0) => LRESULT(0),
             WM_TIMER if wp.0 == TIMER_SESSION => {
-                save_session(hwnd, false);
+                if let Some(s) = current_settings(hwnd) {
+                    crate::session::update(hwnd.0 as isize, s);
+                }
+                if with_app(|a| a.session_writer.as_ref().is_some_and(|h| !h.is_finished())) == Some(true) {
+                    return LRESULT(0);
+                }
+                let saving = OpGuard::new();
+                let writer = spawn("session", move || {
+                    let _saving = saving;
+                    if let Err(e) = crate::session::checkpoint() {
+                        crash::log(&format!("Session not saved: {e}"));
+                    }
+                });
+                with_app(|a| a.session_writer = writer);
                 LRESULT(0)
             }
             // Sign-out and restart end the process without a normal exit: save now.
@@ -1048,6 +1069,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 if let Some(app) = APP.with(|cell| cell.try_borrow_mut().ok().and_then(|mut a| a.take())) {
                     let _ = DeleteObject(HGDIOBJ(app.font.0));
                 }
+                chrome::shutdown();
                 PostQuitMessage(0);
                 LRESULT(0)
             }
@@ -1370,6 +1392,7 @@ fn apply(ev: Event) {
         }
         Event::TreeChildren { node, result } => tree::on_children(node, result),
         Event::DriveLabel { node, text } => tree::on_label(node, text),
+        Event::Devices { generation, result } => tree::on_devices(generation, result),
         Event::Icon { done: Done::Node { node, icon }, .. } => tree::on_icon(node, icon),
         Event::Icon { view, done } => {
             if let Some((list, true)) = with_view(view, |v| (v.list, v.icons.on_done(done))) {
@@ -1396,6 +1419,12 @@ fn run(nav: impl FnOnce(&mut Browser) -> Option<ListJob>) {
 }
 
 fn go(dir: PathBuf) {
+    // shortcut: shell devices open in Windows; add native browsing with shell-aware file operations.
+    if crate::places::is_shell_device(&dir) {
+        set_status("Opening device in Windows…");
+        open_file(dir);
+        return;
+    }
     run(|b| Some(b.go(dir)));
 }
 
@@ -1800,6 +1829,10 @@ fn on_watch_ready(id: u64, handle: isize) {
 }
 
 fn on_device_change(event: u32, lp: LPARAM) {
+    if event == DBT_DEVNODES_CHANGED {
+        refresh_devices();
+        return;
+    }
     if lp.0 == 0 {
         return;
     }
@@ -1830,18 +1863,22 @@ fn on_device_change(event: u32, lp: LPARAM) {
     } else if hdr.dbch_devicetype == DBT_DEVTYP_VOLUME
         && (event == DBT_DEVICEARRIVAL || event == DBT_DEVICEREMOVECOMPLETE)
     {
-        tree::refresh_drives();
-        let pcs = with_app(|a| {
-            a.views()
-                .filter(|v| v.browser.dir().is_some_and(crate::places::is_this_pc))
-                .map(|v| v.id)
-                .collect()
-        })
-        .unwrap_or_else(Vec::new);
-        for id in pcs {
-            if let Some(job) = with_view(id, |v| v.browser.refresh()).flatten() {
-                spawn_list(job);
-            }
+        refresh_devices();
+    }
+}
+
+fn refresh_devices() {
+    if with_app(|a| a.nodes.is_empty()) != Some(false) {
+        return;
+    }
+    tree::refresh_drives();
+    let pcs = with_app(|a| {
+        a.views().filter(|v| v.browser.dir().is_some_and(crate::places::is_this_pc)).map(|v| v.id).collect()
+    })
+    .unwrap_or_else(Vec::new);
+    for id in pcs {
+        if let Some(job) = with_view(id, |v| v.browser.refresh()).flatten() {
+            spawn_list(job);
         }
     }
 }

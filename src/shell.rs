@@ -46,8 +46,8 @@ pub fn open(path: &Path, owner: HWND) -> Result<Option<PathBuf>, String> {
         return Ok(Some(path.to_path_buf()));
     }
     let file = HSTRING::from(path.as_os_str());
-    // Inside an archive there is no file path: open the shell item, which extracts it first.
-    let pidl = in_archive(path).then(|| unsafe {
+    // Archives and devices need a shell item rather than a filesystem path.
+    let pidl = (crate::places::is_shell_device(path) || in_archive(path)).then(|| unsafe {
         let mut pidl = std::ptr::null_mut();
         SHParseDisplayName(&file, None, &mut pidl, 0, None).ok().map(|_| pidl)
     });
