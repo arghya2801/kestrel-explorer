@@ -35,6 +35,8 @@ pub struct Settings {
     pub unpinned: Vec<PathBuf>,
     /// Tabs listed above the sidebar instead of along the top.
     pub vertical_tabs: bool,
+    /// The vertical tab list's height in 96-DPI pixels, once its divider was dragged.
+    pub tabs_height: Option<i32>,
     pub recent: Vec<PathBuf>,
     /// Folders shown grouped by date.
     pub grouped: Vec<PathBuf>,
@@ -65,6 +67,7 @@ impl Default for Settings {
             pins: Vec::new(),
             unpinned: Vec::new(),
             vertical_tabs: false,
+            tabs_height: None,
             recent: Vec::new(),
             grouped: Vec::new(),
             folder_sorts: Vec::new(),
@@ -155,6 +158,7 @@ impl Settings {
                     }
                 }
                 "vertical_tabs" => s.vertical_tabs = flag(value).unwrap_or(false),
+                "tabs_height" => s.tabs_height = value.parse().ok().filter(|&h: &i32| h > 0),
                 "folder_sort" => {
                     let mut parts = value.splitn(3, ',');
                     if let (Some(p), Some(k), Some(d)) = (parts.next(), parts.next(), parts.next())
@@ -224,6 +228,9 @@ impl Settings {
             out += &format!("unpin={}\n", encode_path(p));
         }
         out += &format!("vertical_tabs={}\n", self.vertical_tabs);
+        if let Some(h) = self.tabs_height {
+            out += &format!("tabs_height={h}\n");
+        }
         for (p, sort) in self.folder_sorts.iter().filter(|(p, _)| rememberable(p)) {
             let key = KEYS.iter().find(|(k, _)| *k == sort.key).map_or("Name", |k| k.1);
             out += &format!("folder_sort={},{key},{}\n", encode_path(p), sort.descending);
@@ -348,6 +355,7 @@ mod tests {
             pins: vec![PathBuf::from(r"C:\pinned,=Ü")],
             unpinned: vec![PathBuf::from(r"C:\Users\me\Music")],
             vertical_tabs: true,
+            tabs_height: Some(180),
             recent: vec![PathBuf::from(r"D:\recent")],
             grouped: vec![PathBuf::from(r"C:\Users\me\Downloads")],
             folder_sorts: vec![(

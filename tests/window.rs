@@ -2241,7 +2241,7 @@ fn vertical_tabs_list_the_tabs_above_the_sidebar() {
     assert!(visible(strip) && !visible(tabs));
     command(hwnd, ui::toolbar::VERTICAL_TABS);
     assert!(!visible(strip) && visible(tabs));
-    assert_eq!(rows(tabs), [one, two.clone(), "+  New tab".into()]);
+    assert_eq!(rows(tabs), [one, two.clone()]);
     assert_eq!(selected(tabs), [two]);
     // The sidebar starts below the tab list.
     let rect = |h: HWND| {
@@ -2249,6 +2249,25 @@ fn vertical_tabs_list_the_tabs_above_the_sidebar() {
         unsafe { GetWindowRect(h, &mut r) }.unwrap();
         r
     };
+    assert!(rect(tree_of(hwnd)).top >= rect(tabs).bottom);
+    // "+" moves into the list's heading.
+    let plus = unsafe { GetDlgItem(Some(hwnd), 240) }.unwrap();
+    assert!(visible(plus) && rect(plus).bottom <= rect(tabs).top, "+ sits in the heading");
+    // Dragging the divider below the list resizes it, and the height is remembered.
+    let client = |h: HWND| {
+        let r = rect(h);
+        let mut pt = windows::Win32::Foundation::POINT { x: r.left, y: r.bottom };
+        unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt) }.unwrap();
+        pt
+    };
+    let before = rect(tabs).bottom - rect(tabs).top;
+    let edge = client(tabs);
+    unsafe {
+        SendMessageW(hwnd, WM_LBUTTONDOWN, None, Some(at(edge.x + 10, edge.y + 1)));
+        SendMessageW(hwnd, WM_MOUSEMOVE, None, Some(at(edge.x + 10, edge.y + 41)));
+        SendMessageW(hwnd, WM_LBUTTONUP, None, Some(at(edge.x + 10, edge.y + 41)));
+    }
+    assert!(rect(tabs).bottom - rect(tabs).top >= before + 30, "the divider didn't resize the list");
     assert!(rect(tree_of(hwnd)).top >= rect(tabs).bottom);
     // Moving the selection (as the arrow keys do) only moves the cursor; it never switches or
     // opens a tab. Clicking a row, or Enter, switches.
@@ -2259,11 +2278,31 @@ fn vertical_tabs_list_the_tabs_above_the_sidebar() {
     assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("one")), "{}", ui_dir(hwnd));
     click_row(hwnd, tabs, 1);
     assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("two")), "{}", ui_dir(hwnd));
+    // The active row's close button closes it.
+    unsafe { SendMessageW(plus, BM_CLICK, None, None) };
+    assert!(pump_until(WAIT, || rows(tabs).len() == 3));
+    let row = {
+        let mut r = windows::Win32::Foundation::RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
+        unsafe {
+            SendMessageW(tabs, LVM_GETITEMRECT, Some(WPARAM(2)), Some(LPARAM(&mut r as *mut _ as isize)))
+        };
+        r
+    };
+    let px = |n: i32| n * unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(tabs) } as i32 / 96;
+    let x_button = at(row.right - px(6) - px(8), (row.top + row.bottom) / 2);
+    unsafe {
+        SendMessageW(tabs, WM_LBUTTONDOWN, Some(WPARAM(1)), Some(x_button));
+        SendMessageW(tabs, WM_LBUTTONUP, None, Some(x_button));
+    }
+    assert!(pump_until(WAIT, || rows(tabs).len() == 2), "{:?}", rows(tabs));
+    click_row(hwnd, tabs, 1);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("two")), "{}", ui_dir(hwnd));
     // Shortcuts still work while the tab list has the focus.
     ctrl_key(tabs, VK_W, false);
     assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 1 && ui_dir(hwnd).ends_with("one")));
     close(hwnd);
-    assert!(ui::take_final_settings().unwrap().vertical_tabs);
+    let saved = ui::take_final_settings().unwrap();
+    assert!(saved.vertical_tabs && saved.tabs_height.is_some());
 }
 
 #[test]

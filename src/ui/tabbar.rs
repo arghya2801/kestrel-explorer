@@ -30,6 +30,10 @@ thread_local! {
     /// A tab being dragged: its index, where the press started, and whether it has moved enough
     /// to count as a drag.
     static DRAG: Cell<Option<(usize, POINT, bool)>> = const { Cell::new(None) };
+    /// The tab list's row under the mouse, and whether the mouse is on its close button.
+    static LIST_HOT: Cell<(Option<usize>, bool)> = const { Cell::new((None, false)) };
+    /// The tab list's row being dragged.
+    static LIST_DRAG: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 pub(super) struct TabSlot {
@@ -122,7 +126,8 @@ pub(super) fn reserve(hwnd: HWND) -> i32 {
     2 * size + 3 * super::scale(hwnd, 4)
 }
 
-/// The vertical tab list: one row per tab, then "New tab". Hidden until vertical tabs are on.
+/// The vertical tab list: one row per tab, under a "Tabs (n)" heading with the "+" button.
+/// Hidden until vertical tabs are on.
 pub(super) unsafe fn create_list(parent: HWND) -> Result<HWND> {
     unsafe {
         let style = LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS;
@@ -142,11 +147,39 @@ pub(super) unsafe fn create_list(parent: HWND) -> Result<HWND> {
     }
 }
 
-/// Height for the tab list within `space`: every row if they fit in two fifths of it.
-pub(super) fn list_height(list: HWND, space: i32) -> i32 {
+/// The "Tabs (n)" heading's height above the tab list.
+pub(super) fn heading_height(hwnd: HWND) -> i32 {
+    super::scale(hwnd, 30)
+}
+
+/// Height for the tab list within `space`. `chosen` (96-DPI pixels) is the height the
+/// divider was dragged to; otherwise every row, if they fit in two fifths of `space`.
+/// Either way at least one row, and the sidebar keeps some room.
+pub(super) fn list_height(list: HWND, space: i32, chosen: Option<i32>) -> i32 {
     let rows = unsafe { SendMessageW(list, LVM_GETITEMCOUNT, None, None) }.0.max(1) as usize;
-    let size = unsafe { SendMessageW(list, LVM_APPROXIMATEVIEWRECT, Some(WPARAM(rows)), Some(LPARAM(-1))) }.0;
-    (((size >> 16) & 0xFFFF) as i32 + super::scale(list, 4)).min(space * 2 / 5)
+    let size = |rows: usize| {
+        let r =
+            unsafe { SendMessageW(list, LVM_APPROXIMATEVIEWRECT, Some(WPARAM(rows)), Some(LPARAM(-1))) }.0;
+        ((r >> 16) & 0xFFFF) as i32 + super::scale(list, 4)
+    };
+    let one = size(1);
+    let height = match chosen {
+        Some(h) => super::scale(list, h),
+        None => size(rows).min(space * 2 / 5),
+    };
+    height.min(space - super::scale(list, 100)).max(one)
+}
+
+/// Where the "Tabs (n)" heading is drawn, in the window's coordinates.
+pub(super) fn heading_rect(hwnd: HWND) -> Option<RECT> {
+    let (vertical, split) = with_app(|a| (a.vertical_tabs, a.split))?;
+    let top = super::content_top(hwnd);
+    vertical.then(|| RECT { left: 0, top, right: split, bottom: top + heading_height(hwnd) })
+}
+
+/// The heading's text: "Tabs (6)".
+pub(super) fn heading_text() -> String {
+    format!("Tabs ({})", with_app(|a| a.tabs.len()).unwrap_or(0))
 }
 
 /// Shows the tabs above the sidebar (`on`) or along the top, and remembers the choice.
@@ -182,7 +215,15 @@ pub(super) fn place_buttons() {
     unsafe {
         if vertical {
             let _ = ShowWindow(all, SW_HIDE);
-            let _ = ShowWindow(plus, SW_HIDE);
+            if let Some(head) = heading_rect(hwnd) {
+                let size = super::scale(hwnd, 24);
+                let (x, y) = (
+                    head.right - size - super::scale(hwnd, 6),
+                    head.top + (head.bottom - head.top - size) / 2,
+                );
+                let _ = MoveWindow(plus, x, y, size, size, true);
+                let _ = ShowWindow(plus, SW_SHOWNA);
+            }
             return;
         }
         let bounds = super::client_rect_of(hwnd, strip);
@@ -331,7 +372,7 @@ pub(super) fn refresh() {
 fn fill_list(list: HWND, labels: &[(String, String)], active: usize) {
     let folder = with_app(|a| a.view.icons.folder).unwrap_or(0);
     unsafe {
-        let rows = labels.len() + 1;
+        let rows = labels.len();
         let selected = LVIS_SELECTED.0 | LVIS_FOCUSED.0;
         let mut count = SendMessageW(list, LVM_GETITEMCOUNT, None, None).0.max(0) as usize;
         let resized = count != rows;
@@ -344,13 +385,12 @@ fn fill_list(list: HWND, labels: &[(String, String)], active: usize) {
             count -= 1;
             SendMessageW(list, LVM_DELETEITEM, Some(WPARAM(count)), None);
         }
-        for (i, text) in labels.iter().map(|l| l.0.as_str()).chain(["+  New tab"]).enumerate() {
+        for (i, text) in labels.iter().map(|l| l.0.as_str()).enumerate() {
             let text = HSTRING::from(text);
-            let new_row = i == labels.len();
             let item = LVITEMW {
                 mask: LVIF_TEXT | LVIF_IMAGE | LVIF_STATE,
                 iItem: i as i32,
-                iImage: if new_row { I_IMAGENONE } else { folder },
+                iImage: folder,
                 pszText: PWSTR(text.as_ptr() as *mut _),
                 state: LIST_VIEW_ITEM_STATE_FLAGS(if i == active { selected } else { 0 }),
                 stateMask: LIST_VIEW_ITEM_STATE_FLAGS(selected),
@@ -359,8 +399,14 @@ fn fill_list(list: HWND, labels: &[(String, String)], active: usize) {
             SendMessageW(list, LVM_SETITEMW, None, Some(LPARAM(&item as *const _ as isize)));
         }
         SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(active)), Some(LPARAM(0)));
-        if resized && let Some(hwnd) = with_app(|a| a.hwnd) {
-            super::layout(hwnd);
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(list), None, false);
+        if let Some(hwnd) = with_app(|a| a.hwnd) {
+            if let Some(head) = heading_rect(hwnd) {
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), Some(&head), true);
+            }
+            if resized {
+                super::layout(hwnd);
+            }
         }
     }
 }
@@ -448,6 +494,27 @@ pub(super) fn on_list_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
             }
             Some(LRESULT(0))
         }
+        NM_CUSTOMDRAW if !crate::theme::high_contrast() => {
+            let cd = unsafe { &*(lp.0 as *const NMLVCUSTOMDRAW) };
+            Some(LRESULT(match cd.nmcd.dwDrawStage {
+                CDDS_PREPAINT => CDRF_NOTIFYITEMDRAW as isize,
+                CDDS_ITEMPREPAINT => {
+                    unsafe { draw_row(cd) };
+                    CDRF_SKIPDEFAULT as isize
+                }
+                _ => CDRF_DODEFAULT as isize,
+            }))
+        }
+        LVN_BEGINDRAG => {
+            let nm = unsafe { &*(lp.0 as *const NMLISTVIEW) };
+            if let Ok(row) = usize::try_from(nm.iItem) {
+                LIST_DRAG.with(|d| d.set(Some(row)));
+                unsafe {
+                    windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(hdr.hwndFrom);
+                }
+            }
+            Some(LRESULT(0))
+        }
         LVN_GETINFOTIPW => {
             let nm = unsafe { &mut *(lp.0 as *mut NMLVGETINFOTIPW) };
             let text = labels().get(nm.iItem as usize).map(|l| l.1.clone()).unwrap_or_default();
@@ -475,7 +542,138 @@ pub(super) fn on_list_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
     }
 }
 
-/// Middle-clicking a row in the tab list closes that tab.
+/// Row `row`'s rectangle in the tab list.
+fn row_rect(list: HWND, row: usize) -> RECT {
+    let mut r = RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
+    unsafe {
+        SendMessageW(list, LVM_GETITEMRECT, Some(WPARAM(row)), Some(LPARAM(&mut r as *mut _ as isize)))
+    };
+    r
+}
+
+/// The close button inside row rectangle `r`.
+fn row_close_rect(list: HWND, r: &RECT) -> RECT {
+    let (size, gap) = (super::scale(list, CLOSE), super::scale(list, 6));
+    let mid = (r.top + r.bottom) / 2;
+    RECT {
+        left: r.right - gap - size,
+        top: mid - size / 2,
+        right: r.right - gap,
+        bottom: mid - size / 2 + size,
+    }
+}
+
+/// Whether row `row` shows its close button: the active tab and the row under the mouse.
+fn row_shows_close(row: usize) -> bool {
+    !crate::theme::high_contrast()
+        && (with_app(|a| a.tabs.active()) == Some(row) || LIST_HOT.with(Cell::get).0 == Some(row))
+}
+
+/// The tab list's row at `pt`.
+fn row_at(list: HWND, pt: POINT) -> Option<usize> {
+    let mut hit = LVHITTESTINFO { pt, ..Default::default() };
+    let row = unsafe { SendMessageW(list, LVM_HITTEST, None, Some(LPARAM(&mut hit as *mut _ as isize))) }.0;
+    usize::try_from(row).ok()
+}
+
+/// A bold copy of the window font, for the active tab's row; made once per font.
+fn bold_font() -> Option<windows::Win32::Graphics::Gdi::HFONT> {
+    use windows::Win32::Graphics::Gdi::*;
+    with_app(|a| {
+        if let Some((base, bold)) = a.tab_bold
+            && base == a.font
+        {
+            return Some(bold);
+        }
+        let mut lf = LOGFONTW::default();
+        unsafe {
+            GetObjectW(HGDIOBJ(a.font.0), size_of::<LOGFONTW>() as i32, Some(&mut lf as *mut _ as *mut _));
+        }
+        lf.lfWeight = FW_SEMIBOLD.0 as i32;
+        let bold = unsafe { CreateFontIndirectW(&lf) };
+        if let Some((_, old)) = a.tab_bold.replace((a.font, bold)) {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(old.0));
+            }
+        }
+        Some(bold)
+    })
+    .flatten()
+}
+
+/// Paints one row of the tab list: the active tab tinted with an accent bar and bold name, the
+/// parent dimmed, and a close button on the active and hovered rows.
+unsafe fn draw_row(cd: &NMLVCUSTOMDRAW) {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Graphics::Gdi::*;
+    let (list, hdc, row) = (cd.nmcd.hdr.hwndFrom, cd.nmcd.hdc, cd.nmcd.dwItemSpec);
+    let Some((p, active, font)) = with_app(|a| (a.palette, a.tabs.active(), a.font)) else { return };
+    let Some(label) = labels().get(row).map(|l| l.0.clone()) else { return };
+    let r = row_rect(list, row);
+    let (hot, close_hot) = LIST_HOT.with(Cell::get);
+    let is_active = row == active;
+    let back = if is_active {
+        crate::theme::mix(p.window, p.accent, if p.dark { 30 } else { 16 })
+    } else if hot == Some(row) {
+        crate::theme::mix(p.window, p.text, 7)
+    } else {
+        p.window
+    };
+    let s = |n| super::scale(list, n);
+    unsafe {
+        let brush = CreateSolidBrush(COLORREF(back));
+        FillRect(hdc, &r, brush);
+        let _ = DeleteObject(HGDIOBJ(brush.0));
+        if is_active {
+            let bar = CreateSolidBrush(COLORREF(p.accent));
+            let mark = RECT {
+                left: r.left + s(3),
+                top: r.top + s(4),
+                right: r.left + s(6),
+                bottom: r.bottom - s(4),
+            };
+            FillRect(hdc, &mark, bar);
+            let _ = DeleteObject(HGDIOBJ(bar.0));
+        }
+        let close = row_close_rect(list, &r);
+        let mut area = RECT { left: r.left + s(12), right: close.left - s(4), ..r };
+        let old = SelectObject(hdc, HGDIOBJ(if is_active { bold_font().unwrap_or(font) } else { font }.0));
+        SetBkMode(hdc, TRANSPARENT);
+        let mut text: Vec<u16> = label.encode_utf16().collect();
+        let split = text.windows(3).position(|w| w == [0x20, 0xB7, 0x20]).unwrap_or(text.len());
+        let mut size = windows::Win32::Foundation::SIZE::default();
+        let _ = GetTextExtentPoint32W(hdc, &text[..split], &mut size);
+        let (name, rest) = text.split_at_mut(split);
+        let flags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX;
+        let mut name_area = RECT { right: (area.left + size.cx).min(area.right), ..area };
+        SetTextColor(hdc, COLORREF(p.text));
+        DrawTextW(hdc, name, &mut name_area, flags);
+        SelectObject(hdc, HGDIOBJ(font.0));
+        if !rest.is_empty() && name_area.right < area.right {
+            area.left = name_area.right;
+            SetTextColor(hdc, COLORREF(crate::theme::mix(back, p.text, 55)));
+            DrawTextW(hdc, rest, &mut area, flags);
+        }
+        SelectObject(hdc, old);
+        if row_shows_close(row) {
+            let mut close = close;
+            let pressing = hot == Some(row) && close_hot;
+            if pressing {
+                let ring = crate::theme::mix(back, p.text, 14);
+                super::chrome::round_outline(hdc, &close, ring, ring, s(4));
+            }
+            super::chrome::icon(hdc, list, '\u{E711}', &mut close, p.text, DT_CENTER);
+        }
+        let focused = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() == list;
+        if focused && focused_row(list) == Some(row) {
+            let ring = RECT { left: r.left + 1, top: r.top + 1, right: r.right - 1, bottom: r.bottom - 1 };
+            super::chrome::outline(hdc, &ring, p.text, s(3), 1);
+        }
+    }
+}
+
+/// Mouse handling for the tab list: close buttons, hover, dragging rows to reorder, and
+/// middle-click to close.
 unsafe extern "system" fn list_proc(
     list: HWND,
     msg: u32,
@@ -484,15 +682,75 @@ unsafe extern "system" fn list_proc(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
-    if msg == WM_MBUTTONUP {
-        let pt = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
-        let mut hit = LVHITTESTINFO { pt, ..Default::default() };
-        let row =
-            unsafe { SendMessageW(list, LVM_HITTEST, None, Some(LPARAM(&mut hit as *mut _ as isize))) }.0;
-        if let Ok(row) = usize::try_from(row) {
-            crate::crash::guard(|| close_tab(row));
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        ReleaseCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    };
+    let invalidate = || unsafe {
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(list), None, false);
+    };
+    let pt = point(lp);
+    match msg {
+        WM_MBUTTONUP => {
+            if let Some(row) = row_at(list, pt) {
+                crate::crash::guard(|| close_tab(row));
+                return LRESULT(0);
+            }
+        }
+        WM_LBUTTONDOWN => {
+            if let Some(row) = row_at(list, pt)
+                && row_shows_close(row)
+                && unsafe {
+                    windows::Win32::Graphics::Gdi::PtInRect(&row_close_rect(list, &row_rect(list, row)), pt)
+                }
+                .as_bool()
+            {
+                crate::crash::guard(|| close_tab(row));
+                return LRESULT(0);
+            }
+        }
+        WM_MOUSEMOVE => {
+            if let Some(from) = LIST_DRAG.with(Cell::get) {
+                let count = with_app(|a| a.tabs.len()).unwrap_or(1).max(1);
+                let to = row_at(list, POINT { x: 1, ..pt }).unwrap_or(if pt.y < 0 { 0 } else { count - 1 });
+                if to != from {
+                    LIST_DRAG.with(|d| d.set(Some(to)));
+                    crate::crash::guard(|| move_tab(from, to));
+                }
+                return LRESULT(0);
+            }
+            let row = row_at(list, pt);
+            let on_close = row.is_some_and(|r| {
+                unsafe {
+                    windows::Win32::Graphics::Gdi::PtInRect(&row_close_rect(list, &row_rect(list, r)), pt)
+                }
+                .as_bool()
+            });
+            if LIST_HOT.with(|h| h.replace((row, on_close))) != (row, on_close) {
+                invalidate();
+            }
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: list,
+                dwHoverTime: 0,
+            };
+            unsafe {
+                let _ = TrackMouseEvent(&mut track);
+            }
+        }
+        WM_MOUSELEAVE => {
+            LIST_HOT.with(|h| h.set((None, false)));
+            invalidate();
+        }
+        WM_LBUTTONUP if LIST_DRAG.with(Cell::get).is_some() => {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
             return LRESULT(0);
         }
+        WM_CAPTURECHANGED => LIST_DRAG.with(|d| d.set(None)),
+        WM_SETFOCUS | WM_KILLFOCUS => invalidate(),
+        _ => {}
     }
     unsafe { windows::Win32::UI::Shell::DefSubclassProc(list, msg, wp, lp) }
 }
