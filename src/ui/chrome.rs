@@ -42,6 +42,7 @@ fn glyph(id: usize) -> Option<char> {
         toolbar::SETTINGS => '\u{E713}',
         toolbar::HELP => '\u{E897}',
         super::tabbar::NEW_TAB => '\u{E710}',
+        toolbar::TAB_LIST => '\u{E70D}',
         _ => return None,
     })
 }
@@ -53,7 +54,10 @@ fn opens_menu(id: usize) -> bool {
 
 /// Icon-only buttons: the label is still the window text, for screen readers.
 fn icon_only(id: usize) -> bool {
-    matches!(id, ID_BACK | ID_FORWARD | ID_UP | breadcrumbs::EDIT | super::tabbar::NEW_TAB)
+    matches!(
+        id,
+        ID_BACK | ID_FORWARD | ID_UP | breadcrumbs::EDIT | super::tabbar::NEW_TAB | toolbar::TAB_LIST
+    )
 }
 
 thread_local! {
@@ -184,6 +188,7 @@ pub(super) fn is_top_button(hwnd: HWND) -> bool {
         a.buttons.contains(&hwnd)
             || a.toolbar.contains(&hwnd)
             || a.address_edit_button == hwnd
+            || a.tab_buttons.contains(&hwnd)
             || a.breadcrumbs.iter().any(|p| p.0 == hwnd)
     }) == Some(true)
 }
@@ -212,7 +217,7 @@ pub(super) unsafe fn round_outline(hdc: HDC, r: &RECT, fill: u32, edge: u32, rad
 }
 
 /// A rounded outline of `width` pixels.
-unsafe fn outline(hdc: HDC, r: &RECT, color: u32, radius: i32, width: i32) {
+pub(super) unsafe fn outline(hdc: HDC, r: &RECT, color: u32, radius: i32, width: i32) {
     unsafe {
         let pen = CreatePen(PS_SOLID, width, COLORREF(color));
         let (ob, op) = (SelectObject(hdc, GetStockObject(NULL_BRUSH)), SelectObject(hdc, HGDIOBJ(pen.0)));
@@ -239,7 +244,7 @@ unsafe fn text(hdc: HDC, s: &[u16], r: &mut RECT, color: u32, format: DRAW_TEXT_
     }
 }
 
-unsafe fn icon(hdc: HDC, hwnd: HWND, c: char, r: &mut RECT, color: u32, format: DRAW_TEXT_FORMAT) {
+pub(super) unsafe fn icon(hdc: HDC, hwnd: HWND, c: char, r: &mut RECT, color: u32, format: DRAW_TEXT_FORMAT) {
     let mut buf = [0u16; 2];
     let font = icon_font(hwnd);
     if font.is_invalid() {
@@ -367,6 +372,17 @@ pub(super) fn paint(hwnd: HWND, hdc: HDC) {
         }
         for r in toolbar::separators(hwnd) {
             fill(hdc, &r, stroke);
+        }
+        // The tab strip's base line continues under the "+" and "all tabs" buttons.
+        if let Some(strip) = with_app(|a| (!a.vertical_tabs).then_some(a.tab_strip)).flatten() {
+            let r = super::client_rect_of(hwnd, strip);
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            fill(
+                hdc,
+                &RECT { left: r.right, top: r.bottom - 1, right: client.right, bottom: r.bottom },
+                stroke,
+            );
         }
     }
 }

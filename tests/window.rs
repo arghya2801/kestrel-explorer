@@ -1247,14 +1247,120 @@ fn middle_click_closes_the_tab_under_the_cursor() {
     close(hwnd);
 }
 
+/// Client point `(x, y)` of `hwnd` as a mouse message's LPARAM.
+fn at(x: i32, y: i32) -> LPARAM {
+    LPARAM((((y & 0xFFFF) << 16) | (x & 0xFFFF)) as isize)
+}
+
+/// Tab `i`'s rectangle in the strip, as the strip draws it.
+fn tab_rect(strip: HWND, i: usize) -> windows::Win32::Foundation::RECT {
+    let mut r = windows::Win32::Foundation::RECT::default();
+    let mut client = r;
+    let px = |n: i32| n * unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(strip) } as i32 / 96;
+    unsafe {
+        SendMessageW(strip, TCM_GETITEMRECT, Some(WPARAM(i)), Some(LPARAM(&mut r as *mut _ as isize)));
+        GetClientRect(strip, &mut client).unwrap();
+    }
+    r.top = client.top + px(4);
+    r.bottom = client.bottom;
+    r
+}
+
+#[test]
+fn tabs_close_from_their_button_and_reorder_by_dragging() {
+    let t = TempDir::new("tab-mouse");
+    for name in ["a", "b", "c"] {
+        std::fs::create_dir(t.0.join(name)).unwrap();
+    }
+    let hwnd = open(&t.0.join("a"));
+    for name in ["b", "c"] {
+        ctrl_key(ui::active_list().unwrap(), VK_T, false);
+        navigate_to(hwnd, &t.0.join(name));
+        assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with(name)));
+    }
+    let names =
+        || tab_labels(hwnd).iter().map(|l| l.split(" · ").next().unwrap().to_string()).collect::<Vec<_>>();
+    assert!(pump_until(WAIT, || names() == ["a", "b", "c"]), "{:?}", names());
+    let strip = find(hwnd, w!("SysTabControl32"));
+    let px = |n: i32| n * unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(strip) } as i32 / 96;
+    let middle = |i: usize| {
+        let r = tab_rect(strip, i);
+        (r.left + px(12), (r.top + r.bottom) / 2)
+    };
+    // Drag the first tab past the last.
+    let (x0, y) = middle(0);
+    let (x2, _) = middle(2);
+    unsafe {
+        SendMessageW(
+            strip,
+            WM_LBUTTONDOWN,
+            Some(WPARAM(windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize)),
+            Some(at(x0, y)),
+        );
+        SendMessageW(
+            strip,
+            WM_MOUSEMOVE,
+            Some(WPARAM(windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize)),
+            Some(at(x0 + px(20), y)),
+        );
+        SendMessageW(
+            strip,
+            WM_MOUSEMOVE,
+            Some(WPARAM(windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize)),
+            Some(at(x2, y)),
+        );
+        SendMessageW(strip, WM_LBUTTONUP, None, Some(at(x2, y)));
+    }
+    assert_eq!(names(), ["b", "c", "a"]);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("a")), "the dragged tab is active");
+    // The active tab's close button closes it.
+    let r = tab_rect(strip, 2);
+    let x_button = (r.right - px(8) - px(8), (r.top + r.bottom) / 2);
+    unsafe {
+        SendMessageW(strip, WM_MOUSEMOVE, None, Some(at(x_button.0, x_button.1)));
+        SendMessageW(
+            strip,
+            WM_LBUTTONDOWN,
+            Some(WPARAM(windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize)),
+            Some(at(x_button.0, x_button.1)),
+        );
+        SendMessageW(strip, WM_LBUTTONUP, None, Some(at(x_button.0, x_button.1)));
+    }
+    assert!(pump_until(WAIT, || names() == ["b", "c"]), "{:?}", names());
+    close(hwnd);
+}
+
+#[test]
+fn a_full_strip_keeps_new_tab_and_all_tabs_beside_it() {
+    let t = TempDir::new("tab-overflow");
+    let hwnd = open(&t.0);
+    let strip = find(hwnd, w!("SysTabControl32"));
+    let plus = unsafe { GetDlgItem(Some(hwnd), 240) }.unwrap(); // tabbar::NEW_TAB
+    let all = unsafe { GetDlgItem(Some(hwnd), ui::toolbar::TAB_LIST as i32) }.unwrap();
+    let rect = |h: HWND| {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        unsafe { GetWindowRect(h, &mut r) }.unwrap();
+        r
+    };
+    assert!(rect(plus).right <= rect(strip).right, "with one tab, + follows it");
+    for _ in 0..20 {
+        unsafe { SendMessageW(plus, BM_CLICK, None, None) };
+    }
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 21));
+    let visible = |h: HWND| unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0;
+    assert!(visible(plus) && visible(all));
+    assert!(rect(plus).left >= rect(strip).right, "+ moved right of the full strip");
+    assert!(rect(all).left >= rect(plus).right);
+    close(hwnd);
+}
+
 #[test]
 fn plus_button_and_ctrl_shift_k_open_tabs() {
     let t = TempDir::new("plus");
     std::fs::create_dir(t.0.join("sub")).unwrap();
     let hwnd = open(&t.0);
     assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()) == ["sub"]));
-    let strip = find(hwnd, w!("SysTabControl32"));
-    let plus = unsafe { GetDlgItem(Some(strip), 240) }.unwrap(); // tabbar::NEW_TAB
+    let plus = unsafe { GetDlgItem(Some(hwnd), 240) }.unwrap(); // tabbar::NEW_TAB
     // Shown right of the last tab (the test window itself stays hidden, so check the style).
     assert!(unsafe { GetWindowLongW(plus, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0);
     unsafe { SendMessageW(plus, BM_CLICK, None, None) };

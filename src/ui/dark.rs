@@ -64,6 +64,7 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
                 .into_iter()
                 .chain(a.toolbar.iter().copied())
                 .chain(std::iter::once(a.address_edit_button))
+                .chain(a.tab_buttons)
                 .chain(a.breadcrumbs.iter().map(|p| p.0))
                 .collect::<Vec<_>>(),
         )
@@ -279,12 +280,14 @@ unsafe fn paint(hwnd: HWND, p: Palette) {
             let count = SendMessageW(hwnd, TCM_GETITEMCOUNT, None, None).0.max(0) as usize;
             let selected = SendMessageW(hwnd, TCM_GETCURSEL, None, None).0;
             let radius = super::scale(hwnd, 6);
+            // The window's tab strip has close buttons and hover; the Settings pages don't.
+            let main = with_app(|a| a.tab_strip == hwnd).unwrap_or(false);
+            let (hot, close_hot) = if main { super::tabbar::hot() } else { (None, false) };
+            let focused = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() == hwnd;
             for i in 0..count {
-                let mut r = RECT::default();
-                SendMessageW(hwnd, TCM_GETITEMRECT, Some(WPARAM(i)), Some(LPARAM(&mut r as *mut _ as isize)));
-                r.top = client.top + super::scale(hwnd, 4);
-                r.bottom = client.bottom;
+                let mut r = super::tabbar::tab_rect(hwnd, i);
                 let selected = i as isize == selected;
+                let back = if selected { p.window } else { p.chrome };
                 if selected {
                     let tab = RECT { bottom: r.bottom + radius, ..r };
                     super::chrome::round_outline(hdc, &tab, p.window, super::chrome::stroke(&p), radius);
@@ -293,11 +296,12 @@ unsafe fn paint(hwnd: HWND, p: Palette) {
                     let fill = CreateSolidBrush(COLORREF(p.window));
                     FillRect(hdc, &gap, fill);
                     let _ = DeleteObject(HGDIOBJ(fill.0));
+                } else if hot == Some(i) {
+                    let hover = crate::theme::mix(p.chrome, p.text, 7);
+                    let tab = RECT { bottom: r.bottom - super::scale(hwnd, 3), ..r };
+                    super::chrome::round_outline(hdc, &tab, hover, hover, radius);
                 }
-                SetTextColor(
-                    hdc,
-                    COLORREF(if selected { p.text } else { crate::theme::mix(p.chrome, p.text, 70) }),
-                );
+                let ink = if selected { p.text } else { crate::theme::mix(p.chrome, p.text, 70) };
                 let mut buf = [0u16; 260];
                 let mut item = TCITEMW {
                     mask: TCIF_TEXT,
@@ -307,14 +311,54 @@ unsafe fn paint(hwnd: HWND, p: Palette) {
                 };
                 SendMessageW(hwnd, TCM_GETITEMW, Some(WPARAM(i)), Some(LPARAM(&mut item as *mut _ as isize)));
                 let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
-                r.left += super::scale(hwnd, 6);
-                r.right -= super::scale(hwnd, 6);
-                DrawTextW(
-                    hdc,
-                    &mut buf[..len],
-                    &mut r,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
-                );
+                let flags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX;
+                if !main {
+                    r.left += super::scale(hwnd, 6);
+                    r.right -= super::scale(hwnd, 6);
+                    SetTextColor(hdc, COLORREF(ink));
+                    let centered = (flags & !DT_LEFT) | DT_CENTER;
+                    DrawTextW(hdc, &mut buf[..len], &mut r, centered);
+                    continue;
+                }
+                // "folder · parent": the folder in full color, the parent dimmed, and the
+                // ellipsis takes the parent first.
+                let text = &mut buf[..len];
+                let split = text.windows(3).position(|w| w == [0x20, 0xB7, 0x20]).unwrap_or(len);
+                let mut area = super::tabbar::text_rect(hwnd, &r);
+                let mut size = windows::Win32::Foundation::SIZE::default();
+                let _ = GetTextExtentPoint32W(hdc, &text[..split], &mut size);
+                let (name, rest) = text.split_at_mut(split);
+                let mut name_area = RECT { right: (area.left + size.cx).min(area.right), ..area };
+                SetTextColor(hdc, COLORREF(ink));
+                DrawTextW(hdc, name, &mut name_area, flags);
+                if !rest.is_empty() && name_area.right < area.right {
+                    area.left = name_area.right;
+                    SetTextColor(
+                        hdc,
+                        COLORREF(crate::theme::mix(back, p.text, if selected { 55 } else { 45 })),
+                    );
+                    DrawTextW(hdc, rest, &mut area, flags);
+                }
+                if super::tabbar::shows_close(hwnd, i) {
+                    let mut close = super::tabbar::close_rect(hwnd, &r);
+                    let pressing = hot == Some(i) && close_hot;
+                    if pressing {
+                        let ring = crate::theme::mix(back, p.text, 14);
+                        super::chrome::round_outline(hdc, &close, ring, ring, super::scale(hwnd, 4));
+                    }
+                    let color = if pressing { p.text } else { ink };
+                    super::chrome::icon(hdc, hwnd, '\u{E711}', &mut close, color, DT_CENTER);
+                }
+                if selected && focused {
+                    let inset = super::scale(hwnd, 2);
+                    let ring = RECT {
+                        left: r.left + inset,
+                        top: r.top + inset,
+                        right: r.right - inset,
+                        bottom: r.bottom - inset,
+                    };
+                    super::chrome::outline(hdc, &ring, p.text, radius - inset, 1);
+                }
             }
         } else {
             // Status bar: one text part.

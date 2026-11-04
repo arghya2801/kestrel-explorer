@@ -1,12 +1,13 @@
 //! A tab owns its folder views; switching tabs preserves both panes. Tabs show along the
 //! top in a tab strip, or listed above the sidebar ("vertical tabs").
+use super::toolbar::TAB_LIST;
 use super::{
     child,
     panes::{self, Workspace},
     with_app,
 };
 use crate::settings::Settings;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::ScreenToClient;
@@ -24,6 +25,11 @@ const SELECT_TAB: usize = 0x1000;
 thread_local! {
     /// Text handed to a tooltip; it reads it after the notification returns.
     static TIP: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
+    /// The tab under the mouse, and whether the mouse is on its close button.
+    static HOT: Cell<(Option<usize>, bool)> = const { Cell::new((None, false)) };
+    /// A tab being dragged: its index, where the press started, and whether it has moved enough
+    /// to count as a drag.
+    static DRAG: Cell<Option<(usize, POINT, bool)>> = const { Cell::new(None) };
 }
 
 pub(super) struct TabSlot {
@@ -35,21 +41,85 @@ impl TabSlot {
     }
 }
 
-pub(super) unsafe fn create(parent: HWND) -> Result<HWND> {
+/// The tab strip, and its "+" (new tab) and "all tabs" buttons. The buttons are the window's
+/// own children so they stay put when the strip scrolls: "+" follows the last tab until the
+/// strip fills, then waits beside "all tabs" right of the strip.
+pub(super) unsafe fn create(parent: HWND) -> Result<(HWND, [HWND; 2])> {
     let strip = unsafe {
-        let style = WINDOW_STYLE(TCS_FOCUSNEVER | TCS_TOOLTIPS) | WS_CLIPCHILDREN;
+        // Clips the "+" button, which sits over the strip's empty end.
+        let style = WINDOW_STYLE(TCS_FOCUSNEVER | TCS_TOOLTIPS) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
         child(parent, WC_TABCONTROLW, w!(""), style, WINDOW_EX_STYLE(0), 0)?
     };
-    // Roomier tabs than the control's default.
-    let (x, y) = (super::scale(parent, 16), super::scale(parent, 4));
-    unsafe {
+    // Roomier tabs than the control's default, with space at the right for the close button.
+    let (x, y) = (super::scale(parent, PAD_X), super::scale(parent, 4));
+    let buttons = unsafe {
         SendMessageW(strip, TCM_SETPADDING, None, Some(LPARAM(((y << 16) | x) as isize)));
         SendMessageW(strip, TCM_SETMINTABWIDTH, None, Some(LPARAM(super::scale(parent, 96) as isize)));
-        child(strip, w!("BUTTON"), w!("New tab"), WINDOW_STYLE(0), WINDOW_EX_STYLE(0), NEW_TAB)?;
         let _ = windows::Win32::UI::Shell::SetWindowSubclass(strip, Some(strip_proc), 3, 0);
-    }
+        let plus = child(parent, w!("BUTTON"), w!("New tab"), WINDOW_STYLE(0), WINDOW_EX_STYLE(0), NEW_TAB)?;
+        let all = child(parent, w!("BUTTON"), w!("All tabs"), WINDOW_STYLE(0), WINDOW_EX_STYLE(0), TAB_LIST)?;
+        for b in [plus, all] {
+            let _ = SetWindowPos(b, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        [plus, all]
+    };
     insert_label(strip, 0, "");
-    Ok(strip)
+    Ok((strip, buttons))
+}
+
+/// Horizontal padding each side of a tab's text: the left inset plus room for the close button.
+const PAD_X: i32 = 24;
+/// The close button's size, and its gap from the tab's right edge.
+const CLOSE: i32 = 16;
+const CLOSE_GAP: i32 = 8;
+
+/// Tab `i`'s rectangle as drawn: from just below the strip's top to its bottom.
+pub(super) fn tab_rect(strip: HWND, i: usize) -> RECT {
+    let mut r = RECT::default();
+    unsafe {
+        SendMessageW(strip, TCM_GETITEMRECT, Some(WPARAM(i)), Some(LPARAM(&mut r as *mut _ as isize)));
+        let mut client = RECT::default();
+        let _ = GetClientRect(strip, &mut client);
+        r.top = client.top + super::scale(strip, 4);
+        r.bottom = client.bottom;
+    }
+    r
+}
+
+/// The close button inside tab rectangle `r`.
+pub(super) fn close_rect(strip: HWND, r: &RECT) -> RECT {
+    let (size, gap) = (super::scale(strip, CLOSE), super::scale(strip, CLOSE_GAP));
+    let mid = (r.top + r.bottom) / 2;
+    RECT {
+        left: r.right - gap - size,
+        top: mid - size / 2,
+        right: r.right - gap,
+        bottom: mid - size / 2 + size,
+    }
+}
+
+/// Where a tab's text goes inside `r`: after the left inset, before the close button.
+pub(super) fn text_rect(strip: HWND, r: &RECT) -> RECT {
+    let close = close_rect(strip, r);
+    RECT { left: r.left + super::scale(strip, 12), right: close.left - super::scale(strip, 4), ..*r }
+}
+
+/// The tab under the mouse, and whether the mouse is on its close button.
+pub(super) fn hot() -> (Option<usize>, bool) {
+    HOT.with(Cell::get)
+}
+
+/// Whether tab `i` shows its close button: the active tab, the tab under the mouse, and not in
+/// high contrast, where Windows draws the strip.
+pub(super) fn shows_close(strip: HWND, i: usize) -> bool {
+    let active = unsafe { SendMessageW(strip, TCM_GETCURSEL, None, None) }.0;
+    !crate::theme::high_contrast() && (i as isize == active || hot().0 == Some(i))
+}
+
+/// Space right of the strip for the "+" and "all tabs" buttons once the strip fills.
+pub(super) fn reserve(hwnd: HWND) -> i32 {
+    let size = super::scale(hwnd, 24);
+    2 * size + 3 * super::scale(hwnd, 4)
 }
 
 /// The vertical tab list: one row per tab, then "New tab". Hidden until vertical tabs are on.
@@ -100,27 +170,72 @@ pub(super) fn set_vertical(on: bool) {
         super::save_preferences(s);
     }
 }
-/// Keeps the "+" button just right of the last tab; hidden once the tabs fill the strip.
-fn place_new_tab_button(strip: HWND) {
+/// Puts "+" just right of the last tab, or right of the strip once the tabs fill it (when the
+/// strip's scroll arrows appear), and "all tabs" at the far right. With the tabs above the
+/// sidebar, both leave the top row.
+pub(super) fn place_buttons() {
+    let Some((hwnd, strip, [plus, all], vertical)) =
+        with_app(|a| (a.hwnd, a.tab_strip, a.tab_buttons, a.vertical_tabs))
+    else {
+        return;
+    };
     unsafe {
-        let Ok(button) = GetDlgItem(Some(strip), NEW_TAB as i32) else { return };
-        let count = SendMessageW(strip, TCM_GETITEMCOUNT, None, None).0;
+        if vertical {
+            let _ = ShowWindow(all, SW_HIDE);
+            let _ = ShowWindow(plus, SW_HIDE);
+            return;
+        }
+        let bounds = super::client_rect_of(hwnd, strip);
+        let (gap, size) = (super::scale(hwnd, 4), super::scale(hwnd, 24));
+        let top = bounds.top + super::scale(hwnd, 4);
+        let count = SendMessageW(strip, TCM_GETITEMCOUNT, None, None).0.max(1) as usize;
+        let last = tab_rect(strip, count - 1);
+        let arrows = FindWindowExW(Some(strip), None, w!("msctls_updown32"), None)
+            .ok()
+            .filter(|&u| IsWindowVisible(u).as_bool())
+            .map(|u| super::client_rect_of(strip, u).left);
+        let limit = bounds.left + arrows.unwrap_or(bounds.right - bounds.left);
+        let mut x = bounds.left + last.right + gap;
+        if arrows.is_some() || x + size > limit {
+            x = bounds.right + gap;
+        }
+        let _ = MoveWindow(plus, x, top, size, size, true);
+        let _ = MoveWindow(all, bounds.right + 2 * gap + size, top, size, size, true);
+        for b in [plus, all] {
+            let _ = ShowWindow(b, SW_SHOWNA);
+        }
+    }
+}
+
+/// The menu under "all tabs": every tab, the active one checked, and Reopen closed tab.
+fn all_tabs_menu() {
+    let Some((hwnd, all, active, can_reopen)) =
+        with_app(|a| (a.hwnd, a.tab_buttons[1], a.tabs.active(), !a.closed_tabs.is_empty()))
+    else {
+        return;
+    };
+    let labels = labels();
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        for (i, (label, tip)) in labels.iter().enumerate() {
+            let check = if i == active { MF_CHECKED } else { MF_UNCHECKED };
+            let text = HSTRING::from(format!("{}\t{}", label.replace('&', "&&"), tip.replace('&', "&&")));
+            let _ = AppendMenuW(menu, MF_STRING | check, i + 1, &text);
+        }
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let reopen_flag = if can_reopen { MF_ENABLED } else { MF_GRAYED };
+        let reopen_id = labels.len() + 1;
+        let _ = AppendMenuW(menu, MF_STRING | reopen_flag, reopen_id, w!("&Reopen closed tab\tCtrl+Shift+T"));
         let mut r = RECT::default();
-        SendMessageW(
-            strip,
-            TCM_GETITEMRECT,
-            Some(WPARAM(count.max(1) as usize - 1)),
-            Some(LPARAM(&mut r as *mut _ as isize)),
-        );
-        let mut client = RECT::default();
-        let _ = GetClientRect(strip, &mut client);
-        let top = super::scale(strip, 4);
-        let size = (client.bottom - top - super::scale(strip, 2)).max(0);
-        let x = r.right + super::scale(strip, 4);
-        // ponytail: with more tabs than fit, the strip's scroll arrows take this spot; Ctrl+T still works.
-        let fits = x + size <= client.right;
-        let _ = ShowWindow(button, if fits { SW_SHOWNA } else { SW_HIDE });
-        let _ = MoveWindow(button, x, top, size, size, true);
+        let _ = GetWindowRect(all, &mut r);
+        let flags = TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_RIGHTALIGN;
+        let cmd = TrackPopupMenu(menu, flags, r.right, r.bottom, None, hwnd, None).0 as usize;
+        let _ = DestroyMenu(menu);
+        match cmd {
+            0 => {}
+            c if c == reopen_id => reopen(),
+            c => switch_to(c - 1),
+        }
     }
 }
 fn insert_label(strip: HWND, index: usize, text: &str) {
@@ -267,6 +382,7 @@ pub(super) fn execute(id: usize) -> bool {
     let (active, len) = with_app(|a| (a.tabs.active(), a.tabs.len())).unwrap_or_default();
     match id {
         NEW_TAB => new_tab(None),
+        TAB_LIST => all_tabs_menu(),
         REOPEN_TAB => reopen(),
         CLOSE_OTHER_TABS => close_others(active),
         CLOSE_TABS_AFTER => close_after(active),
@@ -759,8 +875,25 @@ pub(super) fn switch_to(to: usize) {
     }
 }
 
-/// Middle-clicking a tab closes it, as in browsers. Also runs the "+" button, a child
-/// of the strip, and moves it whenever the tabs change.
+fn point(lp: LPARAM) -> POINT {
+    POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 }
+}
+
+/// The tab at `pt` (strip coordinates).
+fn tab_at(strip: HWND, pt: POINT) -> Option<usize> {
+    let mut hit = TCHITTESTINFO { pt, ..Default::default() };
+    let tab = unsafe { SendMessageW(strip, TCM_HITTEST, None, Some(LPARAM(&mut hit as *mut _ as isize))) }.0;
+    usize::try_from(tab).ok()
+}
+
+/// Whether `pt` is on tab `tab`'s close button, while it shows one.
+fn on_close(strip: HWND, tab: usize, pt: POINT) -> bool {
+    let r = close_rect(strip, &tab_rect(strip, tab));
+    shows_close(strip, tab) && unsafe { windows::Win32::Graphics::Gdi::PtInRect(&r, pt) }.as_bool()
+}
+
+/// Mouse handling for the strip: the close buttons, hover, dragging tabs to reorder them,
+/// middle-click to close and the wheel to scroll, as in browsers.
 unsafe extern "system" fn strip_proc(
     strip: HWND,
     msg: u32,
@@ -769,39 +902,100 @@ unsafe extern "system" fn strip_proc(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    };
+    let invalidate = || unsafe {
+        let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(strip), None, false);
+    };
     match msg {
         WM_MBUTTONUP => {
-            let pt = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
-            let mut hit = TCHITTESTINFO { pt, ..Default::default() };
-            let tab =
-                unsafe { SendMessageW(strip, TCM_HITTEST, None, Some(LPARAM(&mut hit as *mut _ as isize))) }
-                    .0;
-            if let Ok(tab) = usize::try_from(tab) {
+            if let Some(tab) = tab_at(strip, point(lp)) {
                 crate::crash::guard(|| close_tab(tab));
                 return LRESULT(0);
             }
         }
-        WM_COMMAND if wp.0 & 0xFFFF == NEW_TAB => {
-            crate::crash::guard(|| new_tab(None));
-            return LRESULT(0);
-        }
-        WM_NOTIFY => {
-            let hdr = unsafe { &*(lp.0 as *const NMHDR) };
-            if hdr.code == NM_CUSTOMDRAW
-                && hdr.idFrom == NEW_TAB
-                && let Some(r) = crate::crash::guard(|| unsafe {
-                    super::chrome::draw_button(&*(lp.0 as *const NMCUSTOMDRAW))
-                })
-                .flatten()
-            {
-                return r;
+        WM_LBUTTONDOWN => {
+            let pt = point(lp);
+            if let Some(tab) = tab_at(strip, pt) {
+                if on_close(strip, tab, pt) {
+                    crate::crash::guard(|| close_tab(tab));
+                    return LRESULT(0);
+                }
+                DRAG.with(|d| d.set(Some((tab, pt, false))));
             }
+        }
+        WM_MOUSEMOVE => {
+            let pt = point(lp);
+            let tab = tab_at(strip, pt);
+            let hot = (tab, tab.is_some_and(|t| on_close(strip, t, pt)));
+            if HOT.with(|h| h.replace(hot)) != hot {
+                invalidate();
+            }
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: strip,
+                dwHoverTime: 0,
+            };
+            unsafe {
+                let _ = TrackMouseEvent(&mut track);
+            }
+            if let Some((from, start, dragging)) = DRAG.with(Cell::get)
+                && wp.0 & windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize != 0
+            {
+                let far = unsafe { GetSystemMetrics(SM_CXDRAG) };
+                if !dragging && (pt.x - start.x).abs() < far {
+                    return LRESULT(0);
+                }
+                if !dragging {
+                    unsafe {
+                        SetCapture(strip);
+                    }
+                }
+                let count = unsafe { SendMessageW(strip, TCM_GETITEMCOUNT, None, None) }.0.max(1) as usize;
+                // Past either end of the strip counts as the first or last tab.
+                let to = tab_at(strip, POINT { y: tab_rect(strip, 0).top + 1, ..pt })
+                    .unwrap_or(if pt.x < tab_rect(strip, 0).left { 0 } else { count - 1 });
+                DRAG.with(|d| d.set(Some((to, start, true))));
+                if to != from {
+                    crate::crash::guard(|| move_tab(from, to));
+                }
+                return LRESULT(0);
+            }
+        }
+        WM_MOUSELEAVE => {
+            HOT.with(|h| h.set((None, false)));
+            invalidate();
+        }
+        WM_LBUTTONUP => {
+            if DRAG.with(|d| d.take()).is_some_and(|(_, _, dragging)| dragging) {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                return LRESULT(0);
+            }
+        }
+        WM_CAPTURECHANGED => DRAG.with(|d| d.set(None)),
+        WM_SETFOCUS | WM_KILLFOCUS => invalidate(),
+        // The wheel scrolls a strip too full to show every tab.
+        WM_MOUSEWHEEL => {
+            let count = unsafe { SendMessageW(strip, TCM_GETITEMCOUNT, None, None) }.0.max(0) as usize;
+            let first = (0..count).find(|&i| tab_rect(strip, i).left >= 0).unwrap_or(0);
+            let back = (wp.0 >> 16) as i16 > 0;
+            let to = if back { first.saturating_sub(1) } else { (first + 1).min(count.saturating_sub(1)) };
+            unsafe {
+                SendMessageW(strip, WM_HSCROLL, Some(WPARAM((to << 16) | SB_THUMBPOSITION.0 as usize)), None);
+            }
+            invalidate();
+            place_buttons();
+            return LRESULT(0);
         }
         _ => {}
     }
     let result = unsafe { windows::Win32::UI::Shell::DefSubclassProc(strip, msg, wp, lp) };
-    if matches!(msg, TCM_INSERTITEMW | TCM_DELETEITEM | TCM_SETITEMW | WM_SIZE | WM_SETFONT) {
-        place_new_tab_button(strip);
+    if matches!(msg, TCM_INSERTITEMW | TCM_DELETEITEM | TCM_SETITEMW | WM_SIZE | WM_SETFONT | WM_HSCROLL) {
+        place_buttons();
     }
     result
 }

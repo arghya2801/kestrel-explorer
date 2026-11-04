@@ -253,6 +253,8 @@ struct App {
     events: Arc<Events<Event>>,
     tabs: Tabs<tabbar::TabSlot>,
     tab_strip: HWND,
+    /// The strip's "+" and "all tabs" buttons.
+    tab_buttons: [HWND; 2],
     /// The tabs listed above the sidebar, shown instead of the strip with `vertical_tabs`.
     tab_list: HWND,
     vertical_tabs: bool,
@@ -311,6 +313,8 @@ impl App {
             self.tree,
             self.tab_strip,
             self.tab_list,
+            self.tab_buttons[0],
+            self.tab_buttons[1],
             b0,
             b1,
             b2,
@@ -500,7 +504,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let list = view.list;
         let status = child(hwnd, STATUSCLASSNAMEW, w!(""), WINDOW_STYLE(SBARS_SIZEGRIP), none, 0)?;
         let tree = tree::create(hwnd)?;
-        let tab_strip = tabbar::create(hwnd)?;
+        let (tab_strip, tab_buttons) = tabbar::create(hwnd)?;
         let tab_list = tabbar::create_list(hwnd)?;
         startup_mark("sidebar controls");
         let preview_pane = preview::create(hwnd)?;
@@ -509,7 +513,20 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         startup_mark("toolbar controls");
 
         set_font(
-            &[list, status, address, filter, tree, tab_strip, tab_list, buttons[0], buttons[1], buttons[2]],
+            &[
+                list,
+                status,
+                address,
+                filter,
+                tree,
+                tab_strip,
+                tab_list,
+                tab_buttons[0],
+                tab_buttons[1],
+                buttons[0],
+                buttons[1],
+                buttons[2],
+            ],
             font,
         );
         set_font(&preview::controls(&preview_pane), font);
@@ -549,6 +566,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 events,
                 tabs: Tabs::new(tabbar::TabSlot::active(0)),
                 tab_strip,
+                tab_buttons,
                 tab_list,
                 vertical_tabs: false,
                 closed_tabs: Vec::new(),
@@ -899,6 +917,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         .iter()
                         .chain(a.toolbar.iter())
                         .chain(std::iter::once(&a.address_edit_button))
+                        .chain(a.tab_buttons.iter())
                         .any(|b| b.0 as isize == from)
                         || a.breadcrumbs.iter().any(|p| p.0.0 as isize == from)
                 }) == Some(true);
@@ -2359,7 +2378,9 @@ fn layout(hwnd: HWND) {
             true,
         );
         toolbar::layout(hwnd, client.right);
-        let _ = MoveWindow(strip, 0, scale(hwnd, toolbar::BOTTOM), client.right, tab_height(hwnd), true);
+        let strip_width = (client.right - tabbar::reserve(hwnd)).max(0);
+        let _ = MoveWindow(strip, 0, scale(hwnd, toolbar::BOTTOM), strip_width, tab_height(hwnd), true);
+        tabbar::place_buttons();
         let top = content_top(hwnd);
         let h = (client.bottom - (sr.bottom - sr.top) - top).max(0);
         let split = tree::clamp_split(split, client.right, GetDpiForWindow(hwnd));
