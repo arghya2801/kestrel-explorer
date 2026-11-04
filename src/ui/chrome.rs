@@ -38,6 +38,7 @@ fn glyph(id: usize) -> Option<char> {
         toolbar::REFRESH => '\u{E72C}',
         toolbar::SPLIT => '\u{E89A}',
         toolbar::VIEW => '\u{E8A9}',
+        toolbar::SORT_MENU => '\u{E8CB}',
         toolbar::MORE => '\u{E712}',
         toolbar::SETTINGS => '\u{E713}',
         toolbar::HELP => '\u{E897}',
@@ -49,7 +50,7 @@ fn glyph(id: usize) -> Option<char> {
 
 /// Buttons that open a menu get a small arrow after the label.
 fn opens_menu(id: usize) -> bool {
-    matches!(id, toolbar::VIEW | toolbar::MORE)
+    matches!(id, toolbar::VIEW | toolbar::MORE | toolbar::SORT_MENU)
 }
 
 /// Icon-only buttons: the label is still the window text, for screen readers.

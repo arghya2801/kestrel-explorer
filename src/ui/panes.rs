@@ -128,6 +128,7 @@ pub(super) unsafe fn create(
             }
         };
         super::set_font(&[list, label], font);
+        super::dark::style_new_list(list);
         super::startup_mark("list columns");
         // The first window's lists get their names in late_init, after first paint.
         if with_app(|_| ()).is_some() {
@@ -242,12 +243,10 @@ pub(super) fn toggle() {
         with_app(|a| a.other = Some(other));
     }
     with_app(|a| a.split_view = !a.split_view);
-    let (palette, hidden) =
-        with_app(|a| (a.palette, (!a.split_view).then(|| a.other.as_ref().map(|v| v.id)).flatten())).unwrap();
+    let hidden = with_app(|a| (!a.split_view).then(|| a.other.as_ref().map(|v| v.id)).flatten()).flatten();
     if let Some(id) = hidden {
         super::stop_watching_view(id);
     }
-    super::dark::apply(hwnd, palette);
     super::layout(hwnd);
     fit_split_columns();
     if let Some(job) = job {

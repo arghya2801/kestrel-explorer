@@ -54,6 +54,7 @@ mod dialogs;
 mod drag;
 mod grid;
 mod groups;
+mod palette;
 mod panes;
 mod preview;
 mod rename;
@@ -96,6 +97,15 @@ const COMMAND_NAMES: &[(&str, usize)] = &[
     ("close-tabs-to-the-right", toolbar::CLOSE_TABS_AFTER),
     ("move-tab-left", toolbar::MOVE_TAB_BACK),
     ("move-tab-right", toolbar::MOVE_TAB_FORWARD),
+    ("new-tab", tabbar::NEW_TAB),
+    ("close-tab", toolbar::CLOSE_TAB),
+    ("duplicate-tab", toolbar::DUPLICATE_TAB),
+    ("next-tab", toolbar::NEXT_TAB),
+    ("previous-tab", toolbar::PREV_TAB),
+    ("new-window", toolbar::NEW_WINDOW),
+    ("filter", toolbar::FOCUS_FILTER),
+    ("other-pane", toolbar::FOCUS_OTHER_PANE),
+    ("command-palette", toolbar::PALETTE),
     ("refresh", toolbar::REFRESH),
     ("hidden-items", toolbar::HIDDEN),
     ("preview", toolbar::PREVIEW),
@@ -258,6 +268,8 @@ struct App {
     events: Arc<Events<Event>>,
     tabs: Tabs<tabbar::TabSlot>,
     tab_strip: HWND,
+    /// Tooltips for the top bar's buttons, naming each command's shortcut.
+    tips: HWND,
     /// The strip's "+" and "all tabs" buttons.
     tab_buttons: [HWND; 2],
     /// The tabs listed above the sidebar, shown instead of the strip with `vertical_tabs`.
@@ -550,6 +562,11 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
             child(hwnd, w!("BUTTON"), w!("…"), WS_TABSTOP, WINDOW_EX_STYLE(0), breadcrumbs::MORE)?;
         let _ = ShowWindow(crumb_more, SW_HIDE);
         set_font(&[crumb_more], font);
+        let mut tipped = buttons.to_vec();
+        tipped.extend(&toolbar_buttons);
+        tipped.extend(tab_buttons);
+        tipped.push(address_edit_button);
+        let tips = palette::add_tooltips(hwnd, &tipped);
         APP.with(|cell| {
             *cell.borrow_mut() = Some(App {
                 hwnd,
@@ -583,6 +600,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 events,
                 tabs: Tabs::new(tabbar::TabSlot::active(0)),
                 tab_strip,
+                tips,
                 tab_buttons,
                 tab_list,
                 vertical_tabs: false,
@@ -829,6 +847,7 @@ fn on_key(msg: &MSG) -> bool {
             }
         }
         VK_ESCAPE => cancel_loading(),
+        VK_P if ctrl && shift => palette::open(with_app(|a| a.hwnd).unwrap_or_default()),
         VK_T if ctrl && shift => tabbar::reopen(),
         VK_T if ctrl => tabbar::new_tab(None),
         k if ctrl && !shift && (VK_1.0..=VK_9.0).contains(&k.0) => {
@@ -946,9 +965,9 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     return DefWindowProcW(hwnd, msg, wp, lp);
                 }
                 match id {
-                    ID_BACK if from_button => run(Browser::back),
-                    ID_FORWARD if from_button => run(Browser::forward),
-                    ID_UP if from_button => run(Browser::up),
+                    ID_BACK if from_button || from == 0 => run(Browser::back),
+                    ID_FORWARD if from_button || from == 0 => run(Browser::forward),
+                    ID_UP if from_button || from == 0 => run(Browser::up),
                     id if (from == 0 || from_button)
                         && (breadcrumbs::execute(id)
                             || toolbar::execute(id)
@@ -956,8 +975,16 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                             || tabbar::execute(id)) => {}
                     _ => return DefWindowProcW(hwnd, msg, wp, lp),
                 }
-                if !matches!(id, toolbar::SETTINGS | toolbar::SHORTCUTS | toolbar::HELP | breadcrumbs::EDIT)
-                    && let Some(list) = with_app(|a| a.view.list)
+                if !matches!(
+                    id,
+                    toolbar::SETTINGS
+                        | toolbar::SHORTCUTS
+                        | toolbar::HELP
+                        | toolbar::PALETTE
+                        | toolbar::FOCUS_FILTER
+                        | toolbar::FOCUS_OTHER_PANE
+                        | breadcrumbs::EDIT
+                ) && let Some(list) = with_app(|a| a.view.list)
                 {
                     let _ = SetFocus(Some(list));
                 }
@@ -1167,7 +1194,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
         return unsafe { chrome::draw_button(&*(lp.0 as *const NMCUSTOMDRAW)) };
     }
     if hdr.code == TTN_GETDISPINFOW
-        && let Some(done) = tabbar::tooltip(hdr, lp)
+        && let Some(done) = tabbar::tooltip(hdr, lp).or_else(|| palette::tooltip(hdr, lp))
     {
         return Some(done);
     }

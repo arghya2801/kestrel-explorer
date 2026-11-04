@@ -84,11 +84,12 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &flag as *const _ as *const _, 4);
 
         for &list in &lists {
-            let _ = SetWindowTheme(list, style(w!("Explorer"), w!("DarkMode_Explorer")), None);
-            let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as _);
-            let _ = SetWindowTheme(header, style(PCWSTR::null(), w!("DarkMode_ItemsView")), None);
+            style_list(list, palette);
         }
         let _ = SetWindowTheme(tree, style(w!("Explorer"), w!("DarkMode_Explorer")), None);
+        if let Some(tips) = with_app(|a| a.tips) {
+            let _ = SetWindowTheme(tips, style(PCWSTR::null(), w!("DarkMode_Explorer")), None);
+        }
         for edit in [address, filter] {
             let _ = SetWindowTheme(edit, style(PCWSTR::null(), w!("DarkMode_CFD")), None);
         }
@@ -97,11 +98,6 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
         }
 
         let (bg, fg) = (LPARAM(palette.window as isize), LPARAM(palette.text as isize));
-        for &list in &lists {
-            SendMessageW(list, LVM_SETBKCOLOR, None, Some(bg));
-            SendMessageW(list, LVM_SETTEXTBKCOLOR, None, Some(bg));
-            SendMessageW(list, LVM_SETTEXTCOLOR, None, Some(fg));
-        }
         // -1: the tree's own default colors.
         let (tbg, tfg) = if dark { (bg, fg) } else { (LPARAM(-1), LPARAM(-1)) };
         SendMessageW(tree, TVM_SETBKCOLOR, None, Some(tbg));
@@ -110,12 +106,32 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
         for c in [strip, status] {
             let _ = SetWindowSubclass(c, Some(paint_dark), 1, 0);
         }
-        // Column header text: the header tells the list (not us) when it draws.
-        for &list in &lists {
-            let _ = SetWindowSubclass(list, Some(header_text), 2, 0);
-        }
         let _ =
             RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+    }
+}
+
+/// A list's theme, colors and header drawing for `palette`.
+fn style_list(list: HWND, palette: Palette) {
+    let dark = palette.dark;
+    unsafe {
+        let _ = SetWindowTheme(list, if dark { w!("DarkMode_Explorer") } else { w!("Explorer") }, None);
+        let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as _);
+        let _ = SetWindowTheme(header, if dark { w!("DarkMode_ItemsView") } else { PCWSTR::null() }, None);
+        let (bg, fg) = (LPARAM(palette.window as isize), LPARAM(palette.text as isize));
+        SendMessageW(list, LVM_SETBKCOLOR, None, Some(bg));
+        SendMessageW(list, LVM_SETTEXTBKCOLOR, None, Some(bg));
+        SendMessageW(list, LVM_SETTEXTCOLOR, None, Some(fg));
+        // Column header text: the header tells the list (not us) when it draws.
+        let _ = SetWindowSubclass(list, Some(header_text), 2, 0);
+    }
+}
+
+/// Gives a list made after the window was themed (a new tab's or the second pane's) the
+/// current look, without repainting the rest of the window.
+pub(super) fn style_new_list(list: HWND) {
+    if let Some(palette) = with_app(|a| a.palette) {
+        style_list(list, palette);
     }
 }
 

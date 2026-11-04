@@ -51,6 +51,22 @@ pub const CLOSE_OTHER_TABS: usize = 243;
 pub const CLOSE_TABS_AFTER: usize = 244;
 pub const MOVE_TAB_BACK: usize = 245;
 pub const MOVE_TAB_FORWARD: usize = 246;
+pub const CLOSE_TAB: usize = 247;
+pub const DUPLICATE_TAB: usize = 248;
+pub const NEXT_TAB: usize = 249;
+pub const PREV_TAB: usize = 250;
+/// Window and focus commands, so the palette and keys.txt can run them.
+pub const NEW_WINDOW: usize = 251;
+pub const FOCUS_FILTER: usize = 252;
+pub const FOCUS_OTHER_PANE: usize = 253;
+pub const PALETTE: usize = 254;
+/// The Sort button, and sort and group choices that set rather than toggle.
+pub const SORT_MENU: usize = 255;
+pub const SORT_CREATED: usize = 256;
+pub const SORT_UP: usize = 257;
+pub const SORT_DOWN: usize = 258;
+pub const GROUP_NONE: usize = 259;
+pub const GROUP_DATE: usize = 260;
 const RELEASES: &str = "https://github.com/arghya2801/kestrel-explorer/releases/latest";
 
 /// Logical y where the toolbar row ends and the tab strip starts.
@@ -68,6 +84,7 @@ const BUTTONS: &[(usize, &str, u8)] = &[
     (commands::CMD_DELETE, "Delete", 1),
     (REFRESH, "Refresh", 2),
     (SPLIT, "Split", 2),
+    (SORT_MENU, "Sort", 2),
     (VIEW, "View", 2),
     (MORE, "More", 3),
     (SETTINGS, "Settings", 3),
@@ -158,7 +175,11 @@ pub(super) fn enabled(id: usize) -> bool {
         commands::CMD_PASTE => has_folder && unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_ok(),
         commands::CMD_NEW_FOLDER | FOLDER_SIZES | TERMINAL => has_folder,
         REFRESH => dir.is_some(),
-        SYNC_PANES | COMPARE | SWAP_PANES | MIRROR_PANE => with_app(|a| a.split_view) == Some(true),
+        SYNC_PANES | COMPARE | SWAP_PANES | MIRROR_PANE | FOCUS_OTHER_PANE => {
+            with_app(|a| a.split_view) == Some(true)
+        }
+        REOPEN_TAB => with_app(|a| !a.closed_tabs.is_empty()) == Some(true),
+        CLOSE_OTHER_TABS => with_app(|a| a.tabs.len() > 1) == Some(true),
         _ => true,
     }
 }
@@ -253,19 +274,21 @@ pub(super) fn execute(id: usize) -> bool {
                 super::save_preferences(s);
             }
         }
-        SORT_NAME..=SORT_SIZE | DESCENDING => {
+        SORT_NAME..=SORT_SIZE | DESCENDING | SORT_CREATED | SORT_UP | SORT_DOWN => {
             let job = with_app(|a| {
                 let key = match id {
                     SORT_NAME => SortKey::Name,
                     SORT_DATE => SortKey::Modified,
                     SORT_TYPE => SortKey::Type,
                     SORT_SIZE => SortKey::Size,
+                    SORT_CREATED => SortKey::Created,
                     _ => a.view.browser.sort.key,
                 };
-                let descending = if id == DESCENDING {
-                    !a.view.browser.sort.descending
-                } else {
-                    a.view.browser.sort.descending
+                let descending = match id {
+                    DESCENDING => !a.view.browser.sort.descending,
+                    SORT_UP => false,
+                    SORT_DOWN => true,
+                    _ => a.view.browser.sort.descending,
                 };
                 a.view.browser.set_sort(crate::sort::Sort { key, descending })
             })
@@ -277,78 +300,177 @@ pub(super) fn execute(id: usize) -> bool {
         }
         SETTINGS => dialogs::settings(hwnd),
         SHORTCUTS => dialogs::shortcuts(hwnd),
-        VIEW | MORE | HELP => popup(hwnd, id),
+        PALETTE => super::palette::open(hwnd),
+        NEW_WINDOW => super::open_side_by_side(hwnd),
+        FOCUS_OTHER_PANE => super::panes::focus_other(),
+        FOCUS_FILTER => {
+            if let Some(filter) = with_app(|a| a.filter) {
+                unsafe {
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(filter));
+                    SendMessageW(filter, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+                }
+            }
+        }
+        VIEW | MORE | HELP | SORT_MENU => popup(hwnd, id),
+        GROUP_NONE | GROUP_DATE => {
+            let grouped =
+                with_app(|a| a.view.browser.dir().is_some_and(|d| a.grouped.iter().any(|g| g == d)));
+            if grouped == Some(id == GROUP_NONE) {
+                return execute(GROUP);
+            }
+        }
         _ => return false,
     }
     true
 }
 
+/// Adds item `id` to `menu`, with its shortcut, grayed when it doesn't apply, and checked.
+fn item(menu: HMENU, id: usize, text: &str, checked: bool) {
+    let flags = MF_STRING
+        | if enabled(id) { MF_ENABLED } else { MF_GRAYED }
+        | if checked { MF_CHECKED } else { MF_UNCHECKED };
+    unsafe {
+        let _ = AppendMenuW(menu, flags, id, &HSTRING::from(super::palette::menu_text(text, id)));
+    }
+}
+
+fn separator(menu: HMENU) {
+    unsafe {
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+    }
+}
+
+/// A submenu called `text` in `menu`, filled by `fill`.
+fn submenu(menu: HMENU, text: &str, fill: impl FnOnce(HMENU)) {
+    unsafe {
+        let Ok(sub) = CreatePopupMenu() else { return };
+        fill(sub);
+        let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, &HSTRING::from(text));
+    }
+}
+
+/// The Sort, View, More and Help menus, laid out like Windows 11 Explorer's: Sort has the
+/// sort key, its direction and grouping; View has the layout, then what to show, the panes and
+/// the tabs. Each item names its shortcut.
 fn popup(hwnd: HWND, kind: usize) {
+    let Some((sort, hidden, preview, grid, size, grouped, split, sync, vertical)) = with_app(|a| {
+        (
+            a.view.browser.sort,
+            a.view.browser.show_hidden,
+            preview::is_visible_in(a),
+            a.view.grid.enabled,
+            a.view.grid.size,
+            a.view.browser.dir().is_some_and(|d| a.grouped.iter().any(|g| g == d)),
+            a.split_view,
+            a.sync_panes,
+            a.vertical_tabs,
+        )
+    }) else {
+        return;
+    };
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
-        let add = |id: usize, text: &str, checked: bool| {
-            let flags = MF_STRING
-                | if enabled(id) { MF_ENABLED } else { MF_GRAYED }
-                | if checked { MF_CHECKED } else { MF_UNCHECKED };
-            let _ = AppendMenuW(menu, flags, id, &HSTRING::from(text));
-        };
         match kind {
-            VIEW => {
-                let (grid, size) =
-                    with_app(|a| (a.view.grid.enabled, a.view.grid.size)).unwrap_or((false, 0));
-                add(DETAILS, "Details", !grid);
-                for (i, &(px, label)) in THUMB_SIZES.iter().enumerate() {
-                    add(THUMBS + i, label, grid && size == px);
-                }
-                let Some((sort, hidden, preview)) = with_app(|a| {
-                    (a.view.browser.sort, a.view.browser.show_hidden, preview::is_visible_in(a))
-                }) else {
-                    let _ = DestroyMenu(menu);
-                    return;
-                };
+            SORT_MENU => {
                 for (id, label, key) in [
-                    (SORT_NAME, "Sort by name", SortKey::Name),
-                    (SORT_DATE, "Sort by date", SortKey::Modified),
-                    (SORT_TYPE, "Sort by type", SortKey::Type),
-                    (SORT_SIZE, "Sort by size", SortKey::Size),
+                    (SORT_NAME, "&Name", SortKey::Name),
+                    (SORT_DATE, "Date &modified", SortKey::Modified),
+                    (SORT_TYPE, "&Type", SortKey::Type),
+                    (SORT_SIZE, "&Size", SortKey::Size),
+                    (SORT_CREATED, "Date &created", SortKey::Created),
                 ] {
-                    add(id, label, sort.key == key);
+                    item(menu, id, label, sort.key == key);
                 }
-                add(DESCENDING, "Descending", sort.descending);
-                add(HIDDEN, "Hidden items\tCtrl+H", hidden);
-                add(PREVIEW, "Preview pane\tAlt+P", preview);
-                add(REVEAL, "Show in sidebar\tCtrl+Shift+E", false);
-                let grouped =
-                    with_app(|a| a.view.browser.dir().is_some_and(|d| a.grouped.iter().any(|g| g == d)));
-                add(GROUP, "Group by date", grouped == Some(true));
-                add(FOLDER_SIZES, "Calculate folder sizes", false);
-                add(SYNC_PANES, "Sync pane navigation", with_app(|a| a.sync_panes).unwrap_or(false));
-                add(COMPARE, "Compare panes", false);
-                add(SWAP_PANES, "Swap panes\tCtrl+U", false);
-                add(MIRROR_PANE, "Show this folder in the other pane\tCtrl+Shift+U", false);
-                add(VERTICAL_TABS, "Tabs above the sidebar", with_app(|a| a.vertical_tabs).unwrap_or(false));
+                separator(menu);
+                item(menu, SORT_UP, "&Ascending", !sort.descending);
+                item(menu, SORT_DOWN, "&Descending", sort.descending);
+                separator(menu);
+                submenu(menu, "&Group by", |sub| {
+                    item(sub, GROUP_NONE, "(&None)", !grouped);
+                    item(sub, GROUP_DATE, "Date &modified", grouped);
+                });
+            }
+            VIEW => {
+                item(menu, DETAILS, "&Details", !grid);
+                for (i, &(px, label)) in THUMB_SIZES.iter().enumerate() {
+                    item(menu, THUMBS + i, label, grid && size == px);
+                }
+                separator(menu);
+                submenu(menu, "&Show", |sub| {
+                    item(sub, HIDDEN, "&Hidden items", hidden);
+                    item(sub, PREVIEW, "&Preview pane", preview);
+                    item(sub, FOLDER_SIZES, "Folder &sizes (calculate now)", false);
+                });
+                submenu(menu, "P&anes", |sub| {
+                    item(sub, SPLIT, "&Two panes", split);
+                    separator(sub);
+                    item(sub, FOCUS_OTHER_PANE, "&Focus the other pane", false);
+                    item(sub, SWAP_PANES, "S&wap panes", false);
+                    item(sub, MIRROR_PANE, "Show this folder in the &other pane", false);
+                    item(sub, SYNC_PANES, "S&ync pane navigation", sync);
+                    item(sub, COMPARE, "&Compare panes", false);
+                });
+                submenu(menu, "&Tabs", |sub| {
+                    item(sub, VERTICAL_TABS, "Tabs on the &left", vertical);
+                    item(sub, TAB_LIST, "List &all tabs", false);
+                    separator(sub);
+                    item(sub, REOPEN_TAB, "&Reopen closed tab", false);
+                    item(sub, CLOSE_OTHER_TABS, "Close &other tabs", false);
+                });
+                separator(menu);
+                item(menu, REVEAL, "Show in s&idebar", false);
             }
             HELP => {
-                add(SHORTCUTS, "Keyboard shortcuts\tF1", false);
-                add(UPDATES, &format!("Check for updates (this is {})", env!("CARGO_PKG_VERSION")), false);
+                item(menu, PALETTE, "&Find a command or shortcut", false);
+                item(menu, SHORTCUTS, "&Keyboard shortcuts", false);
+                separator(menu);
+                item(
+                    menu,
+                    UPDATES,
+                    &format!("Check for &updates (this is {})", env!("CARGO_PKG_VERSION")),
+                    false,
+                );
             }
             _ => {
-                for &(id, label, _) in BUTTONS.iter().filter(|b| !matches!(b.0, MORE | SETTINGS | HELP)) {
-                    add(id, label, false);
+                // The toolbar buttons that didn't fit come first.
+                let hidden_buttons: Vec<_> = with_app(|a| {
+                    a.toolbar
+                        .iter()
+                        .zip(BUTTONS)
+                        .filter(|(b, _)| GetWindowLongPtrW(**b, GWL_STYLE) as u32 & WS_VISIBLE.0 == 0)
+                        .map(|(_, &(id, label, _))| (id, label))
+                        .collect()
+                })
+                .unwrap_or_default();
+                for &(id, label) in &hidden_buttons {
+                    if matches!(id, VIEW | SORT_MENU) {
+                        continue;
+                    }
+                    item(menu, id, label, false);
+                }
+                if !hidden_buttons.is_empty() {
+                    separator(menu);
                 }
                 let pinned = with_app(|a| a.view.browser.dir().map(std::path::PathBuf::from))
                     .flatten()
                     .is_some_and(|d| super::tree::is_pinned(&d));
-                let pin = if pinned { "Unpin from Quick access" } else { "Pin to Quick access" };
-                add(PIN, pin, pinned);
-                add(RECENT, "Recent folders", false);
-                add(PARENTS, "Parent folders", false);
-                add(TERMINAL, "Open terminal here", false);
-                add(OPERATIONS, "File operations", false);
-                add(commands::CMD_COPY_PATH, "Copy as path\tCtrl+Shift+C", false);
-                add(commands::CMD_SELECT_ALL, "Select all\tCtrl+A", false);
-                add(commands::CMD_SHOW_IN_EXPLORER, "Show in Explorer", false);
-                add(commands::CMD_MORE_OPTIONS, "Windows context menu\tShift+right-click", false);
+                item(
+                    menu,
+                    PIN,
+                    if pinned { "Unpin from &Quick access" } else { "Pin to &Quick access" },
+                    pinned,
+                );
+                item(menu, RECENT, "&Recent folders", false);
+                item(menu, PARENTS, "&Parent folders", false);
+                separator(menu);
+                item(menu, commands::CMD_COPY_PATH, "Copy as pa&th", false);
+                item(menu, commands::CMD_SELECT_ALL, "Select &all", false);
+                item(menu, commands::CMD_SHOW_IN_EXPLORER, "Show in &Explorer", false);
+                item(menu, commands::CMD_MORE_OPTIONS, "&Windows context menu", false);
+                separator(menu);
+                item(menu, TERMINAL, "Open &terminal here", false);
+                item(menu, OPERATIONS, "File &operations", false);
+                item(menu, NEW_WINDOW, "New &window", false);
             }
         }
         let button = GetDlgItem(Some(hwnd), kind as i32).unwrap_or(hwnd);

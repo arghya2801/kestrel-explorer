@@ -2479,6 +2479,59 @@ fn unsplitting_restores_the_name_width() {
 }
 
 #[test]
+fn the_command_palette_finds_commands_by_name_or_key_and_runs_them() {
+    let _desktop = desktop();
+    let t = TempDir::new("palette");
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    ctrl_key(list, VK_T, false);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
+    ctrl_key(ui::active_list().unwrap(), VK_P, true);
+    assert!(pump_until(WAIT, || unsafe { FindWindowW(w!("KestrelPalette"), None) }.is_ok()));
+    let palette = unsafe { FindWindowW(w!("KestrelPalette"), None) }.unwrap();
+    let search = find(palette, w!("Edit"));
+    let commands = find(palette, w!("SysListView32"));
+    assert!(rows(commands).len() > 40, "every command is listed");
+    // A key finds its command, and the shortcut column shows it.
+    type_into(search, "ctrl+w");
+    assert!(
+        pump_until(WAIT, || rows(commands).first().is_some_and(|r| r == "Tabs: Close tab")),
+        "{:?}",
+        rows(commands)
+    );
+    type_into(search, "close tab");
+    assert!(pump_until(WAIT, || rows(commands).first().is_some_and(|r| r == "Tabs: Close tab")));
+    key(search, VK_RETURN);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 1), "Enter ran the command");
+    assert!(unsafe { FindWindowW(w!("KestrelPalette"), None) }.is_err(), "and closed the palette");
+    close(hwnd);
+}
+
+#[test]
+fn sort_and_group_commands_set_rather_than_toggle() {
+    let t = TempDir::new("sort-group");
+    std::fs::write(t.0.join("a.txt"), "").unwrap();
+    std::fs::write(t.0.join("b.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt", "b.txt"]));
+    command(hwnd, ui::toolbar::SORT_DOWN);
+    assert!(pump_until(WAIT, || rows(list) == ["b.txt", "a.txt"]));
+    command(hwnd, ui::toolbar::SORT_DOWN);
+    assert!(pump_until(WAIT, || rows(list) == ["b.txt", "a.txt"]), "a second Descending keeps it");
+    command(hwnd, ui::toolbar::SORT_UP);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt", "b.txt"]));
+    command(hwnd, ui::toolbar::GROUP_DATE);
+    assert!(pump_until(WAIT, || !group_headers(list).is_empty()));
+    command(hwnd, ui::toolbar::GROUP_DATE);
+    assert!(pump_until(WAIT, || !group_headers(list).is_empty()), "a second Date keeps the groups");
+    command(hwnd, ui::toolbar::GROUP_NONE);
+    let grouped = || unsafe { SendMessageW(list, LVM_ISGROUPVIEWENABLED, None, None) }.0 != 0;
+    assert!(pump_until(WAIT, || !grouped()));
+    close(hwnd);
+}
+
+#[test]
 fn split_panes_copy_move_swap_and_mirror() {
     let _desktop = desktop();
     let t = TempDir::new("panes");

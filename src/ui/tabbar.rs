@@ -431,6 +431,10 @@ pub(super) fn execute(id: usize) -> bool {
         NEW_TAB => new_tab(None),
         TAB_LIST => all_tabs_menu(),
         REOPEN_TAB => reopen(),
+        CLOSE_TAB => close_tab(active),
+        DUPLICATE_TAB => duplicate(active),
+        NEXT_TAB => cycle(false),
+        PREV_TAB => cycle(true),
         CLOSE_OTHER_TABS => close_others(active),
         CLOSE_TABS_AFTER => close_after(active),
         MOVE_TAB_BACK if active > 0 => move_tab(active, active - 1),
@@ -1092,7 +1096,7 @@ pub(super) fn switch_to(to: usize) {
             let _ = ShowWindow(list, SW_HIDE);
         }
     }
-    let Some((hwnd, strip, palette, list, ids)) = with_app(|a| {
+    let Some((hwnd, strip, list, ids)) = with_app(|a| {
         let mut incoming = a.tabs.items_mut()[to].workspace.take()?;
         std::mem::swap(&mut a.view, &mut incoming.view);
         std::mem::swap(&mut a.other, &mut incoming.other);
@@ -1107,16 +1111,20 @@ pub(super) fn switch_to(to: usize) {
         {
             ids.push(other.id);
         }
-        Some((a.hwnd, a.tab_strip, a.palette, a.view.list, ids))
+        Some((a.hwnd, a.tab_strip, a.view.list, ids))
     })
     .flatten() else {
         return;
     };
+    // One repaint for the whole switch instead of one per control moved, shown or hidden.
+    let quiet = unsafe { IsWindowVisible(hwnd) }.as_bool();
+    if quiet {
+        unsafe { SendMessageW(hwnd, WM_SETREDRAW, Some(WPARAM(0)), None) };
+    }
     unsafe {
         SendMessageW(strip, TCM_SETCURSEL, Some(WPARAM(to)), None);
     }
     super::preview::invalidate();
-    super::dark::apply(hwnd, palette);
     super::layout(hwnd);
     for id in ids {
         super::watch_view(id);
@@ -1126,6 +1134,18 @@ pub(super) fn switch_to(to: usize) {
     }
     super::update_sort_arrows();
     super::update_chrome();
+    if quiet {
+        unsafe {
+            use windows::Win32::Graphics::Gdi::*;
+            SendMessageW(hwnd, WM_SETREDRAW, Some(WPARAM(1)), None);
+            let _ = RedrawWindow(
+                Some(hwnd),
+                None,
+                None,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            );
+        }
+    }
     // Arrowing along a focused tab strip keeps the focus there.
     unsafe {
         if windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() != strip {
