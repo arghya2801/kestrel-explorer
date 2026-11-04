@@ -6,6 +6,8 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-04
+
 ### Fixed
 - Closing a window releases its toolbar icon font, preventing GDI resource growth when repeatedly opening windows.
 - The stress runner clears keyboard modifiers when refreshing, so a held Shift key cannot trigger a pane copy. Shutdown now reports background operations that fail to finish within ten seconds.

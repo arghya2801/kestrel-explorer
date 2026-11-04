@@ -1,9 +1,9 @@
 # Kestrel handoff
 
-Updated 2026-11-02. Version 1.3.1; see CHANGELOG.md.
+Updated 2026-11-04. Version 1.3.2; see CHANGELOG.md.
 [ROADMAP.md](ROADMAP.md) holds what is built, what remains and the measurements.
 
-## Issue fixes awaiting release
+## Issue fixes in 1.3.2 awaiting manual checks
 
 - #22: MSI setup now shows destination, progress and completion dialogs. WiX 6.0.2 with the UI extension builds successfully; the compiled MSI's dialogs and navigation were checked. The office machine's failure has not been reproduced.
 - #23: periodic checkpoints run off the UI thread, with at most one writer per window. Settings/session disk I/O uses a separate lock from the window state. A blocked-storage regression checks that UI timer messages return promptly and do not queue extra writers. Other causes of the office machine's hangs remain unconfirmed.
