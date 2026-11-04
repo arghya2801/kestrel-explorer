@@ -190,13 +190,14 @@ pub(super) fn place_buttons() {
         let top = bounds.top + super::scale(hwnd, 4);
         let count = SendMessageW(strip, TCM_GETITEMCOUNT, None, None).0.max(1) as usize;
         let last = tab_rect(strip, count - 1);
+        // The strip's own scroll arrows mean it's full. Their style, not IsWindowVisible, which
+        // is false while the window itself is hidden.
         let arrows = FindWindowExW(Some(strip), None, w!("msctls_updown32"), None)
             .ok()
-            .filter(|&u| IsWindowVisible(u).as_bool())
-            .map(|u| super::client_rect_of(strip, u).left);
-        let limit = bounds.left + arrows.unwrap_or(bounds.right - bounds.left);
+            .filter(|&u| GetWindowLongPtrW(u, GWL_STYLE) as u32 & WS_VISIBLE.0 != 0);
+        let scrolled = tab_rect(strip, 0).left < 0;
         let mut x = bounds.left + last.right + gap;
-        if arrows.is_some() || x + size > limit {
+        if arrows.is_some() || scrolled || x + size > bounds.right {
             x = bounds.right + gap;
         }
         let _ = MoveWindow(plus, x, top, size, size, true);
