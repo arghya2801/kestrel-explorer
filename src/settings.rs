@@ -44,6 +44,8 @@ pub struct Settings {
     pub grouped: Vec<PathBuf>,
     /// Folders sorted other than `sort`, the default.
     pub folder_sorts: Vec<(PathBuf, Sort)>,
+    /// Appearance, files, tabs, sidebar and terminal preferences.
+    pub prefs: crate::prefs::Prefs,
 }
 
 impl Default for Settings {
@@ -74,6 +76,7 @@ impl Default for Settings {
             recent: Vec::new(),
             grouped: Vec::new(),
             folder_sorts: Vec::new(),
+            prefs: crate::prefs::Prefs::default(),
         }
     }
 }
@@ -192,7 +195,9 @@ impl Settings {
                 }
                 "active_tab" => s.active_tab = value.parse().unwrap_or(0),
                 "last_folder" => s.last_folder = (!value.is_empty()).then(|| PathBuf::from(value)),
-                _ => {}
+                _ => {
+                    s.prefs.parse(key, value);
+                }
             }
         }
         s.active_tab = s.active_tab.min(s.tabs.len().saturating_sub(1));
@@ -236,6 +241,7 @@ impl Settings {
             out += &format!("tabs_width={w}\n");
         }
         out += &format!("tabs_collapsed={}\n", self.tabs_collapsed);
+        out += &self.prefs.to_text();
         for (p, sort) in self.folder_sorts.iter().filter(|(p, _)| rememberable(p)) {
             let key = KEYS.iter().find(|(k, _)| *k == sort.key).map_or("Name", |k| k.1);
             out += &format!("folder_sort={},{key},{}\n", encode_path(p), sort.descending);
@@ -368,6 +374,7 @@ mod tests {
                 PathBuf::from(r"C:\Users\me\Downloads"),
                 Sort { key: SortKey::Modified, descending: true },
             )],
+            prefs: crate::prefs::Prefs { show_extensions: false, accent: 2, ..Default::default() },
         };
         assert_eq!(Settings::parse(&s.to_text()), s);
     }

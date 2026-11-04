@@ -12,6 +12,7 @@ pub mod listing;
 pub mod network;
 pub mod ops;
 pub mod places;
+pub mod prefs;
 pub mod preview;
 pub mod search;
 pub mod session;

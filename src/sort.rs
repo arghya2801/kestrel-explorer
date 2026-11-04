@@ -176,7 +176,10 @@ pub fn sorted_order(
     show_hidden: bool,
     dir_sizes: &HashMap<Vec<u16>, u64>,
 ) -> Vec<u32> {
-    let mut v: Vec<u32> = (0..s.len() as u32).filter(|&i| show_hidden || !s.is_hidden(i as usize)).collect();
+    let prefs = crate::prefs::get();
+    // Protected system files stay out unless asked for, even with hidden items shown.
+    let shown = |i: usize| (show_hidden || !s.is_hidden(i)) && (prefs.show_system || !s.is_protected(i));
+    let mut v: Vec<u32> = (0..s.len() as u32).filter(|&i| shown(i as usize)).collect();
 
     let mut keys = Vec::new();
     let mut buf = vec![0u16; 1024];
@@ -204,7 +207,9 @@ pub fn sorted_order(
                 .cmp(&crate::format::attributes(s.entries[b].attrs)),
         };
         let primary = if sort.descending { primary.reverse() } else { primary };
-        s.is_dir(b).cmp(&s.is_dir(a)).then(primary).then_with(|| key(a).cmp(key(b)))
+        let folders =
+            if prefs.folders_first { s.is_dir(b).cmp(&s.is_dir(a)) } else { std::cmp::Ordering::Equal };
+        folders.then(primary).then_with(|| key(a).cmp(key(b)))
     });
     v
 }

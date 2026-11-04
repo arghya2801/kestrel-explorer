@@ -12,6 +12,12 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 - A full tab strip scrolls with the mouse wheel, and keeps + and a new all-tabs menu at its right.
 - Vertical tabs have a "Tabs" heading with its own +, a clear active row, close buttons, drag to reorder, and a divider to resize the list. Each window remembers the height.
 - Deep or squeezed addresses show "…" for the folders left out; click it to go to one.
+- A command palette (Ctrl+Shift+P, or Help > Find a command or shortcut) finds any command by name or by its keys and runs it.
+- Toolbar buttons have tooltips naming their command and shortcut; every menu item shows its shortcut.
+- A Sort button with the sort key, its direction and Group by. View now has the layout, then Show, Panes and Tabs submenus.
+- This PC shows drives as tiles under "Devices and drives" and "Network locations", with a bar for the space used and "X free of Y".
+- Vertical tabs have their own full-height column at the left, which collapses to lettered badges.
+- Settings has seven pages and many new options: accent color, text size, row spacing, toolbar labels, status bar, title path; file name extensions, protected system files, folders first, single-click opening, double-click to go up, asking before recycling, size units, date style; where new tabs open, close buttons, closing the last tab; sidebar sections and following the open folder; the terminal; and a Keyboard page that rebinds any command without a restart.
 
 ### Changed
 - Tab names dim the parent folder. A split tab is named by its left pane, and its tooltip shows both paths.
@@ -26,6 +32,7 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 - Clicking between split panes renamed the tab.
 - New tabs showed "Loading…" before their folder name.
 - Dark mode Settings: readable checkbox labels, dark page tabs, combo boxes and buttons, and no grey bands behind labels.
+- Switching tabs no longer flickers: new lists are styled once, and a switch repaints the window once.
 
 ## [1.3.2] - 2026-11-04
 

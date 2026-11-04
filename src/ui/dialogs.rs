@@ -36,6 +36,36 @@ const DUAL: usize = 27;
 const RATIO: usize = 28;
 const PREVIEW_WIDTH: usize = 29;
 const FOLDER_MENU: usize = 32;
+const ACCENT: usize = 40;
+const TEXT_SIZE: usize = 41;
+const ROWS: usize = 42;
+const TOOLBAR: usize = 43;
+const STATUS: usize = 44;
+const TITLE_PATH: usize = 45;
+const EXTENSIONS: usize = 46;
+const SYSTEM: usize = 47;
+const FOLDERS_FIRST: usize = 48;
+const SINGLE_CLICK: usize = 49;
+const UP_DOUBLE_CLICK: usize = 50;
+const CONFIRM: usize = 51;
+const SIZES: usize = 52;
+const DATES: usize = 53;
+const TAB_POSITION: usize = 54;
+const NEW_TAB: usize = 55;
+const TAB_CLOSE: usize = 56;
+const LAST_TAB: usize = 57;
+const SIDEBAR_QUICK: usize = 58;
+const SIDEBAR_NETWORK: usize = 59;
+const SIDEBAR_FOLLOW: usize = 60;
+const TERMINAL: usize = 61;
+/// The Keyboard page: commands and their keys, a box that takes a key press, and its buttons.
+const KEY_LIST: usize = 62;
+const HOTKEY: usize = 63;
+const ASSIGN: usize = 64;
+const UNASSIGN: usize = 65;
+const KEYS_RESET: usize = 66;
+/// The Keyboard page's index.
+const KEYBOARD: usize = 6;
 
 thread_local! { static WINDOWS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) }; }
 
@@ -53,6 +83,11 @@ struct Dialog {
     operations: bool,
     font: HFONT,
     fields: Vec<(HWND, HWND, usize)>,
+    /// The Keyboard page: your bindings (keys, command id), whether they changed, and which
+    /// command each row of the list is.
+    keys: Vec<(String, usize)>,
+    keys_changed: bool,
+    key_rows: Vec<usize>,
 }
 
 impl Drop for Dialog {
@@ -72,7 +107,8 @@ Alt+Right    Forward\r\n\
 Alt+Up    Parent folder\r\n\
 Ctrl+L / Alt+D / F4    Edit the address\r\n\
 F5    Refresh\r\n\
-Tab / Shift+Tab    Next / previous control\r\n\r\n\
+Tab / Shift+Tab    Next / previous control\r\n\
+Ctrl+Shift+P    Find any command or its shortcut\r\n\r\n\
 Files (when the file list has focus)\r\n\
 Ctrl+A    Select all\r\n\
 Ctrl+C / Ctrl+X / Ctrl+V    Copy / cut / paste\r\n\
@@ -197,16 +233,28 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> w
             WS_OVERLAPPEDWINDOW,
             r.left + scale(owner, 40),
             r.top + scale(owner, 40),
-            scale(owner, 660),
-            scale(owner, 570),
+            scale(owner, if guide { 660 } else { 740 }),
+            scale(owner, if guide { 570 } else { 660 }),
             Some(owner),
             None,
             Some(instance),
             None,
         )?;
         let result = (|| -> windows::core::Result<Dialog> {
-            let mut data =
-                Dialog { owner, guide, operations, font: super::message_font(hwnd), fields: Vec::new() };
+            let keys = crate::keys::bindings(super::COMMAND_NAMES)
+                .iter()
+                .filter_map(|b| Some((b.text.split("    ").next()?.to_string(), b.command)))
+                .collect();
+            let mut data = Dialog {
+                owner,
+                guide,
+                operations,
+                font: super::message_font(hwnd),
+                fields: Vec::new(),
+                keys,
+                keys_changed: false,
+                key_rows: Vec::new(),
+            };
             if guide {
                 child(
                     hwnd,
@@ -228,7 +276,10 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> w
                 )?;
             } else {
                 let pages = child(hwnd, WC_TABCONTROLW, w!(""), WS_TABSTOP, WINDOW_EX_STYLE(0), PAGES)?;
-                for (i, name) in ["Appearance", "File list", "Startup", "Window"].iter().enumerate() {
+                for (i, name) in ["Appearance", "Files", "Tabs", "Sidebar", "Startup", "Window", "Keyboard"]
+                    .iter()
+                    .enumerate()
+                {
                     let name = HSTRING::from(*name);
                     let tab = TCITEMW {
                         mask: TCIF_TEXT,
@@ -242,36 +293,93 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> w
                         Some(LPARAM(&tab as *const _ as isize)),
                     );
                 }
-                for (page, id, label, choices, check) in [
-                    (0, THEME, "&Theme", Some("System|Light|Dark"), false),
-                    (0, SIDEBAR, "&Sidebar width", None, false),
-                    (0, PREVIEW, "Show &preview pane", None, true),
-                    (0, DUAL, "Two folder panes", None, true),
-                    (0, RATIO, "Left pane percentage", None, false),
-                    (0, PREVIEW_WIDTH, "Preview width", None, false),
-                    (1, GRID, "Thumbnail grid view", None, true),
+                let names = |list: &[&str]| Some(list.join("|"));
+                let accents: Vec<&str> = crate::prefs::ACCENTS.iter().map(|a| a.0).collect();
+                let text_sizes: Vec<&str> = crate::prefs::TEXT_SIZES.iter().map(|a| a.0).collect();
+                let spacing: Vec<&str> = crate::prefs::ROW_SPACING.iter().map(|a| a.0).collect();
+                let fields: Vec<(usize, usize, &str, Option<String>, bool)> = vec![
+                    (0, THEME, "&Theme", Some("System|Light|Dark".into()), false),
+                    (0, ACCENT, "&Accent color", names(&accents), false),
+                    (0, TEXT_SIZE, "Te&xt size", names(&text_sizes), false),
+                    (0, ROWS, "&Row spacing", names(&spacing), false),
+                    (0, TOOLBAR, "Tool&bar", Some("Icons and labels|Icons only".into()), false),
+                    (0, STATUS, "Show the status &bar", None, true),
+                    (0, TITLE_PATH, "Show the &full path in the title bar", None, true),
+                    (0, PREVIEW, "Show the &preview pane", None, true),
+                    (0, SIDEBAR, "&Sidebar width (pixels)", None, false),
+                    (0, PREVIEW_WIDTH, "Preview &width (pixels)", None, false),
+                    (1, EXTENSIONS, "Show file name &extensions", None, true),
                     (1, HIDDEN, "Show &hidden items", None, true),
+                    (1, SYSTEM, "Show protected operating &system files", None, true),
+                    (1, FOLDERS_FIRST, "List &folders before files", None, true),
+                    (1, SINGLE_CLICK, "Open items with a single &click", None, true),
+                    (1, UP_DOUBLE_CLICK, "Double-click empty space to go &up a folder", None, true),
+                    (1, CONFIRM, "As&k before moving files to the Recycle Bin", None, true),
+                    (
+                        1,
+                        SIZES,
+                        "Si&zes",
+                        Some("1 KB = 1,024 bytes, as Explorer shows them|1 kB = 1,000 bytes".into()),
+                        false,
+                    ),
+                    (
+                        1,
+                        DATES,
+                        "&Dates",
+                        Some("System short date and time|Relative (Today, Yesterday)|ISO 8601 (2026-11-04 22:33)".into()),
+                        false,
+                    ),
                     (
                         1,
                         SORT,
-                        "Default &sort",
-                        Some("Name|Date modified|Type|Size|Date created|Attributes"),
+                        "Default s&ort",
+                        Some("Name|Date modified|Type|Size|Date created|Attributes".into()),
                         false,
                     ),
-                    (1, DESCENDING, "&Descending", None, true),
-                    (1, COLUMN, "&Name column width", None, false),
-                    (1, COLUMN + 1, "&Date column width", None, false),
-                    (1, COLUMN + 2, "&Type column width", None, false),
-                    (1, COLUMN + 3, "Si&ze column width", None, false),
-                    (2, SESSION, "Restore tabs and windows", None, true),
-                    (2, FOLDER, "&Folder when not restoring", None, false),
-                    (2, FOLDER_MENU, "Add \"Open in Kestrel\" to folder menus", None, true),
-                    (3, X, "Window &X", None, false),
-                    (3, Y, "Window &Y", None, false),
-                    (3, WIDTH, "&Width", None, false),
-                    (3, HEIGHT, "&Height", None, false),
-                    (3, MAXIMIZED, "Start &maximized", None, true),
-                ] {
+                    (1, DESCENDING, "Sort descendi&ng", None, true),
+                    (1, GRID, "Show &thumbnails instead of details", None, true),
+                    (2, TAB_POSITION, "Tab &position", Some("Along the top|In a column on the left".into()), false),
+                    (
+                        2,
+                        NEW_TAB,
+                        "&New tabs open",
+                        Some("The current folder|This PC|Your user folder|Downloads".into()),
+                        false,
+                    ),
+                    (
+                        2,
+                        TAB_CLOSE,
+                        "&Close buttons",
+                        Some("On the active tab and the one under the mouse|On every tab|None (Ctrl+W or middle-click)".into()),
+                        false,
+                    ),
+                    (2, LAST_TAB, "Closing the &last tab", Some("Keeps the window open|Closes the window".into()), false),
+                    (2, DUAL, "&Two folder panes", None, true),
+                    (2, RATIO, "Left pane &percentage", None, false),
+                    (3, SIDEBAR_QUICK, "Show &Quick access", None, true),
+                    (3, SIDEBAR_NETWORK, "Show &Network", None, true),
+                    (3, SIDEBAR_FOLLOW, "&Expand the sidebar to the open folder", None, true),
+                    (4, SESSION, "&Restore tabs and windows", None, true),
+                    (4, FOLDER, "&Folder when not restoring", None, false),
+                    (4, FOLDER_MENU, "Add \"Open in Kestrel\" to folder menus", None, true),
+                    (5, X, "Window &X", None, false),
+                    (5, Y, "Window &Y", None, false),
+                    (5, WIDTH, "&Width", None, false),
+                    (5, HEIGHT, "&Height", None, false),
+                    (5, MAXIMIZED, "Start &maximized", None, true),
+                    (5, COLUMN, "&Name column width (pixels)", None, false),
+                    (5, COLUMN + 1, "&Date column width (pixels)", None, false),
+                    (5, COLUMN + 2, "&Type column width (pixels)", None, false),
+                    (5, COLUMN + 3, "Si&ze column width (pixels)", None, false),
+                    (
+                        KEYBOARD,
+                        TERMINAL,
+                        "&Terminal",
+                        Some("Windows PowerShell|PowerShell 7 (pwsh)|Windows Terminal|Command Prompt".into()),
+                        false,
+                    ),
+                ];
+                for (page, id, label, choices, check) in fields {
                     let label_hwnd = child(
                         hwnd,
                         w!("STATIC"),
@@ -299,13 +407,49 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> w
                         ex,
                         id,
                     )?;
-                    if let Some(choices) = choices {
+                    if let Some(choices) = &choices {
                         for choice in choices.split('|') {
                             let text = HSTRING::from(choice);
                             SendMessageW(edit, CB_ADDSTRING, None, Some(LPARAM(text.as_ptr() as isize)));
                         }
                     }
                     data.fields.push((label_hwnd, edit, page));
+                }
+                let style = LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS;
+                let list = child(
+                    hwnd,
+                    WC_LISTVIEWW,
+                    w!(""),
+                    WS_TABSTOP | WINDOW_STYLE(style),
+                    WS_EX_CLIENTEDGE,
+                    KEY_LIST,
+                )?;
+                let ex = LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER;
+                SendMessageW(
+                    list,
+                    LVM_SETEXTENDEDLISTVIEWSTYLE,
+                    Some(WPARAM(ex as usize)),
+                    Some(LPARAM(ex as isize)),
+                );
+                for (i, (title, cx)) in [("Command", 330), ("Keys", 180)].into_iter().enumerate() {
+                    let title = HSTRING::from(title);
+                    let col = LVCOLUMNW {
+                        mask: LVCF_TEXT | LVCF_WIDTH,
+                        cx: scale(hwnd, cx),
+                        pszText: PWSTR(title.as_ptr() as *mut _),
+                        ..Default::default()
+                    };
+                    SendMessageW(
+                        list,
+                        LVM_INSERTCOLUMNW,
+                        Some(WPARAM(i)),
+                        Some(LPARAM(&col as *const _ as isize)),
+                    );
+                }
+                super::dark::style_new_list(list);
+                child(hwnd, w!("msctls_hotkey32"), w!(""), WS_TABSTOP, WS_EX_CLIENTEDGE, HOTKEY)?;
+                for (id, label) in [(ASSIGN, "A&ssign"), (UNASSIGN, "Re&move"), (KEYS_RESET, "Reset a&ll")] {
+                    child(hwnd, w!("BUTTON"), &HSTRING::from(label), WS_TABSTOP, WINDOW_EX_STYLE(0), id)?;
                 }
                 child(hwnd, w!("STATIC"), w!(""), WINDOW_STYLE(0), WINDOW_EX_STYLE(0), ERROR)?;
                 for (id, label) in [
@@ -346,6 +490,7 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> w
         }
         if !guide && let Some(s) = super::current_settings(owner) {
             fill(hwnd, &s);
+            fill_keys(hwnd);
         }
         layout(hwnd);
         dark::apply_dialog(hwnd);
@@ -431,6 +576,164 @@ fn fill(hwnd: HWND, s: &Settings) {
     }
     check(MAXIMIZED, s.maximized);
     check(FOLDER_MENU, crate::shell::folder_menu_registered());
+    use crate::prefs::{Dates, NewTab, TabClose, Terminal};
+    let p = s.prefs;
+    select(ACCENT, p.accent);
+    select(TEXT_SIZE, p.text_size);
+    select(ROWS, p.row_spacing);
+    select(TOOLBAR, usize::from(!p.toolbar_labels));
+    check(STATUS, p.status_bar);
+    check(TITLE_PATH, p.full_path_title);
+    check(EXTENSIONS, p.show_extensions);
+    check(SYSTEM, p.show_system);
+    check(FOLDERS_FIRST, p.folders_first);
+    check(SINGLE_CLICK, p.single_click);
+    check(UP_DOUBLE_CLICK, p.up_on_double_click);
+    check(CONFIRM, p.confirm_recycle);
+    select(SIZES, usize::from(p.decimal_sizes));
+    select(
+        DATES,
+        [Dates::System, Dates::Relative, Dates::Iso].iter().position(|&d| d == p.dates).unwrap_or(0),
+    );
+    select(TAB_POSITION, usize::from(s.vertical_tabs));
+    let new_tabs = [NewTab::CurrentFolder, NewTab::ThisPc, NewTab::UserFolder, NewTab::Downloads];
+    select(NEW_TAB, new_tabs.iter().position(|&t| t == p.new_tab).unwrap_or(0));
+    let closes = [TabClose::ActiveAndHovered, TabClose::Every, TabClose::Never];
+    select(TAB_CLOSE, closes.iter().position(|&c| c == p.tab_close).unwrap_or(0));
+    select(LAST_TAB, usize::from(p.last_tab_closes_window));
+    check(SIDEBAR_QUICK, p.sidebar_quick_access);
+    check(SIDEBAR_NETWORK, p.sidebar_network);
+    check(SIDEBAR_FOLLOW, p.sidebar_follows);
+    let terminals = [
+        Terminal::WindowsPowerShell,
+        Terminal::PowerShell7,
+        Terminal::WindowsTerminal,
+        Terminal::CommandPrompt,
+    ];
+    select(TERMINAL, terminals.iter().position(|&t| t == p.terminal).unwrap_or(0));
+}
+
+/// The Keyboard page's list: every command keys.txt can bind, with your keys or the built-in.
+fn fill_keys(hwnd: HWND) {
+    let Some(data) = (unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Dialog).as_mut() }) else {
+        return;
+    };
+    let list = field(hwnd, KEY_LIST);
+    let entries: Vec<&super::palette::Entry> = super::palette::ENTRIES
+        .iter()
+        .filter(|e| super::COMMAND_NAMES.iter().any(|(_, id)| *id == e.id))
+        .collect();
+    data.key_rows = entries.iter().map(|e| e.id).collect();
+    let selected = unsafe {
+        SendMessageW(list, LVM_GETNEXTITEM, Some(WPARAM(usize::MAX)), Some(LPARAM(LVNI_SELECTED as isize))).0
+    };
+    unsafe {
+        SendMessageW(list, LVM_DELETEALLITEMS, None, None);
+        for (row, e) in entries.iter().enumerate() {
+            let label = HSTRING::from(format!("{}: {}", e.group, e.label));
+            let item = LVITEMW {
+                mask: LVIF_TEXT,
+                iItem: row as i32,
+                pszText: PWSTR(label.as_ptr() as *mut _),
+                ..Default::default()
+            };
+            SendMessageW(list, LVM_INSERTITEMW, None, Some(LPARAM(&item as *const _ as isize)));
+            let keys = match data.keys.iter().find(|(_, id)| *id == e.id) {
+                Some((keys, _)) => format!("{keys}  (yours)"),
+                None => e.keys.to_string(),
+            };
+            let keys = HSTRING::from(keys);
+            let sub = LVITEMW { iSubItem: 1, pszText: PWSTR(keys.as_ptr() as *mut _), ..Default::default() };
+            SendMessageW(list, LVM_SETITEMTEXTW, Some(WPARAM(row)), Some(LPARAM(&sub as *const _ as isize)));
+        }
+        if let Ok(row) = usize::try_from(selected) {
+            let on = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
+            let item = LVITEMW { state: on, stateMask: on, ..Default::default() };
+            SendMessageW(list, LVM_SETITEMSTATE, Some(WPARAM(row)), Some(LPARAM(&item as *const _ as isize)));
+            SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(row)), Some(LPARAM(0)));
+        }
+    }
+}
+
+/// Assign, Remove and Reset all on the Keyboard page. Changes are saved with Apply or OK.
+fn edit_keys(hwnd: HWND, id: usize) {
+    let Some(data) = (unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Dialog).as_mut() }) else {
+        return;
+    };
+    let say = |text: &str| unsafe {
+        let _ = SetWindowTextW(field(hwnd, ERROR), &HSTRING::from(text));
+    };
+    let row = unsafe {
+        SendMessageW(
+            field(hwnd, KEY_LIST),
+            LVM_GETNEXTITEM,
+            Some(WPARAM(usize::MAX)),
+            Some(LPARAM(LVNI_SELECTED as isize)),
+        )
+        .0
+    };
+    let command = usize::try_from(row).ok().and_then(|r| data.key_rows.get(r).copied());
+    let label = |command: usize| {
+        super::palette::ENTRIES
+            .iter()
+            .find(|e| e.id == command)
+            .map_or(String::new(), |e| e.label.to_string())
+    };
+    match (id, command) {
+        (KEYS_RESET, _) => {
+            data.keys.clear();
+            say("Every command is back to its built-in keys. Apply to save.");
+        }
+        (_, None) => return say("Choose a command in the list first."),
+        (UNASSIGN, Some(command)) => {
+            data.keys.retain(|(_, c)| *c != command);
+            say(&format!("{} is back to its built-in keys. Apply to save.", label(command)));
+        }
+        (_, Some(command)) => {
+            // HKM_GETHOTKEY: the key in the low byte, HOTKEYF_SHIFT/CONTROL/ALT (1, 2, 4) above it.
+            let hot = unsafe { SendMessageW(field(hwnd, HOTKEY), WM_USER + 2, None, None) }.0 as u32;
+            let (vk, mods) = ((hot & 0xFF) as u16, (hot >> 8) & 0xFF);
+            if vk == 0 {
+                return say("Click the box left of Assign and press the keys first.");
+            }
+            let chord =
+                crate::keys::Chord { vk, ctrl: mods & 2 != 0, shift: mods & 1 != 0, alt: mods & 4 != 0 };
+            let Some(keys) = crate::keys::chord_text(chord) else {
+                return say(
+                    "That key can't be used. Try a letter, digit, F-key or arrow, with Ctrl, Shift or Alt.",
+                );
+            };
+            // One set of keys per command, and each set of keys runs one command.
+            data.keys.retain(|(k, c)| *c != command && !k.eq_ignore_ascii_case(&keys));
+            data.keys.push((keys.clone(), command));
+            let replaced = super::palette::ENTRIES
+                .iter()
+                .find(|e| e.id != command && e.keys.eq_ignore_ascii_case(&keys))
+                .map(|e| format!(" It used to be {}.", e.label))
+                .unwrap_or_default();
+            say(&format!("{keys} now runs {}.{replaced} Apply to save.", label(command)));
+        }
+    }
+    data.keys_changed = true;
+    fill_keys(hwnd);
+}
+
+/// Saves the Keyboard page's bindings to keys.txt, if they changed.
+fn save_keys(hwnd: HWND) -> std::result::Result<(), String> {
+    let Some(data) = (unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Dialog).as_mut() }) else {
+        return Ok(());
+    };
+    if !data.keys_changed {
+        return Ok(());
+    }
+    let lines: Vec<(String, &str)> = data
+        .keys
+        .iter()
+        .filter_map(|(keys, id)| Some((keys.clone(), super::COMMAND_NAMES.iter().find(|(_, c)| c == id)?.0)))
+        .collect();
+    crate::keys::save(&lines).map_err(|e| format!("Couldn't save keys.txt: {e}"))?;
+    data.keys_changed = false;
+    Ok(())
 }
 
 fn read(hwnd: HWND) -> std::result::Result<Settings, String> {
@@ -492,6 +795,42 @@ fn read(hwnd: HWND) -> std::result::Result<Settings, String> {
             number(HEIGHT, "Height", 240, 16384)?,
         )),
         maximized: checked(MAXIMIZED),
+        vertical_tabs: selected(TAB_POSITION) == 1,
+        prefs: {
+            use crate::prefs::{Dates, NewTab, Prefs, TabClose, Terminal};
+            let index = |id| selected(id).max(0) as usize;
+            Prefs {
+                accent: index(ACCENT),
+                text_size: index(TEXT_SIZE),
+                row_spacing: index(ROWS),
+                toolbar_labels: index(TOOLBAR) == 0,
+                status_bar: checked(STATUS),
+                full_path_title: checked(TITLE_PATH),
+                show_extensions: checked(EXTENSIONS),
+                show_system: checked(SYSTEM),
+                folders_first: checked(FOLDERS_FIRST),
+                single_click: checked(SINGLE_CLICK),
+                up_on_double_click: checked(UP_DOUBLE_CLICK),
+                confirm_recycle: checked(CONFIRM),
+                decimal_sizes: index(SIZES) == 1,
+                dates: [Dates::System, Dates::Relative, Dates::Iso][index(DATES).min(2)],
+                new_tab: [NewTab::CurrentFolder, NewTab::ThisPc, NewTab::UserFolder, NewTab::Downloads]
+                    [index(NEW_TAB).min(3)],
+                tab_close: [TabClose::ActiveAndHovered, TabClose::Every, TabClose::Never]
+                    [index(TAB_CLOSE).min(2)],
+                last_tab_closes_window: index(LAST_TAB) == 1,
+                sidebar_quick_access: checked(SIDEBAR_QUICK),
+                sidebar_this_pc: true,
+                sidebar_network: checked(SIDEBAR_NETWORK),
+                sidebar_follows: checked(SIDEBAR_FOLLOW),
+                terminal: [
+                    Terminal::WindowsPowerShell,
+                    Terminal::PowerShell7,
+                    Terminal::WindowsTerminal,
+                    Terminal::CommandPrompt,
+                ][index(TERMINAL).min(3)],
+            }
+        },
         ..unsafe { GetWindow(hwnd, GW_OWNER) }.ok().and_then(super::current_settings).unwrap_or_default()
     })
 }
@@ -521,16 +860,42 @@ fn layout(hwnd: HWND) {
         let mut row = 0;
         for &(label, edit, p) in &data.fields {
             let show = if p == page { SW_SHOWNA } else { SW_HIDE };
-            let _ = ShowWindow(label, show);
+            let mut class = [0u16; 16];
+            let n = GetClassNameW(edit, &mut class) as usize;
+            let class = String::from_utf16_lossy(&class[..n]).to_ascii_lowercase();
+            // Checkboxes carry their own label and run the width of the page.
+            let checkbox = class == "button";
+            let _ = ShowWindow(label, if checkbox { SW_HIDE } else { show });
             let _ = ShowWindow(edit, show);
             if p == page {
-                let y = s(56 + row * 38);
-                let _ = MoveWindow(label, s(24), y + s(5), s(190), s(25), true);
-                let id = GetDlgCtrlID(edit) as usize;
-                let height = if matches!(id, THEME | SORT) { s(160) } else { s(28) };
-                let _ = MoveWindow(edit, s(218), y, (w - s(244)).max(s(90)), height, true);
+                let y = s(54 + row * 34);
+                if checkbox {
+                    let _ = MoveWindow(edit, s(24), y, (w - s(48)).max(s(90)), s(28), true);
+                } else {
+                    let _ = MoveWindow(label, s(24), y + s(5), s(236), s(25), true);
+                    // A combo box's height includes its open list.
+                    let height = if class == "combobox" { s(240) } else { s(28) };
+                    let _ = MoveWindow(edit, s(266), y, (w - s(290)).max(s(90)), height, true);
+                }
                 row += 1;
             }
+        }
+        // The Keyboard page: the command list under the terminal choice, then the key box.
+        let keyboard = page == KEYBOARD;
+        for id in [KEY_LIST, HOTKEY, ASSIGN, UNASSIGN, KEYS_RESET] {
+            let _ = ShowWindow(field(hwnd, id), if keyboard { SW_SHOWNA } else { SW_HIDE });
+        }
+        if keyboard {
+            let top = s(54 + row * 34) + s(6);
+            let bottom = (h - s(140)).max(top + s(60));
+            let _ = MoveWindow(field(hwnd, KEY_LIST), s(24), top, (w - s(48)).max(0), bottom - top, true);
+            // LVSCW_AUTOSIZE_USEHEADER on the last column: it fills the rest of the width.
+            SendMessageW(field(hwnd, KEY_LIST), LVM_SETCOLUMNWIDTH, Some(WPARAM(1)), Some(LPARAM(-2)));
+            let y = bottom + s(10);
+            let _ = MoveWindow(field(hwnd, HOTKEY), s(24), y, s(220), s(28), true);
+            let _ = MoveWindow(field(hwnd, ASSIGN), s(254), y, s(90), s(28), true);
+            let _ = MoveWindow(field(hwnd, UNASSIGN), s(350), y, s(90), s(28), true);
+            let _ = MoveWindow(field(hwnd, KEYS_RESET), (w - s(124)).max(s(446)), y, s(100), s(28), true);
         }
         let _ = MoveWindow(field(hwnd, ERROR), s(24), h - s(90), (w - s(48)).max(0), s(40), true);
         let _ = MoveWindow(field(hwnd, DEFAULTS), s(12), h - s(42), s(140), s(30), true);
@@ -541,11 +906,13 @@ fn layout(hwnd: HWND) {
     }
 }
 
-/// Whether `hwnd` is a plain label (a STATIC), not a read-only text box.
+/// Whether `hwnd` is a label or a checkbox (drawn on the dialog's background), not a read-only
+/// text box.
 fn is_label(hwnd: HWND) -> bool {
     let mut class = [0u16; 16];
     let n = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
-    String::from_utf16_lossy(&class[..n]).eq_ignore_ascii_case("Static")
+    let class = String::from_utf16_lossy(&class[..n]);
+    class.eq_ignore_ascii_case("Static") || class.eq_ignore_ascii_case("Button")
 }
 
 extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -560,6 +927,10 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
                     fill(hwnd, &Settings::default());
                     return LRESULT(0);
                 }
+                id @ (ASSIGN | UNASSIGN | KEYS_RESET) => {
+                    edit_keys(hwnd, id);
+                    return LRESULT(0);
+                }
                 id if id == APPLY || id == IDOK.0 as usize => {
                     // A system setting rather than a preference: changed in the registry, not Settings.
                     let menu = SendMessageW(field(hwnd, FOLDER_MENU), BM_GETCHECK, None, None).0
@@ -569,7 +940,10 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
                     } else {
                         Ok(())
                     };
-                    match read(hwnd).and_then(|s| menu_changed.map(|()| s)) {
+                    match read(hwnd)
+                        .and_then(|s| menu_changed.map(|()| s))
+                        .and_then(|s| save_keys(hwnd).map(|()| s))
+                    {
                         Ok(s) => {
                             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Dialog;
                             if let Some(data) = ptr.as_ref() {
@@ -641,8 +1015,8 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
             }
             WM_GETMINMAXINFO => {
                 let info = &mut *(lp.0 as *mut MINMAXINFO);
-                info.ptMinTrackSize.x = scale(hwnd, 560);
-                info.ptMinTrackSize.y = scale(hwnd, 520);
+                info.ptMinTrackSize.x = scale(hwnd, 620);
+                info.ptMinTrackSize.y = scale(hwnd, 600);
                 return LRESULT(0);
             }
             WM_CTLCOLORSTATIC if is_label(HWND(lp.0 as _)) => {

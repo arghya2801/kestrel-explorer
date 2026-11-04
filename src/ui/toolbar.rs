@@ -102,6 +102,11 @@ pub(super) unsafe fn create(parent: HWND) -> Result<Vec<HWND>> {
         .collect()
 }
 
+/// Whether `id` is one of the toolbar's buttons.
+pub(super) fn is_toolbar_command(id: usize) -> bool {
+    BUTTONS.iter().any(|b| b.0 == id)
+}
+
 pub(super) fn owns(hwnd: HWND) -> bool {
     with_app(|a| a.toolbar.contains(&hwnd)) == Some(true)
 }

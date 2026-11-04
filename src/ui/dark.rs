@@ -72,6 +72,12 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
     }) else {
         return;
     };
+    // Settings can pick an accent instead of Windows' own.
+    let mut palette = palette;
+    let accent = crate::prefs::get().accent;
+    if accent > 0 && !crate::theme::high_contrast() {
+        palette.accent = crate::prefs::ACCENTS[accent.min(crate::prefs::ACCENTS.len() - 1)].1;
+    }
     let brushes = Brushes::new(&palette);
     with_app(|a| {
         a.palette = palette;
@@ -196,11 +202,11 @@ pub(super) fn apply_dialog(hwnd: HWND) {
     }
 }
 
-/// A dialog's labels (WM_CTLCOLORSTATIC from a STATIC) on the dialog's own background.
-/// `None` in light mode: Windows' defaults.
+/// A dialog's labels and checkboxes (WM_CTLCOLORSTATIC) on the dialog's own background, in
+/// either theme. `None` in high contrast: Windows' colors.
 pub(super) fn static_colors(hdc: HDC) -> Option<LRESULT> {
     let (palette, brush) = with_app(|a| (a.palette, a.brushes.as_ref().map(|b| b.chrome)))?;
-    if !palette.dark {
+    if crate::theme::high_contrast() {
         return None;
     }
     unsafe {

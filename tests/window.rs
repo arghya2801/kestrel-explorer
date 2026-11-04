@@ -2544,6 +2544,58 @@ fn sort_and_group_commands_set_rather_than_toggle() {
 }
 
 #[test]
+fn settings_hide_extensions_and_change_date_style_at_once() {
+    let _desktop = desktop();
+    let t = TempDir::new("prefs-files");
+    std::fs::create_dir(t.0.join("sub.d")).unwrap();
+    std::fs::write(t.0.join("report.pdf"), "").unwrap();
+    std::fs::write(t.0.join(".gitignore"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["sub.d", ".gitignore", "report.pdf"]), "{:?}", rows(list));
+    command(hwnd, ui::toolbar::SETTINGS);
+    let dialog = unsafe { FindWindowW(w!("KestrelSettings"), None) }.unwrap();
+    let field = |id| unsafe { GetDlgItem(Some(dialog), id) }.unwrap();
+    unsafe {
+        SendMessageW(field(46), BM_SETCHECK, Some(WPARAM(0)), None); // file name extensions
+        SendMessageW(field(53), CB_SETCURSEL, Some(WPARAM(2)), None); // ISO dates
+    }
+    command(dialog, 3); // Apply
+    let reset = || kestrel::prefs::set(kestrel::prefs::Prefs::default());
+    let shown = pump_until(WAIT, || rows(list) == ["sub.d", ".gitignore", "report"]);
+    let date = cell(list, 2, 1);
+    command(dialog, IDCANCEL.0 as usize);
+    close(hwnd);
+    reset();
+    assert!(shown, "folders and dot-files keep their names; files lose the extension: {:?}", rows(list));
+    let iso = date.len() == 16 && date.as_bytes()[4] == b'-' && date.as_bytes()[10] == b' ';
+    assert!(iso, "{date}");
+}
+
+#[test]
+fn the_keyboard_page_binds_a_command_to_new_keys() {
+    let _desktop = desktop();
+    let t = TempDir::new("prefs-keys");
+    let hwnd = open(&t.0);
+    command(hwnd, ui::toolbar::SETTINGS);
+    let dialog = unsafe { FindWindowW(w!("KestrelSettings"), None) }.unwrap();
+    let field = |id| unsafe { GetDlgItem(Some(dialog), id) }.unwrap();
+    let commands = field(62);
+    let row = rows(commands).iter().position(|r| r == "Tabs: New tab").expect("New tab is listed");
+    select_row(commands, row);
+    // Ctrl+Q in the key box: HKM_SETHOTKEY takes the key and HOTKEYF_CONTROL (2) above it.
+    unsafe { SendMessageW(field(63), WM_USER + 1, Some(WPARAM(b'Q' as usize | (2 << 8))), None) };
+    command(dialog, 64); // Assign
+    assert!(cell(commands, row, 1).starts_with("Ctrl+Q"), "{}", cell(commands, row, 1));
+    command(dialog, IDOK.0 as usize);
+    ctrl_key(list_of(hwnd), VK_Q, false);
+    let opened = pump_until(WAIT, || tab_labels(hwnd).len() == 2);
+    close(hwnd);
+    kestrel::keys::save(&[]).unwrap();
+    assert!(opened, "Ctrl+Q opened a tab without a restart");
+}
+
+#[test]
 fn split_panes_copy_move_swap_and_mirror() {
     let _desktop = desktop();
     let t = TempDir::new("panes");
@@ -2785,11 +2837,14 @@ fn render_review_windows() {
         command(hwnd, ui::toolbar::SETTINGS);
         let settings = unsafe { FindWindowW(w!("KestrelSettings"), None) }.unwrap();
         let pages = unsafe { GetDlgItem(Some(settings), 5) }.unwrap();
-        unsafe {
-            SendMessageW(pages, TCM_SETCURSEL, Some(WPARAM(1)), None);
+        for page in 0..7 {
+            unsafe {
+                SendMessageW(pages, TCM_SETCURSEL, Some(WPARAM(page)), None);
+            }
+            notify(settings, hdr(pages, TCN_SELCHANGE));
+            pump_until(Duration::from_millis(100), || false);
+            capture(settings, &out.join(format!("{name}-settings-{page}.bmp")));
         }
-        notify(settings, hdr(pages, TCN_SELCHANGE));
-        capture(settings, &out.join(format!("{name}-settings.bmp")));
         command(settings, IDCANCEL.0 as usize);
         key(ui::active_list().unwrap(), VK_F1);
         assert!(pump_until(WAIT, || unsafe { FindWindowW(w!("KestrelShortcuts"), None) }.is_ok()));

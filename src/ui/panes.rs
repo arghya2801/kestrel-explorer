@@ -129,6 +129,7 @@ pub(super) unsafe fn create(
         };
         super::set_font(&[list, label], font);
         super::dark::style_new_list(list);
+        apply_prefs(list);
         super::startup_mark("list columns");
         // The first window's lists get their names in late_init, after first paint.
         if with_app(|_| ()).is_some() {
@@ -256,6 +257,43 @@ pub(super) fn toggle() {
         super::watch_view(id);
     }
     super::update_chrome();
+}
+
+/// Single-click opening and row spacing from Settings, for file list `list`.
+pub(super) fn apply_prefs(list: HWND) {
+    let prefs = crate::prefs::get();
+    let click = LVS_EX_ONECLICKACTIVATE | LVS_EX_UNDERLINEHOT | LVS_EX_TRACKSELECT;
+    unsafe {
+        let on = if prefs.single_click { click } else { 0 };
+        SendMessageW(
+            list,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            Some(WPARAM(click as usize)),
+            Some(LPARAM(on as isize)),
+        );
+        // Rows are as tall as the tallest image list: a 1-pixel-wide state list sets the spacing.
+        let height = crate::prefs::ROW_SPACING[prefs.row_spacing.min(crate::prefs::ROW_SPACING.len() - 1)].1;
+        let spacer = if height > 0 { row_spacer(super::scale(list, height)) } else { HIMAGELIST::default() };
+        SendMessageW(list, LVM_SETIMAGELIST, Some(WPARAM(LVSIL_STATE as usize)), Some(LPARAM(spacer.0)));
+    }
+}
+
+thread_local! {
+    /// Blank image lists by height, shared by the lists that use them.
+    /// ponytail: kept for the thread's life; a few tiny lists at most.
+    static SPACERS: std::cell::RefCell<Vec<(i32, isize)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn row_spacer(height: i32) -> HIMAGELIST {
+    SPACERS.with(|s| {
+        let mut s = s.borrow_mut();
+        if let Some(&(_, list)) = s.iter().find(|(h, _)| *h == height) {
+            return HIMAGELIST(list);
+        }
+        let list = unsafe { ImageList_Create(1, height, ILC_COLOR32, 1, 1) };
+        s.push((height, list.0));
+        list
+    })
 }
 
 /// Splitting narrows the panes, so their Name columns shrink until Type and Size fit again;

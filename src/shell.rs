@@ -161,11 +161,30 @@ pub fn shortcut_target(lnk: &Path) -> Option<PathBuf> {
 
 /// Launch an interactive terminal with the directory passed as process state, never as shell code.
 pub fn terminal(dir: &Path) -> std::io::Result<()> {
+    use crate::prefs::Terminal;
     use std::os::windows::process::CommandExt;
-    let system = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-    let executable = PathBuf::from(system).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-    std::process::Command::new(executable)
-        .arg("-NoExit")
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()));
+    // The terminal chosen in Settings; Windows Terminal and PowerShell 7 come from PATH.
+    let mut command = match crate::prefs::get().terminal {
+        Terminal::WindowsPowerShell => {
+            let mut c =
+                std::process::Command::new(system.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"));
+            c.arg("-NoExit");
+            c
+        }
+        Terminal::PowerShell7 => {
+            let mut c = std::process::Command::new("pwsh.exe");
+            c.arg("-NoExit");
+            c
+        }
+        Terminal::WindowsTerminal => {
+            let mut c = std::process::Command::new("wt.exe");
+            c.arg("-d").arg(dir);
+            c
+        }
+        Terminal::CommandPrompt => std::process::Command::new(system.join(r"System32\cmd.exe")),
+    };
+    command
         .current_dir(dir)
         .creation_flags(windows::Win32::System::Threading::CREATE_NEW_CONSOLE.0)
         .spawn()?;

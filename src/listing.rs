@@ -70,6 +70,12 @@ impl Snapshot {
     pub fn is_hidden(&self, i: usize) -> bool {
         self.entries[i].attrs & FILE_ATTRIBUTE_HIDDEN.0 != 0
     }
+
+    /// Protected operating system files, as Explorer calls them: hidden and system both.
+    pub fn is_protected(&self, i: usize) -> bool {
+        let both = FILE_ATTRIBUTE_HIDDEN.0 | windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SYSTEM.0;
+        self.entries[i].attrs & both == both
+    }
 }
 
 /// Entries of `a` (files only) that `b` lacks, or has with another size or modified time.

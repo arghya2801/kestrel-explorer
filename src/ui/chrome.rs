@@ -62,16 +62,19 @@ fn opens_menu(id: usize) -> bool {
 
 /// Icon-only buttons: the label is still the window text, for screen readers.
 fn icon_only(id: usize) -> bool {
-    matches!(
-        id,
-        ID_BACK
-            | ID_FORWARD
-            | ID_UP
-            | breadcrumbs::EDIT
-            | super::tabbar::NEW_TAB
-            | toolbar::TAB_LIST
-            | toolbar::TABS_COLLAPSE
-    )
+    // Settings can drop the toolbar's labels; the tooltips still name each button.
+    let toolbar = super::toolbar::is_toolbar_command(id) && !crate::prefs::get().toolbar_labels;
+    toolbar
+        || matches!(
+            id,
+            ID_BACK
+                | ID_FORWARD
+                | ID_UP
+                | breadcrumbs::EDIT
+                | super::tabbar::NEW_TAB
+                | toolbar::TAB_LIST
+                | toolbar::TABS_COLLAPSE
+        )
 }
 
 thread_local! {
@@ -185,6 +188,9 @@ pub(super) fn button_width(parent: HWND, button: HWND, id: usize) -> i32 {
     let (label, arrow) = measure(parent, |dc| (width_of(dc, &text), width_of(dc, &arrow)));
     let icon = if glyph(id).is_some() { scale(parent, ICON + 8) } else { 0 };
     let arrow = if arrow > 0 { arrow + scale(parent, 6) } else { 0 };
+    if icon_only(id) {
+        return scale(parent, PAD) * 2 + scale(parent, ICON) + arrow;
+    }
     scale(parent, PAD) * 2 + icon + label + arrow
 }
 

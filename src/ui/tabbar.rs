@@ -124,8 +124,14 @@ pub(super) fn hot() -> (Option<usize>, bool) {
 /// Whether tab `i` shows its close button: the active tab, the tab under the mouse, and not in
 /// high contrast, where Windows draws the strip.
 pub(super) fn shows_close(strip: HWND, i: usize) -> bool {
+    use crate::prefs::TabClose;
     let active = unsafe { SendMessageW(strip, TCM_GETCURSEL, None, None) }.0;
-    !crate::theme::high_contrast() && (i as isize == active || hot().0 == Some(i))
+    !crate::theme::high_contrast()
+        && match crate::prefs::get().tab_close {
+            TabClose::ActiveAndHovered => i as isize == active || hot().0 == Some(i),
+            TabClose::Every => true,
+            TabClose::Never => false,
+        }
 }
 
 /// Space right of the strip for the "+" and "all tabs" buttons once the strip fills.
@@ -611,8 +617,15 @@ fn row_close_rect(list: HWND, r: &RECT) -> RECT {
 
 /// Whether row `row` shows its close button: the active tab and the row under the mouse.
 fn row_shows_close(row: usize) -> bool {
+    use crate::prefs::TabClose;
     !crate::theme::high_contrast()
-        && (with_app(|a| a.tabs.active()) == Some(row) || LIST_HOT.with(Cell::get).0 == Some(row))
+        && match crate::prefs::get().tab_close {
+            TabClose::ActiveAndHovered => {
+                with_app(|a| a.tabs.active()) == Some(row) || LIST_HOT.with(Cell::get).0 == Some(row)
+            }
+            TabClose::Every => true,
+            TabClose::Never => false,
+        }
 }
 
 /// The tab list's row at `pt`.
@@ -983,7 +996,7 @@ pub(super) fn new_tab(dir: Option<PathBuf>) {
         super::go(device.clone());
         return;
     }
-    let dir = dir.or_else(|| with_app(|a| a.view.browser.requested_location().map(|l| l.dir)).flatten());
+    let dir = dir.or_else(new_tab_folder);
     let Some(view) = create_view() else { return };
     let Some(index) = insert(view) else { return };
     switch_to(index);
@@ -991,6 +1004,23 @@ pub(super) fn new_tab(dir: Option<PathBuf>) {
         super::go(dir);
     }
     refresh();
+}
+
+/// Where a new tab opens, as chosen in Settings: the current folder, This PC, the user's folder
+/// or Downloads.
+fn new_tab_folder() -> Option<PathBuf> {
+    use crate::prefs::NewTab;
+    let current = || with_app(|a| a.view.browser.requested_location().map(|l| l.dir)).flatten();
+    match crate::prefs::get().new_tab {
+        NewTab::CurrentFolder => current(),
+        NewTab::ThisPc => Some(crate::places::this_pc()),
+        NewTab::UserFolder => std::env::var_os("USERPROFILE").map(PathBuf::from).or_else(current),
+        NewTab::Downloads => crate::places::known_folders()
+            .into_iter()
+            .find(|(name, _)| *name == "Downloads")
+            .map(|(_, path)| path)
+            .or_else(current),
+    }
 }
 
 /// Opens `dir` in a new tab right of the active one and stays on the active tab, as a
@@ -1070,6 +1100,15 @@ pub(super) fn close_tab(index: usize) {
     let Some((active, len, strip)) = with_app(|a| (a.tabs.active(), a.tabs.len(), a.tab_strip)) else {
         return;
     };
+    if len <= 1 && index == 0 && crate::prefs::get().last_tab_closes_window {
+        // Settings: closing the last tab closes the window, as in browsers.
+        if let Some(hwnd) = with_app(|a| a.hwnd) {
+            unsafe {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+        return;
+    }
     if len <= 1 || index >= len {
         return;
     }

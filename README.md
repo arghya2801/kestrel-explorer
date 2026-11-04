@@ -50,9 +50,10 @@ or use **Move left**/**Move right** on its right-click menu, which also has **Re
 **Close other tabs** and **Close tabs to the right**. Middle-click a folder to open it in a tab behind the
 current one. Once the strip fills, the mouse wheel scrolls it and **+** and the all-tabs menu (⌄) wait
 at its right.
-**View > Tabs above the sidebar**, also on a tab's right-click menu, lists the tabs in a column above the
-sidebar instead of along the top, under a "Tabs" heading with its own **+**. Drag the line below the list
-to resize it; each window remembers the height.
+**View > Tabs > Tabs on the left**, also on a tab's right-click menu or **Settings > Tabs**, moves the tabs
+into a full-height column at the window's left edge, with the sidebar right of it. Drag the column's edge to
+resize it; the **<** button collapses it to lettered badges (hover one for its name) and **>** widens it again.
+Each window remembers the width and whether it's collapsed.
 
 **Quick access** starts with your Desktop, Downloads, Documents, Pictures, Music and Videos. Right-click a
 folder in the list or the sidebar to **Pin to Quick access** or **Unpin from Quick access**; the standard
@@ -60,14 +61,21 @@ folders can be unpinned too. Hover a sidebar item for its full path.
 
 With 7-Zip installed, the file list's right-click menu has a **7-Zip** submenu: open, extract, test
 and create archives as 7-Zip's own menu does. 7-Zip shows its progress and errors; Undo doesn't cover them. Click **This PC** in the sidebar
-(or type it in the address bar) for a page of drives with their free space and size; **Up** from a drive's
-root goes there. Connected phones and other devices without drive letters also appear in This PC
+(or type it in the address bar) for Explorer's drive page: tiles under **Devices and drives** and **Network
+locations**, each with a bar for the space used (red when almost full) and "X free of Y". **Up** from a
+drive's root goes there. Connected phones and other devices without drive letters also appear in This PC
 and the sidebar. Opening one uses Windows' device browser for browsing and file transfers.
 
-**View** offers Details, four thumbnail sizes, sorting, hidden items and preview visibility.
-Each folder remembers the sort you choose in it (a column header or **View**); folders you haven't
-sorted use the default sort from **Settings > File list**. So Downloads can stay newest-first while
+**Sort** picks the sort key (name, dates, type, size), ascending or descending, and **Group by**. **View**
+has the layout (Details or four thumbnail sizes), then **Show** (hidden items, preview pane, folder sizes),
+**Panes** and **Tabs**. Every menu item names its shortcut, and the toolbar's tooltips do too. On a narrow
+window, Sort and View move into **More**.
+Each folder remembers the sort you choose in it (a column header or **Sort**); folders you haven't
+sorted use the default sort from **Settings > Files**. So Downloads can stay newest-first while
 everything else is alphabetical.
+
+To find any command or its keys, press **Ctrl+Shift+P** (or **Help > Find a command or shortcut**) and type a
+name or a key, such as "split" or "ctrl+w". Enter runs the highlighted command.
 **View > Group by date** sorts the folder into Explorer's date groups (Today, Yesterday, Earlier this
 week, Last week…), keeping the chosen sort inside each group; each folder remembers it, so Downloads
 can stay grouped while other folders don't. **View > Show in sidebar** (**Ctrl+Shift+E**) expands the
@@ -82,19 +90,20 @@ The terminal command opens Windows PowerShell in the active folder.
 File operations shows running jobs and recent results for this process; Windows supplies progress
 and cancellation dialogs.
 
-**Settings** has four pages:
+**Settings** has seven pages:
 
 | Page | Controls |
 |---|---|
-| Appearance | Theme, sidebar width, preview visibility/width, split layout and pane ratio |
-| File list | Details/grid, hidden items, the default sort and the four main column widths |
+| Appearance | Theme, accent color, text size, row spacing, toolbar labels, status bar, full path in the title, preview pane, sidebar and preview widths |
+| Files | File name extensions, hidden items, protected system files, folders before files, single-click opening, double-click empty space to go up, asking before recycling, size units, date style, default sort and view |
+| Tabs | Tabs along the top or on the left, where new tabs open, which tabs show a close button, what closing the last tab does, two panes and their split |
+| Sidebar | Quick access and Network sections, expanding to the open folder |
 | Startup | Startup folder, session restoration and an optional "Open in Kestrel" folder-menu entry |
-| Window | Saved position, size and maximized state |
+| Window | Saved position, size and maximized state, and the four main column widths |
+| Keyboard | The terminal Open terminal here starts, and your own keys for any command |
 
 Apply saves changes, OK applies and closes, and Cancel discards edits made since the last Apply.
-Restore defaults resets preferences. Theme and pins apply across open windows; view and layout
-changes apply to the current view/window. Unsupported preferences such as font size and plugins are not offered;
-key bindings live in keys.txt (below).
+Restore defaults resets the form. Changes apply at once, in every open window.
 
 Settings and logs live in %LOCALAPPDATA%\Kestrel. For portable use, put an empty file named `portable`
 beside kestrel.exe; data then goes to a KestrelData folder there. Settings from the old FileExplorerPro
@@ -123,6 +132,7 @@ Press **F1**, or choose **Help > Keyboard shortcuts**, for the in-app guide.
 | Ctrl+Z / Ctrl+Y | Undo / redo the last file operation |
 | Ctrl+Shift+N / Ctrl+Shift+C | New folder / copy paths |
 | Ctrl+A | Select all |
+| Ctrl+Shift+P | Find a command or its shortcut |
 | Ctrl+T / Ctrl+W | New tab / close tab |
 | Ctrl+Shift+T | Reopen the last closed tab (up to 10) |
 | Ctrl+Shift+K | Duplicate the active tab, both panes included |
@@ -147,12 +157,14 @@ Text boxes keep their normal editing shortcuts.
 
 ### Your own keys
 
-Put a `keys.txt` beside settings.txt (in %LOCALAPPDATA%\Kestrel) with one binding per line, then restart:
+**Settings > Keyboard** lists every command with its keys: choose one, press new keys in the box below and
+click **Assign**. Apply saves them to `keys.txt` (beside settings.txt in %LOCALAPPDATA%\Kestrel), and they work
+at once. You can also edit `keys.txt` by hand, one binding per line, and restart:
 
 ~~~text
 # keys = command
 Ctrl+E = show-in-explorer
-Ctrl+Shift+P = properties
+Ctrl+Shift+I = properties
 F9 = compare-panes
 ~~~
 

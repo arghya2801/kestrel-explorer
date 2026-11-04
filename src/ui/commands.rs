@@ -528,7 +528,14 @@ pub(super) fn end_rename(lp: LPARAM) -> LRESULT {
     if item.pszText.is_null() {
         return LRESULT(0); // cancelled
     }
-    let text = unsafe { item.pszText.to_string() }.unwrap_or_default();
+    let mut text = unsafe { item.pszText.to_string() }.unwrap_or_default();
+    // With extensions hidden the box shows the name only; the extension stays, as in Explorer.
+    if !crate::prefs::get().show_extensions
+        && !path.is_dir()
+        && let Some(ext) = path.extension()
+    {
+        text = format!("{text}.{}", ext.to_string_lossy());
+    }
     match ops::validate_name(&text) {
         Err(e) => set_status(&e),
         Ok(name) if path.file_name().is_some_and(|n| n.to_string_lossy() == name) => {}

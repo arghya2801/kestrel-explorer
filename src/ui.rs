@@ -281,6 +281,10 @@ struct App {
     tabs_collapsed: bool,
     /// The window font, and the bold copy made from it for the active vertical tab.
     tab_bold: Option<(HFONT, HFONT)>,
+    /// The preferences this window last applied; Settings or another window can change them.
+    applied_prefs: crate::prefs::Prefs,
+    /// The folder the sidebar last followed to, with Settings' "follow the open folder".
+    followed: Option<PathBuf>,
     /// Recently closed tabs, newest last, for Ctrl+Shift+T.
     closed_tabs: Vec<crate::settings::SavedTab>,
     next_tab_id: u64,
@@ -453,6 +457,7 @@ unsafe fn child(
 }
 
 pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
+    crate::prefs::init(settings.prefs);
     unsafe {
         let hinstance = GetModuleHandleW(None)?.into();
         let wc = WNDCLASSEXW {
@@ -612,6 +617,8 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 tabs_collapsed: settings.tabs_collapsed,
                 tab_bold: None,
                 closed_tabs: Vec::new(),
+                applied_prefs: crate::prefs::get(),
+                followed: None,
                 next_tab_id: 1,
                 theme: settings.theme,
                 palette: Palette::new(false),
@@ -901,6 +908,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
             WM_APP_PREFERENCES => {
+                apply_prefs(hwnd);
                 if let Some((pins, unpinned)) = crate::session::pins() {
                     let changed = with_app(|a| {
                         let changed = a.pins != pins || a.unpinned != unpinned;
@@ -1252,6 +1260,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
         hdr.code,
         NM_SETFOCUS
             | NM_CLICK
+            | NM_DBLCLK
             | LVN_COLUMNCLICK
             | LVN_ITEMACTIVATE
             | LVN_BEGINDRAG
@@ -1304,6 +1313,12 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
             }
             LVN_BEGINLABELEDITW => Some(commands::begin_rename(lp)),
             LVN_ENDLABELEDITW => Some(commands::end_rename(lp)),
+            NM_DBLCLK
+                if (*(lp.0 as *const NMITEMACTIVATE)).iItem < 0 && crate::prefs::get().up_on_double_click =>
+            {
+                run(Browser::up);
+                Some(LRESULT(0))
+            }
             LVN_ITEMACTIVATE => {
                 let row = (*(lp.0 as *const NMITEMACTIVATE)).iItem;
                 let target =
@@ -1342,6 +1357,9 @@ fn fill(v: &mut panes::FolderView, item: &mut LVITEMW) {
     }
     let wide = |t: String| t.encode_utf16().collect::<Vec<_>>();
     match COLUMNS.get(item.iSubItem as usize).map(|c| c.2) {
+        Some(SortKey::Name) if drive.is_none() && !s.is_dir(i) && !crate::prefs::get().show_extensions => {
+            write(item, crate::format::without_extension(s.name(i)))
+        }
         Some(SortKey::Name) => write(item, s.name(i)),
         Some(SortKey::Modified) => write(item, &wide(format::time(s.entries[i].modified))),
         Some(SortKey::Type) if drive.is_some() => write(item, &wide(drive.unwrap().detail.clone())),
@@ -2298,7 +2316,14 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool, focus: Option<&[u16
 fn update_chrome() {
     let Some((hwnd, buttons, enabled, title, filter, filter_text)) = with_app(|a| {
         let b = &a.view.browser;
-        let dir = b.dir().map(|d| d.display().to_string()).unwrap_or_default();
+        let full = crate::prefs::get().full_path_title;
+        let dir = b
+            .dir()
+            .map(|d| match d.file_name() {
+                Some(name) if !full => name.to_string_lossy().into_owned(),
+                _ => d.display().to_string(),
+            })
+            .unwrap_or_default();
         let title = match b.query() {
             Some(q) => format!("\"{q}\" in {dir}"),
             None => dir,
@@ -2323,6 +2348,18 @@ fn update_chrome() {
     }
     toolbar::update();
     panes::update_labels();
+    // Settings: the sidebar follows each folder opened.
+    let follow = with_app(|a| {
+        let dir = a.view.browser.dir().map(PathBuf::from);
+        let new = crate::prefs::get().sidebar_follows && dir.is_some() && a.followed != dir;
+        if new {
+            a.followed = dir;
+        }
+        new
+    });
+    if follow == Some(true) {
+        tree::reveal();
+    }
     // A folder can bring its own sort; the header arrow follows.
     update_sort_arrows();
     tree::sync();
@@ -2610,7 +2647,11 @@ fn layout(hwnd: HWND) {
         let _ = MoveWindow(strip, 0, scale(hwnd, toolbar::BOTTOM), strip_width, tab_height(hwnd), true);
         tabbar::place_buttons();
         let top = content_top(hwnd);
-        let h = (client.bottom - (sr.bottom - sr.top) - top).max(0);
+        // Settings can hide the status bar.
+        let status_bar = crate::prefs::get().status_bar;
+        let _ = ShowWindow(status, if status_bar { SW_SHOWNA } else { SW_HIDE });
+        let status_h = if status_bar { sr.bottom - sr.top } else { 0 };
+        let h = (client.bottom - status_h - top).max(0);
         let gap = splitter_width(hwnd);
         // Vertical tabs: a full-height column at the far left, with the sidebar right of it.
         let vertical = with_app(|a| a.vertical_tabs.then_some(a.tab_list)).flatten();
@@ -2787,6 +2828,8 @@ fn message_font(hwnd: HWND) -> HFONT {
             0,
             GetDpiForWindow(hwnd),
         );
+        let size = crate::prefs::get().text_size.min(crate::prefs::TEXT_SIZES.len() - 1);
+        ncm.lfMessageFont.lfHeight = ncm.lfMessageFont.lfHeight * crate::prefs::TEXT_SIZES[size].1 / 100;
         CreateFontIndirectW(&ncm.lfMessageFont)
     }
 }
@@ -2797,7 +2840,54 @@ fn set_font(controls: &[HWND], font: HFONT) {
     }
 }
 
+/// Brings this window up to date with the process's preferences after Settings changed them:
+/// list behavior, sorting and filtering, text size, colors, the sidebar, toolbar and tabs.
+fn apply_prefs(hwnd: HWND) {
+    let new = crate::prefs::get();
+    let Some((old, theme)) = with_app(|a| (std::mem::replace(&mut a.applied_prefs, new), a.theme)) else {
+        return;
+    };
+    if old == new {
+        return;
+    }
+    let views = with_app(|a| a.views().map(|v| (v.id, v.list)).collect::<Vec<_>>()).unwrap_or_default();
+    for (id, list) in views {
+        panes::apply_prefs(list);
+        if let Some(job) = with_view(id, |v| v.browser.resort_job()).flatten() {
+            spawn_sort(job);
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(list), None, true);
+        }
+    }
+    if old.text_size != new.text_size {
+        let font = message_font(hwnd);
+        if let Some((old_font, controls)) = with_app(|a| (std::mem::replace(&mut a.font, font), a.controls()))
+        {
+            set_font(&controls, font);
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(old_font.0));
+            }
+        }
+    }
+    if (old.sidebar_quick_access, old.sidebar_network) != (new.sidebar_quick_access, new.sidebar_network) {
+        tree::reload();
+    }
+    dark::apply(hwnd, Palette::new(theme.is_dark(system_prefers_dark())));
+    tabbar::refresh();
+    layout(hwnd);
+    update_chrome();
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), None, true);
+    }
+}
+
 fn apply_settings(hwnd: HWND, settings: Settings) {
+    crate::prefs::set(settings.prefs);
+    apply_prefs(hwnd);
+    if with_app(|a| a.vertical_tabs) != Some(settings.vertical_tabs) {
+        tabbar::set_vertical(settings.vertical_tabs);
+    }
     let Some((list, job)) = with_app(|a| {
         a.theme = settings.theme;
         a.restore_session = settings.restore_session;
