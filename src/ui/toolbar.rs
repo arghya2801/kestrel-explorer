@@ -42,6 +42,15 @@ pub const GROUP: usize = 235;
 pub const SWAP_PANES: usize = 236;
 pub const MIRROR_PANE: usize = 237;
 pub const VERTICAL_TABS: usize = 238;
+// 240 is the "+" (new tab) button.
+/// The tab strip's list of every tab, by the "+" button.
+pub const TAB_LIST: usize = 241;
+/// Tab commands; each acts on the active tab.
+pub const REOPEN_TAB: usize = 242;
+pub const CLOSE_OTHER_TABS: usize = 243;
+pub const CLOSE_TABS_AFTER: usize = 244;
+pub const MOVE_TAB_BACK: usize = 245;
+pub const MOVE_TAB_FORWARD: usize = 246;
 const RELEASES: &str = "https://github.com/arghya2801/kestrel-explorer/releases/latest";
 
 /// Logical y where the toolbar row ends and the tab strip starts.

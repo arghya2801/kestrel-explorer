@@ -91,6 +91,11 @@ const COMMAND_NAMES: &[(&str, usize)] = &[
     ("swap-panes", toolbar::SWAP_PANES),
     ("mirror-pane", toolbar::MIRROR_PANE),
     ("vertical-tabs", toolbar::VERTICAL_TABS),
+    ("reopen-closed-tab", toolbar::REOPEN_TAB),
+    ("close-other-tabs", toolbar::CLOSE_OTHER_TABS),
+    ("close-tabs-to-the-right", toolbar::CLOSE_TABS_AFTER),
+    ("move-tab-left", toolbar::MOVE_TAB_BACK),
+    ("move-tab-right", toolbar::MOVE_TAB_FORWARD),
     ("refresh", toolbar::REFRESH),
     ("hidden-items", toolbar::HIDDEN),
     ("preview", toolbar::PREVIEW),
@@ -251,6 +256,8 @@ struct App {
     /// The tabs listed above the sidebar, shown instead of the strip with `vertical_tabs`.
     tab_list: HWND,
     vertical_tabs: bool,
+    /// Recently closed tabs, newest last, for Ctrl+Shift+T.
+    closed_tabs: Vec<crate::settings::SavedTab>,
     next_tab_id: u64,
     theme: ThemeChoice,
     palette: Palette,
@@ -544,6 +551,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 tab_strip,
                 tab_list,
                 vertical_tabs: false,
+                closed_tabs: Vec::new(),
                 next_tab_id: 1,
                 theme: settings.theme,
                 palette: Palette::new(false),
@@ -631,15 +639,37 @@ pub fn translate(msg: &MSG) -> bool {
         unsafe { SendMessageW(msg.hwnd, LVM_SCROLL, Some(WPARAM(-delta as usize)), Some(LPARAM(0))) };
         return true;
     }
+    // Middle-click on a folder opens it in a new tab behind this one, as on a browser link.
+    if msg.message == WM_MBUTTONUP
+        && let Some(dir) = crash::guard(|| folder_at(msg.hwnd, msg.lParam)).flatten()
+    {
+        tabbar::open_in_background(dir);
+        return true;
+    }
     if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
         return false;
     }
     crash::guard(|| on_key(msg)).unwrap_or(false)
 }
 
+/// The folder in file list `list` at client point `lp`, if a folder is there.
+fn folder_at(list: HWND, lp: LPARAM) -> Option<PathBuf> {
+    let view = with_app(|a| a.views().find(|v| v.list == list).map(|v| v.id)).flatten()?;
+    let pt = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
+    let mut hit = LVHITTESTINFO { pt, ..Default::default() };
+    let row = unsafe { SendMessageW(list, LVM_HITTEST, None, Some(LPARAM(&mut hit as *mut _ as isize))) }.0;
+    let row = usize::try_from(row).ok()?;
+    match with_view(view, |v| v.browser.path_at(row)).flatten()? {
+        (dir, true) => Some(dir),
+        _ => None,
+    }
+}
+
 fn on_key(msg: &MSG) -> bool {
     panes::activate(msg.hwnd);
-    let Some((list, address, tree, filter)) = with_app(|a| (a.view.list, a.address, a.tree, a.filter)) else {
+    let Some((list, address, tree, filter, strip, tab_list)) =
+        with_app(|a| (a.view.list, a.address, a.tree, a.filter, a.tab_strip, a.tab_list))
+    else {
         return false;
     };
     if msg.message == WM_KEYDOWN && msg.wParam.0 == VK_F1.0 as usize {
@@ -648,7 +678,7 @@ fn on_key(msg: &MSG) -> bool {
         }
         return true;
     }
-    if ![list, address, tree, filter].contains(&msg.hwnd)
+    if ![list, address, tree, filter, strip, tab_list].contains(&msg.hwnd)
         && !toolbar::owns(msg.hwnd)
         && !breadcrumbs::owns(msg.hwnd)
         && with_app(|a| a.address_edit_button) != Some(msg.hwnd)
@@ -671,6 +701,11 @@ fn on_key(msg: &MSG) -> bool {
     {
         unsafe { SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(binding.command)), Some(LPARAM(0))) };
         return true;
+    }
+    if (msg.hwnd == strip || msg.hwnd == tab_list)
+        && let Some(done) = tabbar::on_key(msg.hwnd, key, shift)
+    {
+        return done;
     }
     if msg.message == WM_SYSKEYDOWN {
         match key {
@@ -757,14 +792,18 @@ fn on_key(msg: &MSG) -> bool {
             }
         }
         VK_ESCAPE => cancel_loading(),
+        VK_T if ctrl && shift => tabbar::reopen(),
         VK_T if ctrl => tabbar::new_tab(None),
+        k if ctrl && !shift && (VK_1.0..=VK_9.0).contains(&k.0) => {
+            tabbar::select_number((k.0 - VK_1.0 + 1) as usize)
+        }
         VK_E if ctrl && shift => tree::reveal(),
         VK_K if ctrl && shift => tabbar::duplicate(with_app(|a| a.tabs.active()).unwrap_or(0)),
         VK_N if ctrl && !shift => open_side_by_side(with_app(|a| a.hwnd).unwrap_or_default()),
         VK_W if ctrl => tabbar::close_active(),
         VK_TAB if ctrl => tabbar::cycle(shift_held()),
         VK_TAB => unsafe {
-            // Focus order: address bar, sidebar, list.
+            // Focus order: address bar, filter, toolbar, tabs, sidebar, list.
             let mut order = vec![address, filter];
             order.extend(
                 with_app(|a| a.toolbar.clone())
@@ -772,6 +811,7 @@ fn on_key(msg: &MSG) -> bool {
                     .into_iter()
                     .filter(|&h| IsWindowVisible(h).as_bool() && IsWindowEnabled(h).as_bool()),
             );
+            order.push(if with_app(|a| a.vertical_tabs) == Some(true) { tab_list } else { strip });
             order.extend([tree, list]);
             if let Some(other) =
                 with_app(|a| a.split_view.then(|| a.other.as_ref().map(|v| v.list)).flatten()).flatten()

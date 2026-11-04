@@ -147,16 +147,29 @@ fn label_of(strip: HWND, index: usize) -> String {
     String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)])
 }
 
-/// Each tab includes its parent folder; deeper collisions add ancestors. The tooltip is the full path.
+/// The folder a view shows, or is on its way to.
+fn shown_dir(view: &panes::FolderView) -> Option<PathBuf> {
+    view.browser.dir().map(PathBuf::from).or_else(|| view.browser.requested_location().map(|l| l.dir))
+}
+
+/// Each tab includes its parent folder; deeper collisions add ancestors. A split tab is named
+/// by its left pane, so clicking between panes doesn't rename it. The tooltip is the full path,
+/// or both panes' paths.
 fn labels() -> Vec<(String, String)> {
     let shown = with_app(|a| {
         (0..a.tabs.len())
             .map(|i| {
-                let view = match a.tabs.items()[i].workspace.as_ref() {
-                    Some(w) => &w.view,
-                    None => &a.view,
+                let (view, other, split, right) = match a.tabs.items()[i].workspace.as_ref() {
+                    Some(w) => (&w.view, w.other.as_ref(), w.split, w.right_active),
+                    None => (&a.view, a.other.as_ref(), a.split_view, a.right_active),
                 };
-                (view.browser.dir().map(PathBuf::from), view.browser.query().map(String::from))
+                let other = other.filter(|_| split);
+                let (left, right) = match other {
+                    Some(o) if right => (o, Some(view)),
+                    Some(o) => (view, Some(o)),
+                    None => (view, None),
+                };
+                (shown_dir(left), left.browser.query().map(String::from), right.and_then(shown_dir))
             })
             .collect::<Vec<_>>()
     })
@@ -165,12 +178,18 @@ fn labels() -> Vec<(String, String)> {
     let mut names = crate::places::tab_names(&folders).into_iter();
     shown
         .into_iter()
-        .map(|(dir, query)| match (dir, query) {
-            (Some(dir), Some(q)) => {
-                (format!("Search: {q}"), format!("Search for \"{q}\" in {}", dir.display()))
+        .map(|(dir, query, right)| {
+            let (label, tip) = match (dir, query) {
+                (Some(dir), Some(q)) => {
+                    (format!("Search: {q}"), format!("Search for \"{q}\" in {}", dir.display()))
+                }
+                (Some(dir), None) => (names.next().unwrap_or_default(), dir.display().to_string()),
+                (None, _) => ("Loading…".into(), String::new()),
+            };
+            match right {
+                Some(right) => (label, format!("{tip}  |  {}", right.display())),
+                None => (label, tip),
             }
-            (Some(dir), None) => (names.next().unwrap_or_default(), dir.display().to_string()),
-            (None, _) => ("Loading…".into(), String::new()),
         })
         .collect()
 }
@@ -244,8 +263,16 @@ pub(super) fn fit_list_column(list: HWND) {
 
 /// Commands the tab list posts to the window. Returns false for ids that aren't ours.
 pub(super) fn execute(id: usize) -> bool {
+    use super::toolbar::*;
+    let (active, len) = with_app(|a| (a.tabs.active(), a.tabs.len())).unwrap_or_default();
     match id {
         NEW_TAB => new_tab(None),
+        REOPEN_TAB => reopen(),
+        CLOSE_OTHER_TABS => close_others(active),
+        CLOSE_TABS_AFTER => close_after(active),
+        MOVE_TAB_BACK if active > 0 => move_tab(active, active - 1),
+        MOVE_TAB_FORWARD if active + 1 < len => move_tab(active, active + 1),
+        MOVE_TAB_BACK | MOVE_TAB_FORWARD => {}
         id if id >= SELECT_TAB && id - SELECT_TAB < with_app(|a| a.tabs.len()).unwrap_or(0) => {
             switch_to(id - SELECT_TAB)
         }
@@ -276,25 +303,31 @@ pub(super) fn tooltip(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
     Some(LRESULT(0))
 }
 
-/// Notifications from the tab list. Choosing a row is posted, so the list isn't changed
-/// while it is still handling the click.
+/// Posts the command for choosing row `row` of the tab list: switching to that tab, or a
+/// new tab from the last row. Posted, so the list isn't changed while it handles the click.
+fn choose_row(row: usize) {
+    let Some((hwnd, count, active)) = with_app(|a| (a.hwnd, a.tabs.len(), a.tabs.active())) else {
+        return;
+    };
+    let id = match row {
+        row if row == active => return,
+        row if row < count => SELECT_TAB + row,
+        _ => NEW_TAB,
+    };
+    unsafe {
+        let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(id), LPARAM(0));
+    }
+}
+
+/// Notifications from the tab list. A click chooses a row; moving the selection with the
+/// arrow keys only moves the cursor, and Enter chooses (see `on_key`).
 pub(super) fn on_list_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
     let (hwnd, count) = with_app(|a| (a.hwnd, a.tabs.len()))?;
     match hdr.code {
-        LVN_ITEMCHANGED => {
-            let nm = unsafe { &*(lp.0 as *const NMLISTVIEW) };
-            let chosen = nm.uChanged.contains(LVIF_STATE)
-                && nm.uNewState & LVIS_SELECTED.0 != 0
-                && nm.uOldState & LVIS_SELECTED.0 == 0;
-            let active = with_app(|a| a.tabs.active());
-            if let Ok(row) = usize::try_from(nm.iItem)
-                && chosen
-                && Some(row) != active
-            {
-                let id = if row < count { SELECT_TAB + row } else { NEW_TAB };
-                unsafe {
-                    let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(id), LPARAM(0));
-                }
+        NM_CLICK => {
+            let nm = unsafe { &*(lp.0 as *const NMITEMACTIVATE) };
+            if let Ok(row) = usize::try_from(nm.iItem) {
+                choose_row(row);
             }
             Some(LRESULT(0))
         }
@@ -349,17 +382,47 @@ unsafe extern "system" fn list_proc(
 
 /// The tab menu, from the strip or the list. `tab` is the tab right-clicked, if any.
 fn menu(owner: HWND, tab: Option<usize>, at: POINT) {
-    let vertical = with_app(|a| a.vertical_tabs).unwrap_or(false);
-    let several = with_app(|a| a.tabs.len()).unwrap_or(1) > 1;
+    let Some((vertical, count, can_reopen)) =
+        with_app(|a| (a.vertical_tabs, a.tabs.len(), !a.closed_tabs.is_empty()))
+    else {
+        return;
+    };
     let on = |yes: bool| if yes { MF_ENABLED } else { MF_GRAYED };
+    let (first, last) = (tab == Some(0), tab.is_some_and(|t| t + 1 >= count));
+    let items: [(u32, &str, bool); 9] = if vertical {
+        [
+            (1, "&New tab\tCtrl+T", true),
+            (3, "&Duplicate tab\tCtrl+Shift+K", tab.is_some()),
+            (5, "&Reopen closed tab\tCtrl+Shift+T", can_reopen),
+            (6, "Move &up", tab.is_some() && !first),
+            (7, "Move do&wn", tab.is_some() && !last),
+            (2, "&Close tab\tCtrl+W", tab.is_some() && count > 1),
+            (8, "Close &other tabs", tab.is_some() && count > 1),
+            (9, "Close tabs &below", tab.is_some() && !last),
+            (4, "Tabs &above the sidebar", true),
+        ]
+    } else {
+        [
+            (1, "&New tab\tCtrl+T", true),
+            (3, "&Duplicate tab\tCtrl+Shift+K", tab.is_some()),
+            (5, "&Reopen closed tab\tCtrl+Shift+T", can_reopen),
+            (6, "Move &left", tab.is_some() && !first),
+            (7, "Move &right", tab.is_some() && !last),
+            (2, "&Close tab\tCtrl+W", tab.is_some() && count > 1),
+            (8, "Close &other tabs", tab.is_some() && count > 1),
+            (9, "Close tabs to the r&ight", tab.is_some() && !last),
+            (4, "Tabs &above the sidebar", true),
+        ]
+    };
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
-        let _ = AppendMenuW(menu, MF_STRING, 1, w!("&New tab\tCtrl+T"));
-        let _ = AppendMenuW(menu, MF_STRING | on(tab.is_some()), 3, w!("&Duplicate tab\tCtrl+Shift+K"));
-        let _ = AppendMenuW(menu, MF_STRING | on(tab.is_some() && several), 2, w!("&Close tab\tCtrl+W"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let check = if vertical { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, MF_STRING | check, 4, w!("Tabs &above the sidebar"));
+        for (i, (id, text, enabled)) in items.into_iter().enumerate() {
+            if matches!(i, 3 | 5 | 8) {
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            }
+            let check = if id == 4 && vertical { MF_CHECKED } else { MF_UNCHECKED };
+            let _ = AppendMenuW(menu, MF_STRING | on(enabled) | check, id as usize, &HSTRING::from(text));
+        }
         let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, None, owner, None).0;
         let _ = DestroyMenu(menu);
         match (cmd, tab) {
@@ -367,16 +430,64 @@ fn menu(owner: HWND, tab: Option<usize>, at: POINT) {
             (2, Some(tab)) => close_tab(tab),
             (3, Some(tab)) => duplicate(tab),
             (4, _) => set_vertical(!vertical),
+            (5, _) => reopen(),
+            (6, Some(tab)) => move_tab(tab, tab - 1),
+            (7, Some(tab)) => move_tab(tab, tab + 1),
+            (8, Some(tab)) => close_others(tab),
+            (9, Some(tab)) => close_after(tab),
             _ => {}
         }
     }
 }
-pub(super) fn new_tab(dir: Option<PathBuf>) {
-    if let Some(device) = dir.as_ref().filter(|p| crate::places::is_shell_device(p)) {
-        super::go(device.clone());
+
+/// Shows the tab menu for the active tab under it, as Shift+F10 or the menu key would.
+fn keyboard_menu(control: HWND) {
+    let Some((hwnd, active, vertical)) = with_app(|a| (a.hwnd, a.tabs.active(), a.vertical_tabs)) else {
         return;
+    };
+    let tab = if vertical { focused_row(control) } else { Some(active) };
+    let mut r = RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
+    let rect = Some(LPARAM(&mut r as *mut _ as isize));
+    unsafe {
+        let at_tab = Some(WPARAM(tab.unwrap_or(active)));
+        SendMessageW(control, if vertical { LVM_GETITEMRECT } else { TCM_GETITEMRECT }, at_tab, rect);
+        let mut at = POINT { x: r.left, y: r.bottom };
+        let _ = windows::Win32::Graphics::Gdi::ClientToScreen(control, &mut at);
+        menu(hwnd, tab.filter(|&t| t < with_app(|a| a.tabs.len()).unwrap_or(0)), at);
     }
-    let Some((hwnd, id, settings, events, font, dir)) = with_app(|a| {
+}
+
+/// The tab list's keyboard cursor.
+fn focused_row(list: HWND) -> Option<usize> {
+    let row = unsafe {
+        SendMessageW(list, LVM_GETNEXTITEM, Some(WPARAM(usize::MAX)), Some(LPARAM(LVNI_FOCUSED as isize)))
+    }
+    .0;
+    usize::try_from(row).ok()
+}
+
+/// Keys pressed while the tab strip or the tab list has the focus. `None`: not a tab key.
+/// The strip's arrow keys stay with the control, which switches tabs as they move.
+pub(super) fn on_key(
+    control: HWND,
+    key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY,
+    shift: bool,
+) -> Option<bool> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+    let list = with_app(|a| a.tab_list)?;
+    let row = if control == list { focused_row(list) } else { with_app(|a| a.tabs.active()) };
+    match key {
+        VK_RETURN | VK_SPACE if control == list => choose_row(row?),
+        VK_DELETE => close_tab(row?),
+        VK_APPS => keyboard_menu(control),
+        VK_F10 if shift => keyboard_menu(control),
+        _ => return None,
+    }
+    Some(true)
+}
+/// Makes a folder view for a new tab, set up like the active one.
+fn create_view() -> Option<panes::FolderView> {
+    let (hwnd, id, settings, events, font) = with_app(|a| {
         let id = a.next_tab_id;
         a.next_tab_id += 1;
         (
@@ -391,52 +502,133 @@ pub(super) fn new_tab(dir: Option<PathBuf>) {
             },
             a.events.clone(),
             a.font,
-            dir.or_else(|| a.view.browser.requested_location().map(|l| l.dir)),
         )
-    }) else {
-        return;
-    };
-    let view = match unsafe { panes::create(hwnd, &settings, id, events, font) } {
-        Ok(v) => v,
-        Err(e) => return super::set_status(&format!("Couldn't create tab: {e}")),
-    };
-    let Some((strip, index)) = with_app(|a| {
+    })?;
+    match unsafe { panes::create(hwnd, &settings, id, events, font) } {
+        Ok(v) => Some(v),
+        Err(e) => {
+            super::set_status(&format!("Couldn't create tab: {e}"));
+            None
+        }
+    }
+}
+
+/// Inserts a tab for `view` right of the active one, without switching to it. Returns its index.
+fn insert(view: panes::FolderView) -> Option<usize> {
+    let (strip, index) = with_app(|a| {
         let from = a.tabs.active();
         let index = a.tabs.open(TabSlot {
             workspace: Some(Workspace { view, other: None, split: false, right_active: false, ratio: 500 }),
         });
         a.tabs.select(from);
         (a.tab_strip, index)
-    }) else {
+    })?;
+    insert_label(strip, index, "");
+    Some(index)
+}
+
+pub(super) fn new_tab(dir: Option<PathBuf>) {
+    if let Some(device) = dir.as_ref().filter(|p| crate::places::is_shell_device(p)) {
+        super::go(device.clone());
         return;
-    };
-    insert_label(strip, index, "Loading…");
+    }
+    let dir = dir.or_else(|| with_app(|a| a.view.browser.requested_location().map(|l| l.dir)).flatten());
+    let Some(view) = create_view() else { return };
+    let Some(index) = insert(view) else { return };
     switch_to(index);
-    refresh();
     if let Some(dir) = dir {
         super::go(dir);
     }
+    refresh();
 }
-/// Opens a new tab on the folder that tab `index` shows.
-pub(super) fn duplicate(index: usize) {
-    let dir = with_app(|a| {
-        let view = match a.tabs.items().get(index)?.workspace.as_ref() {
-            Some(w) => &w.view,
-            None => &a.view,
-        };
-        view.browser.requested_location().map(|l| l.dir)
-    })
-    .flatten();
-    if let Some(dir) = dir {
-        new_tab(Some(dir));
+
+/// Opens `dir` in a new tab right of the active one and stays on the active tab, as a
+/// middle-click on a link does in a browser.
+pub(super) fn open_in_background(dir: PathBuf) {
+    if crate::places::is_shell_device(&dir) {
+        return super::go(dir);
+    }
+    let Some(mut view) = create_view() else { return };
+    let job = view.browser.go(dir);
+    if insert(view).is_some() {
+        super::spawn_list(job);
+        refresh();
     }
 }
+
+/// Tab `index` as the session saves it: its folders and split.
+fn saved_tab(index: usize) -> Option<crate::settings::SavedTab> {
+    with_app(|a| {
+        let (view, other, split, right_active, ratio) = match &a.tabs.items().get(index)?.workspace {
+            Some(w) => (&w.view, w.other.as_ref(), w.split, w.right_active, w.ratio),
+            None => (&a.view, a.other.as_ref(), a.split_view, a.right_active, a.pane_ratio),
+        };
+        Some(crate::settings::SavedTab {
+            folder: view.browser.requested_location().map(|l| l.dir).unwrap_or_default(),
+            other: other.and_then(|v| v.browser.requested_location().map(|l| l.dir)),
+            split,
+            right_active,
+            ratio,
+        })
+    })
+    .flatten()
+}
+
+/// Gives the active tab `tab`'s second pane and split. Its first folder is already open.
+fn apply_split(tab: &crate::settings::SavedTab) {
+    if let Some(dir) = &tab.other {
+        if with_app(|a| a.other.is_none()) == Some(true) {
+            panes::toggle();
+        }
+        if let Some(job) = with_app(|a| a.other.as_mut().map(|v| v.browser.go(dir.clone()))).flatten() {
+            super::spawn_list(job);
+        }
+    }
+    with_app(|a| {
+        a.split_view = tab.split && a.other.is_some();
+        a.right_active = tab.right_active;
+        a.pane_ratio = tab.ratio;
+    });
+}
+
+/// Opens `tab` (folders and split) in a new tab and switches to it.
+fn open_saved(tab: &crate::settings::SavedTab) {
+    if tab.folder.as_os_str().is_empty() {
+        return;
+    }
+    new_tab(Some(tab.folder.clone()));
+    apply_split(tab);
+    if let Some(hwnd) = with_app(|a| a.hwnd) {
+        super::layout(hwnd);
+    }
+    super::update_chrome();
+    refresh();
+}
+
+/// Opens a new tab with the same folders and split as tab `index`.
+pub(super) fn duplicate(index: usize) {
+    if let Some(tab) = saved_tab(index) {
+        open_saved(&tab);
+    }
+}
+
+/// How many closed tabs Ctrl+Shift+T can bring back.
+const CLOSED_KEPT: usize = 10;
+
 pub(super) fn close_tab(index: usize) {
     let Some((active, len, strip)) = with_app(|a| (a.tabs.active(), a.tabs.len(), a.tab_strip)) else {
         return;
     };
     if len <= 1 || index >= len {
         return;
+    }
+    if let Some(saved) = saved_tab(index) {
+        with_app(|a| {
+            a.closed_tabs.push(saved);
+            if a.closed_tabs.len() > CLOSED_KEPT {
+                a.closed_tabs.remove(0);
+            }
+        });
     }
     if index == active {
         switch_to(if index + 1 < len { index + 1 } else { index - 1 });
@@ -453,6 +645,47 @@ pub(super) fn close_tab(index: usize) {
 pub(super) fn close_active() {
     if let Some(i) = with_app(|a| a.tabs.active()) {
         close_tab(i);
+    }
+}
+/// Brings back the most recently closed tab (Ctrl+Shift+T).
+pub(super) fn reopen() {
+    if let Some(tab) = with_app(|a| a.closed_tabs.pop()).flatten() {
+        open_saved(&tab);
+    }
+}
+/// Closes every tab but `keep`.
+pub(super) fn close_others(keep: usize) {
+    close_after(keep);
+    for i in (0..keep).rev() {
+        close_tab(i);
+    }
+}
+/// Closes the tabs right of (or below) `index`.
+pub(super) fn close_after(index: usize) {
+    let len = with_app(|a| a.tabs.len()).unwrap_or(0);
+    for i in (index + 1..len).rev() {
+        close_tab(i);
+    }
+}
+/// Moves tab `from` to position `to`.
+pub(super) fn move_tab(from: usize, to: usize) {
+    let Some((strip, active)) = with_app(|a| {
+        a.tabs.move_item(from, to);
+        (a.tab_strip, a.tabs.active())
+    }) else {
+        return;
+    };
+    unsafe {
+        SendMessageW(strip, TCM_SETCURSEL, Some(WPARAM(active)), None);
+    }
+    refresh();
+}
+/// Ctrl+1 to Ctrl+8 pick that tab; Ctrl+9 the last, as in browsers.
+pub(super) fn select_number(n: usize) {
+    let len = with_app(|a| a.tabs.len()).unwrap_or(0);
+    let to = if n == 9 { len.saturating_sub(1) } else { n - 1 };
+    if to < len {
+        switch_to(to);
     }
 }
 pub(super) fn cycle(back: bool) {
@@ -518,8 +751,11 @@ pub(super) fn switch_to(to: usize) {
     }
     super::update_sort_arrows();
     super::update_chrome();
+    // Arrowing along a focused tab strip keeps the focus there.
     unsafe {
-        let _ = SetFocus(Some(list));
+        if windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() != strip {
+            let _ = SetFocus(Some(list));
+        }
     }
 }
 
@@ -598,28 +834,8 @@ pub(super) fn on_notify(hdr: &NMHDR) -> Option<LRESULT> {
 }
 
 pub(super) fn saved() -> (Vec<crate::settings::SavedTab>, usize) {
-    with_app(|a| {
-        let tabs = a
-            .tabs
-            .items()
-            .iter()
-            .map(|t| {
-                let (view, other, split, right_active, ratio) = match &t.workspace {
-                    Some(w) => (&w.view, w.other.as_ref(), w.split, w.right_active, w.ratio),
-                    None => (&a.view, a.other.as_ref(), a.split_view, a.right_active, a.pane_ratio),
-                };
-                crate::settings::SavedTab {
-                    folder: view.browser.requested_location().map(|l| l.dir).unwrap_or_default(),
-                    other: other.and_then(|v| v.browser.requested_location().map(|l| l.dir)),
-                    split,
-                    right_active,
-                    ratio,
-                }
-            })
-            .collect();
-        (tabs, a.tabs.active())
-    })
-    .unwrap_or_default()
+    let len = with_app(|a| a.tabs.len()).unwrap_or(0);
+    ((0..len).filter_map(saved_tab).collect(), with_app(|a| a.tabs.active()).unwrap_or(0))
 }
 pub(super) fn restore(settings: &Settings) {
     for (i, tab) in settings.tabs.iter().enumerate() {
@@ -628,19 +844,7 @@ pub(super) fn restore(settings: &Settings) {
         } else {
             super::go(tab.folder.clone());
         }
-        if let Some(dir) = &tab.other {
-            if with_app(|a| a.other.is_none()) == Some(true) {
-                panes::toggle();
-            }
-            if let Some(job) = with_app(|a| a.other.as_mut().map(|v| v.browser.go(dir.clone()))).flatten() {
-                super::spawn_list(job);
-            }
-        }
-        with_app(|a| {
-            a.split_view = tab.split && a.other.is_some();
-            a.right_active = tab.right_active;
-            a.pane_ratio = tab.ratio;
-        });
+        apply_split(tab);
     }
     switch_to(settings.active_tab.min(settings.tabs.len().saturating_sub(1)));
     if let Some(hwnd) = with_app(|a| a.hwnd) {

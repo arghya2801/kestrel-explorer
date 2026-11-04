@@ -65,6 +65,25 @@ impl<T> Tabs<T> {
         }
     }
 
+    /// Moves tab `from` to position `to`; the same tab stays active.
+    pub fn move_item(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.items.len() || to >= self.items.len() {
+            return;
+        }
+        let item = self.items.remove(from);
+        self.items.insert(to, item);
+        let a = self.active;
+        self.active = if a == from {
+            to
+        } else if from < a && a <= to {
+            a - 1
+        } else if to <= a && a < from {
+            a + 1
+        } else {
+            a
+        };
+    }
+
     /// The tab after the active one, wrapping around.
     pub fn next_index(&self) -> usize {
         (self.active + 1) % self.items.len()
@@ -129,6 +148,21 @@ mod tests {
         assert_eq!((t.next_index(), t.prev_index()), (1, 2));
         t.select(99); // out of range: ignored
         assert_eq!(t.active(), 0);
+    }
+
+    #[test]
+    fn moving_a_tab_keeps_the_same_tab_active() {
+        let mut t = tabs(&["a", "b", "c", "d"], 1);
+        t.move_item(1, 3);
+        assert_eq!((t.items(), t.items()[t.active()]), (&["a", "c", "d", "b"][..], "b"));
+        t.move_item(0, 2); // another tab passes the active one
+        assert_eq!((t.items(), t.items()[t.active()]), (&["c", "d", "a", "b"][..], "b"));
+        t.move_item(3, 0);
+        assert_eq!((t.items(), t.active()), (&["b", "c", "d", "a"][..], 0));
+        t.move_item(1, 3); // behind the active one: it stays put
+        assert_eq!((t.items(), t.active()), (&["b", "d", "a", "c"][..], 0));
+        t.move_item(0, 9); // out of range: ignored
+        assert_eq!(t.items(), ["b", "d", "a", "c"]);
     }
 
     #[test]

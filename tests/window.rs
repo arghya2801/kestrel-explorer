@@ -497,13 +497,14 @@ fn dragging_the_splitter_resizes_the_sidebar() {
 }
 
 #[test]
-fn tab_cycles_address_filter_sidebar_list() {
+fn tab_cycles_address_filter_tabs_sidebar_list() {
     let _desktop = desktop();
     let t = TempDir::new("tab");
     let hwnd = open(&t.0);
     let edit = find(hwnd, w!("Edit"));
     let filter = unsafe { FindWindowExW(Some(hwnd), Some(edit), w!("Edit"), None) }.unwrap();
-    let order = [edit, filter, tree_of(hwnd), list_of(hwnd)];
+    let strip = find(hwnd, w!("SysTabControl32"));
+    let order = [edit, filter, strip, tree_of(hwnd), list_of(hwnd)];
     for i in 0..order.len() {
         // Something else on the desktop can take activation away for a moment, leaving
         // nothing focused. Retry then; focus landing on the wrong control fails at once.
@@ -1132,6 +1133,11 @@ fn ctrl_key(to: HWND, vk: VIRTUAL_KEY, shift: bool) {
         keys[VK_SHIFT.0 as usize] = 0;
         SetKeyboardState(&keys).unwrap();
     }
+}
+
+/// Sends the NM_CLICK a ListView sends its parent when row `row` is clicked.
+fn click_row(main: HWND, list: HWND, row: i32) {
+    notify(main, NMITEMACTIVATE { hdr: hdr(list, NM_CLICK), iItem: row, ..Default::default() });
 }
 
 fn tab_labels(main: HWND) -> Vec<String> {
@@ -2138,13 +2144,125 @@ fn vertical_tabs_list_the_tabs_above_the_sidebar() {
         r
     };
     assert!(rect(tree_of(hwnd)).top >= rect(tabs).bottom);
-    // Choosing a row switches tabs; the last row opens a new one.
+    // Moving the selection (as the arrow keys do) only moves the cursor; it never switches or
+    // opens a tab. Clicking a row, or Enter, switches.
     select_row(tabs, 0);
-    assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()).is_empty() && ui_dir(hwnd).ends_with("one")));
-    select_row(tabs, 2);
-    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 3 && rows(tabs).len() == 4));
+    pump_until(Duration::from_millis(200), || false);
+    assert!(ui_dir(hwnd).ends_with("two") && tab_labels(hwnd).len() == 2);
+    key(tabs, VK_RETURN);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("one")), "{}", ui_dir(hwnd));
+    click_row(hwnd, tabs, 1);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("two")), "{}", ui_dir(hwnd));
+    // Shortcuts still work while the tab list has the focus.
+    ctrl_key(tabs, VK_W, false);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 1 && ui_dir(hwnd).ends_with("one")));
     close(hwnd);
     assert!(ui::take_final_settings().unwrap().vertical_tabs);
+}
+
+#[test]
+fn closed_tabs_reopen_and_tabs_move_jump_and_close_in_bulk() {
+    let t = TempDir::new("tab-commands");
+    for name in ["a", "b", "c"] {
+        std::fs::create_dir(t.0.join(name)).unwrap();
+    }
+    let hwnd = open(&t.0.join("a"));
+    for name in ["b", "c"] {
+        ctrl_key(ui::active_list().unwrap(), VK_T, false);
+        navigate_to(hwnd, &t.0.join(name));
+        assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with(name)));
+    }
+    let names =
+        || tab_labels(hwnd).iter().map(|l| l.split(" · ").next().unwrap().to_string()).collect::<Vec<_>>();
+    assert!(pump_until(WAIT, || names() == ["a", "b", "c"]), "{:?}", names());
+    // Ctrl+1 is the first tab, Ctrl+9 the last.
+    ctrl_key(ui::active_list().unwrap(), VK_1, false);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("a")));
+    ctrl_key(ui::active_list().unwrap(), VK_9, false);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("c")));
+    // Moving keeps the moved tab active.
+    command(hwnd, ui::toolbar::MOVE_TAB_BACK);
+    assert_eq!(names(), ["a", "c", "b"]);
+    assert!(ui_dir(hwnd).ends_with("c"));
+    // A closed tab comes back with Ctrl+Shift+T, which no longer opens a blank tab.
+    ctrl_key(ui::active_list().unwrap(), VK_W, false);
+    assert!(pump_until(WAIT, || names() == ["a", "b"]));
+    ctrl_key(ui::active_list().unwrap(), VK_T, true);
+    assert!(pump_until(WAIT, || names().len() == 3 && ui_dir(hwnd).ends_with("c")), "{:?}", names());
+    ctrl_key(ui::active_list().unwrap(), VK_1, false);
+    command(hwnd, ui::toolbar::CLOSE_TABS_AFTER);
+    assert!(pump_until(WAIT, || names() == ["a"]), "{:?}", names());
+    command(hwnd, ui::toolbar::REOPEN_TAB);
+    command(hwnd, ui::toolbar::REOPEN_TAB);
+    assert!(pump_until(WAIT, || names().len() == 3), "{:?}", names());
+    command(hwnd, ui::toolbar::CLOSE_OTHER_TABS);
+    assert!(pump_until(WAIT, || names().len() == 1), "{:?}", names());
+    close(hwnd);
+}
+
+#[test]
+fn split_tabs_keep_their_name_and_duplicate_with_both_panes() {
+    let _desktop = desktop();
+    let t = TempDir::new("split-tab");
+    std::fs::create_dir_all(t.0.join("left")).unwrap();
+    std::fs::create_dir_all(t.0.join("right").join("inside")).unwrap();
+    let hwnd = open(&t.0);
+    let left = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(left) == ["left", "right"]));
+    select_row(left, 1);
+    command(hwnd, ui::CMD_OPEN_OTHER_PANE);
+    let right = lists_in(hwnd).into_iter().find(|&h| h != left && h != ui::tab_list().unwrap()).unwrap();
+    assert!(pump_until(WAIT, || rows(right) == ["inside"]));
+    let label = tab_labels(hwnd);
+    // Focusing the right pane leaves the tab named by the left one.
+    key(left, VK_F6);
+    assert!(pump_until(WAIT, || ui::active_list() == Some(right)));
+    pump_until(Duration::from_millis(100), || false);
+    assert_eq!(tab_labels(hwnd), label);
+    // Duplicate copies both panes.
+    ctrl_key(right, VK_K, true);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
+    assert!(
+        pump_until(WAIT, || {
+            let shown: Vec<_> = lists_in(hwnd)
+                .into_iter()
+                .filter(|&h| {
+                    unsafe { IsWindowVisible(h) }.as_bool()
+                        || unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0
+                })
+                .map(rows)
+                .collect();
+            shown.contains(&vec!["inside".to_string()])
+                && shown.contains(&vec!["left".to_string(), "right".to_string()])
+        }),
+        "duplicate lost the second pane"
+    );
+    close(hwnd);
+}
+
+#[test]
+fn middle_click_on_a_folder_opens_it_in_a_tab_behind() {
+    let t = TempDir::new("middle-folder");
+    std::fs::create_dir(t.0.join("sub")).unwrap();
+    std::fs::write(t.0.join("file.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["sub", "file.txt"]));
+    let at = |row: usize| {
+        let mut r = windows::Win32::Foundation::RECT { left: LVIR_LABEL as i32, ..Default::default() };
+        unsafe {
+            SendMessageW(list, LVM_GETITEMRECT, Some(WPARAM(row)), Some(LPARAM(&mut r as *mut _ as isize)))
+        };
+        LPARAM(((((r.top + r.bottom) / 2) << 16) | (r.left + 4)) as isize)
+    };
+    unsafe { PostMessageW(Some(list), WM_MBUTTONUP, WPARAM(0), at(1)) }.unwrap();
+    pump_until(Duration::from_millis(200), || false);
+    assert_eq!(tab_labels(hwnd).len(), 1, "a file doesn't open a tab");
+    unsafe { PostMessageW(Some(list), WM_MBUTTONUP, WPARAM(0), at(0)) }.unwrap();
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
+    assert!(pump_until(WAIT, || tab_labels(hwnd)[1].starts_with("sub · ")), "{:?}", tab_labels(hwnd));
+    assert_eq!(rows(ui::active_list().unwrap()), ["sub", "file.txt"], "the current tab stays");
+    close(hwnd);
 }
 
 #[test]
