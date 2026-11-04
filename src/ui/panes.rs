@@ -45,6 +45,8 @@ pub(super) struct FolderView {
     pub sizes: std::collections::HashMap<Vec<u16>, u64>,
     pub sizes_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub groups: windows::core::ComObject<super::groups::Groups>,
+    /// The Name column's width before splitting narrowed it, restored when unsplit.
+    pub name_before_split: Option<i32>,
 }
 
 impl Drop for FolderView {
@@ -199,6 +201,7 @@ pub(super) unsafe fn create(
             sizes: Default::default(),
             sizes_cancel: Default::default(),
             groups: super::groups::attach(list),
+            name_before_split: None,
         })
     }
 }
@@ -246,6 +249,7 @@ pub(super) fn toggle() {
     }
     super::dark::apply(hwnd, palette);
     super::layout(hwnd);
+    fit_split_columns();
     if let Some(job) = job {
         super::spawn_list(job);
     }
@@ -253,6 +257,57 @@ pub(super) fn toggle() {
         super::watch_view(id);
     }
     super::update_chrome();
+}
+
+/// Splitting narrows the panes, so their Name columns shrink until Type and Size fit again;
+/// unsplitting gives the active pane its Name width back. Widths set while split are kept.
+fn fit_split_columns() {
+    let Some((split, views)) = with_app(|a| {
+        let views =
+            std::iter::once(&a.view).chain(a.other.iter()).map(|v| (v.id, v.list)).collect::<Vec<_>>();
+        (a.split_view, views)
+    }) else {
+        return;
+    };
+    let width =
+        |list: HWND| unsafe { SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(0)), None) }.0 as i32;
+    let set = |list: HWND, cx: i32| unsafe {
+        SendMessageW(list, LVM_SETCOLUMNWIDTH, Some(WPARAM(0)), Some(LPARAM(cx as isize)));
+    };
+    for (id, list) in views {
+        let details = unsafe { GetWindowLongPtrW(list, GWL_STYLE) } as u32 & LVS_TYPEMASK == LVS_REPORT;
+        if !split {
+            if let Some(cx) = with_app(|a| a.view_mut(id).and_then(|v| v.name_before_split.take())).flatten()
+            {
+                set(list, cx);
+            }
+            continue;
+        }
+        if !details {
+            continue;
+        }
+        let mut client = windows::Win32::Foundation::RECT::default();
+        unsafe {
+            let _ = GetClientRect(list, &mut client);
+        }
+        let header = HWND(unsafe { SendMessageW(list, LVM_GETHEADER, None, None) }.0 as _);
+        let count = unsafe { SendMessageW(header, HDM_GETITEMCOUNT, None, None) }.0.max(0) as usize;
+        let total: i32 = (0..count)
+            .map(|i| unsafe { SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(i)), None) }.0 as i32)
+            .sum();
+        let name = width(list);
+        let fitted = (client.right - (total - name) - super::scale(list, 4)).max(super::scale(list, 140));
+        if total > client.right && fitted < name {
+            set(list, fitted);
+            with_app(|a| {
+                if let Some(v) = a.view_mut(id)
+                    && v.name_before_split.is_none()
+                {
+                    v.name_before_split = Some(name);
+                }
+            });
+        }
+    }
 }
 
 pub(super) fn activate(list: HWND) {
@@ -408,7 +463,9 @@ pub(super) fn update_labels() {
             .map(|v| {
                 let path =
                     v.browser.requested_location().map(|l| l.dir.display().to_string()).unwrap_or_default();
-                (v.label, format!("{}{}", if v.id == a.view.id { "Active: " } else { "" }, path))
+                // The accent tint marks the active pane; high contrast has no tint, so say it.
+                let active = v.id == a.view.id && crate::theme::high_contrast();
+                (v.label, format!("{}{}", if active { "Active: " } else { "" }, path))
             })
             .collect::<Vec<_>>()
     }) else {

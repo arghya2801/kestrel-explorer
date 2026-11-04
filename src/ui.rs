@@ -230,6 +230,11 @@ struct App {
     drag_kind: SplitKind,
     address: HWND,
     address_edit_button: HWND,
+    /// The address bar's "…" crumb, and the folders between the root and the shown crumbs that
+    /// a deep path leaves out. `crumbs_first` is the first crumb that fits.
+    crumb_more: HWND,
+    crumbs_drained: Vec<PathBuf>,
+    crumbs_first: usize,
     address_editing: bool,
     breadcrumbs: Vec<(HWND, PathBuf)>,
     /// The address and filter fields drawn around their controls (`chrome::paint`).
@@ -327,6 +332,7 @@ impl App {
         controls.extend(self.views().map(|v| v.label));
         controls.extend(&self.toolbar);
         controls.push(self.address_edit_button);
+        controls.push(self.crumb_more);
         controls.extend(self.breadcrumbs.iter().map(|p| p.0));
         controls.extend(preview::controls(&self.preview));
         controls
@@ -540,6 +546,10 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let address_edit_button =
             child(hwnd, w!("BUTTON"), w!("Edit"), WS_TABSTOP, WINDOW_EX_STYLE(0), breadcrumbs::EDIT)?;
         set_font(&[address_edit_button], font);
+        let crumb_more =
+            child(hwnd, w!("BUTTON"), w!("…"), WS_TABSTOP, WINDOW_EX_STYLE(0), breadcrumbs::MORE)?;
+        let _ = ShowWindow(crumb_more, SW_HIDE);
+        set_font(&[crumb_more], font);
         APP.with(|cell| {
             *cell.borrow_mut() = Some(App {
                 hwnd,
@@ -553,6 +563,9 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 drag_kind: SplitKind::Sidebar,
                 address,
                 address_edit_button,
+                crumb_more,
+                crumbs_drained: Vec::new(),
+                crumbs_first: 0,
                 address_editing: false,
                 breadcrumbs: Vec::new(),
                 fields: [RECT::default(); 2],
@@ -923,6 +936,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         .iter()
                         .chain(a.toolbar.iter())
                         .chain(std::iter::once(&a.address_edit_button))
+                        .chain(std::iter::once(&a.crumb_more))
                         .chain(a.tab_buttons.iter())
                         .any(|b| b.0 as isize == from)
                         || a.breadcrumbs.iter().any(|p| p.0.0 as isize == from)
@@ -1731,6 +1745,12 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
         s.columns = (0..COLUMNS.len())
             .map(|i| SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(i)), None).0 as i32)
             .collect();
+        // Split panes narrow the Name column for now; the saved width is the unsplit one.
+        if let Some(name) = with_app(|a| a.view.name_before_split).flatten()
+            && let Some(first) = s.columns.first_mut()
+        {
+            *first = name;
+        }
     }
     (s.tabs, s.active_tab) = tabbar::saved();
     Some(s)

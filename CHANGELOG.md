@@ -6,6 +6,27 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ## [Unreleased]
 
+### Added
+- Tabs: a close button on the active and hovered tab; drag tabs to reorder them; Ctrl+Shift+T reopens the last 10 closed tabs; Ctrl+1 to Ctrl+8 pick a tab and Ctrl+9 the last; the tab menu has Move left/right, Reopen closed tab, Close other tabs and Close tabs to the right.
+- Middle-click a folder to open it in a tab behind the current one.
+- A full tab strip scrolls with the mouse wheel, and keeps + and a new all-tabs menu at its right.
+- Vertical tabs have a "Tabs" heading with its own +, a clear active row, close buttons, drag to reorder, and a divider to resize the list. Each window remembers the height.
+- Deep or squeezed addresses show "…" for the folders left out; click it to go to one.
+
+### Changed
+- Tab names dim the parent folder. A split tab is named by its left pane, and its tooltip shows both paths.
+- Duplicate tab copies both panes and the split.
+- Splitting narrows the Name column so Type and Size stay visible; unsplitting restores it.
+- The active pane's path label no longer starts with "Active:", except in high contrast.
+
+### Fixed
+- Arrow keys in the vertical tab list no longer switch tabs as they move, or open a new tab from the last row; Enter or a click chooses.
+- Shortcuts such as Ctrl+W work while a tab control has the focus, and Tab reaches the tab strip or list.
+- Ctrl+Shift+T opened a blank tab.
+- Clicking between split panes renamed the tab.
+- New tabs showed "Loading…" before their folder name.
+- Dark mode Settings: readable checkbox labels, dark page tabs, combo boxes and buttons, and no grey bands behind labels.
+
 ## [1.3.2] - 2026-11-04
 
 ### Fixed

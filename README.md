@@ -43,9 +43,16 @@ sidebar) and choose **Open in other pane** to show it there, splitting the view 
 other pane's folder. **View > Swap panes** (**Ctrl+U**) trades their sides, and **View > Show this folder
 in the other pane** (**Ctrl+Shift+U**) opens the active folder in both.
 
-Tabs always show their parent folder ("LOG · CAF", "LOG · PERF"). Matching parent names add
-more ancestors to tell the folders apart; hover a tab for its full path. **View > Tabs above the sidebar**, also
-on a tab's right-click menu, lists the tabs in a column above the sidebar instead of along the top.
+Tabs always show their parent folder, dimmed ("LOG · CAF", "LOG · PERF"). Matching parent names add
+more ancestors to tell the folders apart; hover a tab for its full path, or both paths for a split tab,
+which is named by its left pane. The active and hovered tabs have a close button. Drag a tab to move it,
+or use **Move left**/**Move right** on its right-click menu, which also has **Reopen closed tab**,
+**Close other tabs** and **Close tabs to the right**. Middle-click a folder to open it in a tab behind the
+current one. Once the strip fills, the mouse wheel scrolls it and **+** and the all-tabs menu (⌄) wait
+at its right.
+**View > Tabs above the sidebar**, also on a tab's right-click menu, lists the tabs in a column above the
+sidebar instead of along the top, under a "Tabs" heading with its own **+**. Drag the line below the list
+to resize it; each window remembers the height.
 
 **Quick access** starts with your Desktop, Downloads, Documents, Pictures, Music and Videos. Right-click a
 folder in the list or the sidebar to **Pin to Quick access** or **Unpin from Quick access**; the standard
@@ -117,8 +124,11 @@ Press **F1**, or choose **Help > Keyboard shortcuts**, for the in-app guide.
 | Ctrl+Shift+N / Ctrl+Shift+C | New folder / copy paths |
 | Ctrl+A | Select all |
 | Ctrl+T / Ctrl+W | New tab / close tab |
-| Ctrl+Shift+K | Duplicate the active tab |
+| Ctrl+Shift+T | Reopen the last closed tab (up to 10) |
+| Ctrl+Shift+K | Duplicate the active tab, both panes included |
+| Ctrl+1 to Ctrl+8 / Ctrl+9 | That tab / the last tab |
 | Middle-click a tab | Close that tab |
+| Middle-click a folder | Open it in a tab behind this one |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+N | New window, side by side |
 | Ctrl+Shift+S / F6 | Toggle split / focus the other pane |
@@ -153,7 +163,8 @@ Commands: open, cut, copy, paste, rename, delete, delete-permanently, new-folder
 show-in-explorer, select-all, windows-menu, open-in-new-tab, properties, undo, redo, refresh, hidden-items,
 preview, split, settings, shortcuts, details, thumbnails, pin, pin-selected, terminal, file-operations,
 folder-sizes, group-by-date, reveal-in-sidebar, sync-panes, compare-panes, open-in-other-pane,
-copy-to-other-pane, move-to-other-pane, swap-panes, mirror-pane, vertical-tabs and check-for-updates.
+copy-to-other-pane, move-to-other-pane, swap-panes, mirror-pane, vertical-tabs, reopen-closed-tab, close-other-tabs, close-tabs-to-the-right,
+move-tab-left, move-tab-right and check-for-updates.
 Problems with the file are written to log.txt.
 
 ## Install

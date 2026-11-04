@@ -189,6 +189,7 @@ pub(super) fn is_top_button(hwnd: HWND) -> bool {
             || a.toolbar.contains(&hwnd)
             || a.address_edit_button == hwnd
             || a.tab_buttons.contains(&hwnd)
+            || a.crumb_more == hwnd
             || a.breadcrumbs.iter().any(|p| p.0 == hwnd)
     }) == Some(true)
 }
@@ -265,7 +266,12 @@ pub(super) unsafe fn draw_button(nm: &NMCUSTOMDRAW) -> Option<LRESULT> {
     let hwnd = nm.hdr.hwndFrom;
     let id = unsafe { GetDlgCtrlID(hwnd) } as usize;
     let (p, toggled, crumb, last_crumb) = with_app(|a| {
-        let at = a.breadcrumbs.iter().position(|c| c.0 == hwnd);
+        // "…" draws as a crumb before the first one shown.
+        let at = a
+            .breadcrumbs
+            .iter()
+            .position(|c| c.0 == hwnd)
+            .or((a.crumb_more == hwnd).then_some(a.breadcrumbs.len()));
         (
             a.palette,
             id == toolbar::SPLIT && a.split_view,

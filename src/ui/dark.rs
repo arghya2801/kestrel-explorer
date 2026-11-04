@@ -64,6 +64,7 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
                 .into_iter()
                 .chain(a.toolbar.iter().copied())
                 .chain(std::iter::once(a.address_edit_button))
+                .chain(std::iter::once(a.crumb_more))
                 .chain(a.tab_buttons)
                 .chain(a.breadcrumbs.iter().map(|p| p.0))
                 .collect::<Vec<_>>(),
@@ -149,6 +150,114 @@ pub(super) fn label_colors(hdc: HDC, active: bool) -> Option<LRESULT> {
         SetBkColor(hdc, COLORREF(back));
     }
     Some(LRESULT(if active { active_brush.0 } else { chrome.0 } as isize))
+}
+
+/// Dark mode for a dialog (Settings, the guides): a dark title bar and dark-styled controls.
+/// Its page tabs are painted like the window's tab strip; checkbox labels by `checkbox`.
+pub(super) fn apply_dialog(hwnd: HWND) {
+    let Some(palette) = with_app(|a| a.palette) else { return };
+    if !palette.dark || crate::theme::high_contrast() {
+        return;
+    }
+    unsafe {
+        let flag = BOOL::from(true);
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &flag as *const _ as *const _, 4);
+        let mut c = GetWindow(hwnd, GW_CHILD).unwrap_or_default();
+        while !c.is_invalid() {
+            let mut class = [0u16; 32];
+            let n = GetClassNameW(c, &mut class) as usize;
+            match String::from_utf16_lossy(&class[..n]).as_str() {
+                "Button" => _ = SetWindowTheme(c, w!("DarkMode_Explorer"), None),
+                "Edit" if GetWindowLongPtrW(c, GWL_STYLE) as u32 & ES_MULTILINE as u32 != 0 => {
+                    _ = SetWindowTheme(c, w!("DarkMode_Explorer"), None)
+                }
+                "Edit" | "ComboBox" => _ = SetWindowTheme(c, w!("DarkMode_CFD"), None),
+                "SysTabControl32" => _ = SetWindowSubclass(c, Some(paint_dark), 1, 0),
+                _ => {}
+            }
+            c = GetWindow(c, GW_HWNDNEXT).unwrap_or_default();
+        }
+    }
+}
+
+/// A dialog's labels (WM_CTLCOLORSTATIC from a STATIC) on the dialog's own background.
+/// `None` in light mode: Windows' defaults.
+pub(super) fn static_colors(hdc: HDC) -> Option<LRESULT> {
+    let (palette, brush) = with_app(|a| (a.palette, a.brushes.as_ref().map(|b| b.chrome)))?;
+    if !palette.dark {
+        return None;
+    }
+    unsafe {
+        SetTextColor(hdc, COLORREF(palette.text));
+        SetBkColor(hdc, COLORREF(palette.chrome));
+    }
+    Some(LRESULT(brush?.0 as isize))
+}
+
+/// Dark mode checkboxes: the theme draws their labels black whatever the text color, so draw
+/// the box from the theme and the label ourselves. `None`: let Windows draw it.
+pub(super) unsafe fn checkbox(nm: &NMCUSTOMDRAW) -> Option<LRESULT> {
+    let palette = with_app(|a| a.palette)?;
+    let button = nm.hdr.hwndFrom;
+    let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) } as u32 & BS_TYPEMASK as u32;
+    if !palette.dark
+        || crate::theme::high_contrast()
+        || style != BS_AUTOCHECKBOX as u32
+        || nm.dwDrawStage != CDDS_PREPAINT
+    {
+        return None;
+    }
+    unsafe {
+        let hdc = nm.hdc;
+        let back = CreateSolidBrush(COLORREF(palette.chrome));
+        FillRect(hdc, &nm.rc, back);
+        let _ = DeleteObject(HGDIOBJ(back.0));
+        let checked = SendMessageW(button, BM_GETCHECK, None, None).0 == BST_CHECKED.0 as isize;
+        let state = nm.uItemState;
+        let offset = if state.contains(CDIS_DISABLED) {
+            3
+        } else if state.contains(CDIS_SELECTED) {
+            2
+        } else if state.contains(CDIS_HOT) {
+            1
+        } else {
+            0
+        };
+        let part_state = if checked { CBS_CHECKEDNORMAL.0 } else { CBS_UNCHECKEDNORMAL.0 } + offset;
+        let theme = OpenThemeData(Some(button), w!("Button"));
+        let size =
+            GetThemePartSize(theme, Some(hdc), BP_CHECKBOX.0, part_state, None, TS_TRUE).unwrap_or_default();
+        let top = (nm.rc.top + nm.rc.bottom - size.cy) / 2;
+        let boxed = RECT { left: nm.rc.left, top, right: nm.rc.left + size.cx, bottom: top + size.cy };
+        let _ = DrawThemeBackground(theme, hdc, BP_CHECKBOX.0, part_state, &boxed, None);
+        let _ = CloseThemeData(theme);
+        let mut text = [0u16; 260];
+        let len = GetWindowTextW(button, &mut text) as usize;
+        let mut r = RECT { left: boxed.right + super::scale(button, 6), ..nm.rc };
+        SetBkMode(hdc, TRANSPARENT);
+        let ink = if state.contains(CDIS_DISABLED) {
+            crate::theme::mix(palette.chrome, palette.text, 45)
+        } else {
+            palette.text
+        };
+        SetTextColor(hdc, COLORREF(ink));
+        let hide_prefix =
+            if state.contains(CDIS_SHOWKEYBOARDCUES) { DRAW_TEXT_FORMAT(0) } else { DT_HIDEPREFIX };
+        DrawTextW(hdc, &mut text[..len], &mut r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | hide_prefix);
+        if state.contains(CDIS_FOCUS) && state.contains(CDIS_SHOWKEYBOARDCUES) {
+            let mut measured = r;
+            DrawTextW(hdc, &mut text[..len], &mut measured, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
+            let h = measured.bottom - measured.top;
+            let focus = RECT {
+                left: r.left - 1,
+                top: (r.top + r.bottom - h) / 2 - 1,
+                right: measured.right + 1,
+                bottom: (r.top + r.bottom + h) / 2 + 1,
+            };
+            let _ = DrawFocusRect(hdc, &focus);
+        }
+    }
+    Some(LRESULT(CDRF_SKIPDEFAULT as isize))
 }
 
 /// Main window background (WM_ERASEBKGND).

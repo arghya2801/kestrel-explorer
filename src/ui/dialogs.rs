@@ -95,11 +95,16 @@ Esc in the list    Cancel loading or search\r\n\
 Esc in the address    Restore the current address\r\n\r\n\
 Tabs and windows\r\n\
 Ctrl+T    New tab\r\n\
-Ctrl+Shift+K    Duplicate the active tab\r\n\
+Ctrl+Shift+T    Reopen the last closed tab\r\n\
+Ctrl+Shift+K    Duplicate the active tab, both panes included\r\n\
 Ctrl+W    Close the active tab (the last tab stays)\r\n\
-Middle-click a tab    Close that tab\r\n\
-Right-click a tab    Tabs above the sidebar, or back along the top\r\n\
+Ctrl+1 to Ctrl+8 / Ctrl+9    That tab / the last tab\r\n\
 Ctrl+Tab / Ctrl+Shift+Tab    Next / previous tab\r\n\
+Middle-click a tab, or its X    Close that tab\r\n\
+Middle-click a folder    Open it in a tab behind this one\r\n\
+Drag a tab    Move it\r\n\
+Right-click a tab    New, duplicate, reopen, move, close others or to the right, tabs above the sidebar\r\n\
+On a focused tab strip or list    Arrows move, Enter opens, Delete closes, Shift+F10 the menu\r\n\
 Ctrl+N    New window, side by side\r\n\
 Ctrl+Shift+S    Toggle two folder panes\r\n\
 F6    Focus the other folder pane\r\n\
@@ -343,6 +348,7 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> w
             fill(hwnd, &s);
         }
         layout(hwnd);
+        dark::apply_dialog(hwnd);
         if operations {
             SetTimer(Some(hwnd), 1, 500, None);
         }
@@ -535,6 +541,13 @@ fn layout(hwnd: HWND) {
     }
 }
 
+/// Whether `hwnd` is a plain label (a STATIC), not a read-only text box.
+fn is_label(hwnd: HWND) -> bool {
+    let mut class = [0u16; 16];
+    let n = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
+    String::from_utf16_lossy(&class[..n]).eq_ignore_ascii_case("Static")
+}
+
 extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     crate::crash::guard(|| unsafe {
         match msg {
@@ -576,8 +589,14 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
                 _ => {}
             },
             WM_NOTIFY if lp.0 != 0 => {
-                if (*(lp.0 as *const NMHDR)).code == TCN_SELCHANGE {
+                let code = (*(lp.0 as *const NMHDR)).code;
+                if code == TCN_SELCHANGE {
                     layout(hwnd);
+                }
+                if code == NM_CUSTOMDRAW
+                    && let Some(r) = dark::checkbox(&*(lp.0 as *const NMCUSTOMDRAW))
+                {
+                    return r;
                 }
             }
             WM_TIMER => {
@@ -626,7 +645,12 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
                 info.ptMinTrackSize.y = scale(hwnd, 520);
                 return LRESULT(0);
             }
-            WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
+            WM_CTLCOLORSTATIC if is_label(HWND(lp.0 as _)) => {
+                if let Some(r) = dark::static_colors(HDC(wp.0 as _)) {
+                    return r;
+                }
+            }
+            WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC | WM_CTLCOLORLISTBOX => {
                 if let Some(r) = dark::edit_colors(HDC(wp.0 as _)) {
                     return r;
                 }

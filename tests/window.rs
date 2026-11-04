@@ -2411,6 +2411,74 @@ fn middle_click_on_a_folder_opens_it_in_a_tab_behind() {
 }
 
 #[test]
+fn deep_paths_show_an_ellipsis_crumb_for_the_folders_left_out() {
+    let t = TempDir::new("deep-crumbs");
+    let deep = ["a", "b", "c", "d", "e", "f"].iter().fold(t.0.clone(), |p, n| p.join(n));
+    std::fs::create_dir_all(&deep).unwrap();
+    let hwnd = open(&t.0);
+    let more = unsafe { FindWindowExW(Some(hwnd), None, w!("Button"), w!("…")) }.unwrap();
+    let visible = |h: HWND| unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0;
+    navigate_to(hwnd, &deep);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("f")));
+    assert!(pump_until(WAIT, || visible(more)), "a deep path shows \"…\"");
+    navigate_to(hwnd, &t.0.join("a"));
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("a")));
+    // fep-ui-deep-crumbs-N\a under %TEMP% is still deep; a drive root isn't.
+    navigate_to(hwnd, Path::new("C:\\"));
+    assert!(pump_until(WAIT, || !visible(more)), "a short path has no \"…\"");
+    close(hwnd);
+}
+
+#[test]
+fn splitting_fits_the_columns_and_saves_the_unsplit_name_width() {
+    let t = TempDir::new("split-columns");
+    std::fs::write(t.0.join("a.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt"]));
+    unsafe { SetWindowPos(hwnd, None, 0, 0, 1600, 700, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE) }.unwrap();
+    let widths = |l: HWND| {
+        (0..4)
+            .map(|c| unsafe { SendMessageW(l, LVM_GETCOLUMNWIDTH, Some(WPARAM(c)), None) }.0 as i32)
+            .collect::<Vec<_>>()
+    };
+    let client = |l: HWND| {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        unsafe { GetClientRect(l, &mut r) }.unwrap();
+        r.right
+    };
+    let name = widths(list)[0];
+    command(hwnd, ui::toolbar::SPLIT);
+    let fitted = widths(list);
+    assert!(fitted[0] < name, "{fitted:?}");
+    assert!(fitted.iter().sum::<i32>() <= client(list), "{fitted:?} in {}", client(list));
+    close_after_capturing_name(hwnd, name);
+}
+
+/// Closes a split window and checks the saved Name width is the unsplit one.
+fn close_after_capturing_name(hwnd: HWND, name: i32) {
+    close(hwnd);
+    assert_eq!(ui::take_final_settings().unwrap().columns[0], name);
+}
+
+#[test]
+fn unsplitting_restores_the_name_width() {
+    let t = TempDir::new("unsplit-columns");
+    std::fs::write(t.0.join("a.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt"]));
+    unsafe { SetWindowPos(hwnd, None, 0, 0, 1600, 700, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE) }.unwrap();
+    let width = || unsafe { SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(0)), None) }.0 as i32;
+    let name = width();
+    command(hwnd, ui::toolbar::SPLIT);
+    assert!(width() < name);
+    command(hwnd, ui::toolbar::SPLIT);
+    assert_eq!(width(), name);
+    close(hwnd);
+}
+
+#[test]
 fn split_panes_copy_move_swap_and_mirror() {
     let _desktop = desktop();
     let t = TempDir::new("panes");
