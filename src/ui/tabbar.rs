@@ -1,5 +1,5 @@
 //! A tab owns its folder views; switching tabs preserves both panes. Tabs show along the
-//! top in a tab strip, or listed above the sidebar ("vertical tabs").
+//! top in a tab strip, or listed in a column at the right ("vertical tabs").
 use super::toolbar::{TAB_LIST, TABS_COLLAPSE};
 use super::{
     child,
@@ -171,26 +171,62 @@ pub(super) fn heading_height(hwnd: HWND) -> i32 {
 /// The vertical tab column's width in a window `client_width` wide: a strip of badges when
 /// collapsed, else the width its edge was dragged to (200 by default), within limits.
 pub(super) fn column_width(hwnd: HWND, client_width: i32) -> i32 {
-    let (chosen, collapsed) = with_app(|a| (a.tab_list_width, a.tabs_collapsed)).unwrap_or_default();
-    if collapsed {
+    if with_app(|a| a.tabs_collapsed).unwrap_or(false) {
         return super::scale(hwnd, 44);
     }
+    expanded_width(hwnd, client_width)
+}
+
+/// The column's width when not collapsed: where its edge was dragged, within limits.
+pub(super) fn expanded_width(hwnd: HWND, client_width: i32) -> i32 {
+    let chosen = with_app(|a| a.tab_list_width).flatten();
     let width = super::scale(hwnd, chosen.unwrap_or(200));
     width.clamp(super::scale(hwnd, 120), (client_width / 3).max(super::scale(hwnd, 120)))
 }
 
-/// Where the heading is drawn, in the window's coordinates: above the tab column.
+/// Where the heading is drawn, in the window's coordinates: above the tab column, at the
+/// window's right edge. Computed from the width, not the list, which may not have moved yet.
 pub(super) fn heading_rect(hwnd: HWND) -> Option<RECT> {
-    let (vertical, list) = with_app(|a| (a.vertical_tabs, a.tab_list))?;
+    if with_app(|a| a.vertical_tabs) != Some(true) {
+        return None;
+    }
+    let mut client = RECT::default();
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+    }
     let top = super::content_top(hwnd);
-    let right = super::client_rect_of(hwnd, list).right;
-    vertical.then(|| RECT { left: 0, top, right, bottom: top + heading_height(hwnd) })
+    let left = client.right - column_width(hwnd, client.right);
+    Some(RECT { left, top, right: client.right, bottom: top + heading_height(hwnd) })
+}
+
+/// Whether the tab list draws badges: collapsed, and not widened by the mouse resting on it.
+fn badges() -> bool {
+    with_app(|a| a.tabs_collapsed && !a.tabs_peek).unwrap_or(false)
+}
+
+/// Widens the collapsed column over the file list (`on`), or narrows it again.
+fn set_peek(on: bool) {
+    let Some(hwnd) = with_app(|a| {
+        let changed = a.tabs_collapsed && a.tabs_peek != on;
+        a.tabs_peek = on && a.tabs_collapsed;
+        changed.then_some(a.hwnd)
+    })
+    .flatten() else {
+        return;
+    };
+    super::layout(hwnd);
+    if let Some(list) = with_app(|a| a.tab_list) {
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(list), None, true);
+        }
+    }
 }
 
 /// Collapses the vertical tab column to badges, or widens it again, and remembers the choice.
 pub(super) fn toggle_collapsed() {
     let Some(hwnd) = with_app(|a| {
         a.tabs_collapsed = !a.tabs_collapsed;
+        a.tabs_peek = false;
         a.hwnd
     }) else {
         return;
@@ -209,7 +245,7 @@ pub(super) fn heading_text() -> String {
     format!("Tabs ({})", with_app(|a| a.tabs.len()).unwrap_or(0))
 }
 
-/// Shows the tabs in a column left of the sidebar (`on`) or along the top, and remembers it.
+/// Shows the tabs in a column at the right (`on`) or along the top, and remembers it.
 pub(super) fn set_vertical(on: bool) {
     let Some((hwnd, strip, list)) = with_app(|a| {
         a.vertical_tabs = on;
@@ -246,7 +282,7 @@ pub(super) fn place_buttons() {
                 let (size, gap) = (super::scale(hwnd, 24), super::scale(hwnd, 6));
                 if collapsed {
                     // Expand on top, "+" below it, centered in the narrow column.
-                    let x = (head.right - size) / 2;
+                    let x = head.left + (head.right - head.left - size) / 2;
                     let _ = MoveWindow(fold, x, head.top + gap, size, size, true);
                     let _ = MoveWindow(plus, x, head.top + 2 * gap + size, size, size, true);
                 } else {
@@ -562,7 +598,7 @@ pub(super) fn on_list_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
         }
         LVN_GETINFOTIPW => {
             let nm = unsafe { &mut *(lp.0 as *mut NMLVGETINFOTIPW) };
-            let collapsed = with_app(|a| a.tabs_collapsed).unwrap_or(false);
+            let collapsed = badges();
             let text = labels()
                 .get(nm.iItem as usize)
                 .map(|(label, tip)| if collapsed { format!("{label}\n{tip}") } else { tip.clone() })
@@ -679,7 +715,7 @@ unsafe fn draw_row(cd: &NMLVCUSTOMDRAW) {
         p.window
     };
     let s = |n| super::scale(list, n);
-    let collapsed = with_app(|a| a.tabs_collapsed).unwrap_or(false);
+    let collapsed = badges();
     unsafe {
         let brush = CreateSolidBrush(COLORREF(back));
         FillRect(hdc, &r, brush);
@@ -772,7 +808,7 @@ unsafe extern "system" fn list_proc(
     _data: usize,
 ) -> LRESULT {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        ReleaseCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+        ReleaseCapture, TME_HOVER, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     };
     let invalidate = || unsafe {
         let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(list), None, false);
@@ -817,19 +853,25 @@ unsafe extern "system" fn list_proc(
             if LIST_HOT.with(|h| h.replace((row, on_close))) != (row, on_close) {
                 invalidate();
             }
+            // Collapsed, a resting mouse (the system's hover time) widens the column to show names.
+            let peek = badges();
             let mut track = TRACKMOUSEEVENT {
                 cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: TME_LEAVE,
+                dwFlags: if peek { TME_LEAVE | TME_HOVER } else { TME_LEAVE },
                 hwndTrack: list,
-                dwHoverTime: 0,
+                dwHoverTime: u32::MAX, // HOVER_DEFAULT
             };
             unsafe {
                 let _ = TrackMouseEvent(&mut track);
             }
         }
+        WM_MOUSEHOVER => {
+            crate::crash::guard(|| set_peek(true));
+        }
         WM_MOUSELEAVE => {
             LIST_HOT.with(|h| h.set((None, false)));
             invalidate();
+            crate::crash::guard(|| set_peek(false));
         }
         WM_LBUTTONUP if LIST_DRAG.with(Cell::get).is_some() => {
             unsafe {
@@ -839,6 +881,19 @@ unsafe extern "system" fn list_proc(
         }
         WM_CAPTURECHANGED => LIST_DRAG.with(|d| d.set(None)),
         WM_SETFOCUS | WM_KILLFOCUS => invalidate(),
+        // Widened over the file list, the column draws its own left edge.
+        WM_PAINT if with_app(|a| a.tabs_peek) == Some(true) => unsafe {
+            use windows::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
+            let done = windows::Win32::UI::Shell::DefSubclassProc(list, msg, wp, lp);
+            let mut r = RECT::default();
+            let _ = GetClientRect(list, &mut r);
+            if let Some(p) = with_app(|a| a.palette) {
+                let hdc = GetDC(Some(list));
+                super::chrome::fill(hdc, &RECT { right: 1, ..r }, super::chrome::stroke(&p));
+                ReleaseDC(Some(list), hdc);
+            }
+            return done;
+        },
         _ => {}
     }
     unsafe { windows::Win32::UI::Shell::DefSubclassProc(list, msg, wp, lp) }
@@ -863,7 +918,7 @@ fn menu(owner: HWND, tab: Option<usize>, at: POINT) {
             (2, "&Close tab\tCtrl+W", tab.is_some() && count > 1),
             (8, "Close &other tabs", tab.is_some() && count > 1),
             (9, "Close tabs &below", tab.is_some() && !last),
-            (4, "Tabs on the &left", true),
+            (4, "Tabs on the righ&t", true),
         ]
     } else {
         [
@@ -875,7 +930,7 @@ fn menu(owner: HWND, tab: Option<usize>, at: POINT) {
             (2, "&Close tab\tCtrl+W", tab.is_some() && count > 1),
             (8, "Close &other tabs", tab.is_some() && count > 1),
             (9, "Close tabs to the r&ight", tab.is_some() && !last),
-            (4, "Tabs on the &left", true),
+            (4, "Tabs on the righ&t", true),
         ]
     };
     unsafe {

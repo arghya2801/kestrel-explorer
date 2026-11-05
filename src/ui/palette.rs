@@ -86,7 +86,7 @@ pub(super) const ENTRIES: &[Entry] = &[
     e("Tabs", "Move tab left", "", MOVE_TAB_BACK),
     e("Tabs", "Move tab right", "", MOVE_TAB_FORWARD),
     e("Tabs", "List all tabs", "", TAB_LIST),
-    e("Tabs", "Tabs on the left", "", VERTICAL_TABS),
+    e("Tabs", "Tabs on the right", "", VERTICAL_TABS),
     e("Tabs", "Collapse or expand the tab column", "", TABS_COLLAPSE),
     e("Window", "New window", "Ctrl+N", NEW_WINDOW),
     e("Window", "Settings", "", SETTINGS),

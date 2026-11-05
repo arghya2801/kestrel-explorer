@@ -33,7 +33,7 @@ pub struct Settings {
     pub pins: Vec<PathBuf>,
     /// Known folders (Desktop, Downloads...) removed from Quick access.
     pub unpinned: Vec<PathBuf>,
-    /// Tabs listed above the sidebar instead of along the top.
+    /// Tabs listed in a column at the right instead of along the top.
     pub vertical_tabs: bool,
     /// The vertical tab column's width in 96-DPI pixels, once its edge was dragged.
     pub tabs_width: Option<i32>,

@@ -2226,7 +2226,7 @@ fn tabs_on_folders_of_the_same_name_show_their_parents() {
 }
 
 #[test]
-fn vertical_tabs_get_their_own_column_left_of_the_sidebar() {
+fn vertical_tabs_get_their_own_column_at_the_right() {
     let _desktop = desktop();
     let t = TempDir::new("vertical");
     for name in ["one", "two"] {
@@ -2248,21 +2248,21 @@ fn vertical_tabs_get_their_own_column_left_of_the_sidebar() {
     assert!(!visible(strip) && visible(tabs));
     assert_eq!(rows(tabs), [one, two.clone()]);
     assert_eq!(selected(tabs), [two]);
-    // The tabs have a full-height column; the sidebar starts right of it.
+    // The tabs have a full-height column at the right; the file list ends left of it.
     let rect = |h: HWND| {
         let mut r = windows::Win32::Foundation::RECT::default();
         unsafe { GetWindowRect(h, &mut r) }.unwrap();
         r
     };
-    assert!(rect(tree_of(hwnd)).left >= rect(tabs).right);
+    assert!(rect(ui::active_list().unwrap()).right <= rect(tabs).left);
     assert!(rect(tabs).bottom >= rect(tree_of(hwnd)).bottom - 2, "the column runs the full height");
     // "+" moves into the list's heading.
     let plus = unsafe { GetDlgItem(Some(hwnd), 240) }.unwrap();
     assert!(visible(plus) && rect(plus).bottom <= rect(tabs).top, "+ sits in the heading");
-    // Dragging the column's edge widens it, and the width is remembered.
+    // Dragging the column's edge leftward widens it, and the width is remembered.
     let client = |h: HWND| {
         let r = rect(h);
-        let mut pt = windows::Win32::Foundation::POINT { x: r.right, y: (r.top + r.bottom) / 2 };
+        let mut pt = windows::Win32::Foundation::POINT { x: r.left, y: (r.top + r.bottom) / 2 };
         unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt) }.unwrap();
         pt
     };
@@ -2270,15 +2270,26 @@ fn vertical_tabs_get_their_own_column_left_of_the_sidebar() {
     let before = width();
     let edge = client(tabs);
     unsafe {
-        SendMessageW(hwnd, WM_LBUTTONDOWN, None, Some(at(edge.x + 1, edge.y)));
-        SendMessageW(hwnd, WM_MOUSEMOVE, None, Some(at(edge.x + 41, edge.y)));
-        SendMessageW(hwnd, WM_LBUTTONUP, None, Some(at(edge.x + 41, edge.y)));
+        SendMessageW(hwnd, WM_LBUTTONDOWN, None, Some(at(edge.x - 2, edge.y)));
+        SendMessageW(hwnd, WM_MOUSEMOVE, None, Some(at(edge.x - 42, edge.y)));
+        SendMessageW(hwnd, WM_LBUTTONUP, None, Some(at(edge.x - 42, edge.y)));
     }
     assert!(width() >= before + 30, "dragging the edge didn't widen the column");
-    assert!(rect(tree_of(hwnd)).left >= rect(tabs).right);
-    // Collapsing shrinks it to badges; expanding brings the width back.
+    assert!(rect(ui::active_list().unwrap()).right <= rect(tabs).left);
+    // Collapsing shrinks it to badges, with its buttons inside the narrow column.
     command(hwnd, ui::toolbar::TABS_COLLAPSE);
     assert!(width() < before / 2, "collapsed: {}", width());
+    let fold = unsafe { GetDlgItem(Some(hwnd), ui::toolbar::TABS_COLLAPSE as i32) }.unwrap();
+    for b in [plus, fold] {
+        assert!(visible(b) && rect(b).left >= rect(tabs).left && rect(b).right <= rect(tabs).right);
+    }
+    // Resting the mouse on it widens it over the file list, which keeps its size.
+    let files = rect(ui::active_list().unwrap());
+    unsafe { SendMessageW(tabs, WM_MOUSEHOVER, None, None) };
+    assert!(width() >= before + 30, "peek: {}", width());
+    assert_eq!(rect(ui::active_list().unwrap()).right, files.right);
+    unsafe { SendMessageW(tabs, WM_MOUSELEAVE, None, None) };
+    assert!(width() < before / 2, "after the mouse leaves: {}", width());
     command(hwnd, ui::toolbar::TABS_COLLAPSE);
     assert!(width() >= before + 30);
     // Moving the selection (as the arrow keys do) only moves the cursor; it never switches or
@@ -2830,6 +2841,19 @@ fn render_review_windows() {
         assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()).len() == 4));
         pump_until(Duration::from_millis(250), || false);
         capture(hwnd, &out.join(format!("{name}-main.bmp")));
+        command(hwnd, 240); // new tab
+        command(hwnd, ui::toolbar::VERTICAL_TABS);
+        pump_until(Duration::from_millis(250), || false);
+        capture(hwnd, &out.join(format!("{name}-vertical.bmp")));
+        command(hwnd, ui::toolbar::TABS_COLLAPSE);
+        pump_until(Duration::from_millis(250), || false);
+        capture(hwnd, &out.join(format!("{name}-collapsed.bmp")));
+        unsafe { SendMessageW(ui::tab_list().unwrap(), WM_MOUSEHOVER, None, None) };
+        pump_until(Duration::from_millis(250), || false);
+        capture(hwnd, &out.join(format!("{name}-peek.bmp")));
+        unsafe { SendMessageW(ui::tab_list().unwrap(), WM_MOUSELEAVE, None, None) };
+        command(hwnd, ui::toolbar::TABS_COLLAPSE);
+        command(hwnd, ui::toolbar::VERTICAL_TABS);
         command(hwnd, ui::toolbar::GRID);
         pump_until(Duration::from_millis(500), || false);
         capture(hwnd, &out.join(format!("{name}-grid.bmp")));

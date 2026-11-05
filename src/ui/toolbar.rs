@@ -440,7 +440,7 @@ fn fill(menu: HMENU, kind: usize) {
                     item(sub, COMPARE, "&Compare panes", false);
                 });
                 submenu(menu, "&Tabs", |sub| {
-                    item(sub, VERTICAL_TABS, "Tabs on the &left", vertical);
+                    item(sub, VERTICAL_TABS, "Tabs on the righ&t", vertical);
                     item(sub, TAB_LIST, "List &all tabs", false);
                     separator(sub);
                     item(sub, REOPEN_TAB, "&Reopen closed tab", false);

@@ -50,9 +50,10 @@ or use **Move left**/**Move right** on its right-click menu, which also has **Re
 **Close other tabs** and **Close tabs to the right**. Middle-click a folder to open it in a tab behind the
 current one. Once the strip fills, the mouse wheel scrolls it and **+** and the all-tabs menu (⌄) wait
 at its right.
-**View > Tabs > Tabs on the left**, also on a tab's right-click menu or **Settings > Tabs**, moves the tabs
-into a full-height column at the window's left edge, with the sidebar right of it. Drag the column's edge to
-resize it; the **<** button collapses it to lettered badges (hover one for its name) and **>** widens it again.
+**View > Tabs > Tabs on the right**, also on a tab's right-click menu or **Settings > Tabs**, moves the tabs
+into a full-height column at the window's right edge. Drag the column's edge to resize it. The **>** button
+collapses it to lettered badges and **<** widens it again. Rest the mouse on the collapsed column and it
+widens over the file list to show the names, until the mouse leaves.
 Each window remembers the width and whether it's collapsed.
 
 **Quick access** starts with your Desktop, Downloads, Documents, Pictures, Music and Videos. Right-click a
@@ -96,7 +97,7 @@ and cancellation dialogs.
 |---|---|
 | Appearance | Theme, accent color, text size, row spacing, toolbar labels, status bar, full path in the title, preview pane, sidebar and preview widths |
 | Files | File name extensions, hidden items, protected system files, folders before files, single-click opening, double-click empty space to go up, asking before recycling, size units, date style, default sort and view |
-| Tabs | Tabs along the top or on the left, where new tabs open, which tabs show a close button, what closing the last tab does, two panes and their split |
+| Tabs | Tabs along the top or on the right, where new tabs open, which tabs show a close button, what closing the last tab does, two panes and their split |
 | Sidebar | Quick access and Network sections, expanding to the open folder |
 | Startup | Startup folder, session restoration and an optional "Open in Kestrel" folder-menu entry |
 | Window | Saved position, size and maximized state, and the four main column widths |

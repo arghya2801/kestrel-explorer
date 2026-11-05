@@ -70,7 +70,7 @@ pub(super) unsafe fn create(parent: HWND) -> windows::core::Result<Pane> {
         };
         RegisterClassExW(&wc);
         let none = WINDOW_EX_STYLE(0);
-        let hwnd = child(parent, CLASS, w!(""), WS_CLIPCHILDREN, none, 0)?;
+        let hwnd = child(parent, CLASS, w!(""), WS_CLIPCHILDREN | WS_CLIPSIBLINGS, none, 0)?;
         let _ = ShowWindow(hwnd, SW_HIDE);
         let style =
             WS_VSCROLL | WS_HSCROLL | WINDOW_STYLE((ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32);

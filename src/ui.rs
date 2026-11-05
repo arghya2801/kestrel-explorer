@@ -272,13 +272,15 @@ struct App {
     tips: HWND,
     /// The "+", "all tabs" and (vertical) collapse buttons.
     tab_buttons: [HWND; 3],
-    /// The tabs listed above the sidebar, shown instead of the strip with `vertical_tabs`.
+    /// The tabs listed in a column at the right, shown instead of the strip with `vertical_tabs`.
     tab_list: HWND,
     vertical_tabs: bool,
     /// The vertical tab column's width (96-DPI pixels) once its edge was dragged, and whether
     /// it's collapsed to badges.
     tab_list_width: Option<i32>,
     tabs_collapsed: bool,
+    /// The collapsed column is widened over the file list while the mouse rests on it.
+    tabs_peek: bool,
     /// The window font, and the bold copy made from it for the active vertical tab.
     tab_bold: Option<(HFONT, HFONT)>,
     /// The preferences this window last applied; Settings or another window can change them.
@@ -615,6 +617,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 vertical_tabs: false,
                 tab_list_width: settings.tabs_width,
                 tabs_collapsed: settings.tabs_collapsed,
+                tabs_peek: false,
                 tab_bold: None,
                 closed_tabs: Vec::new(),
                 applied_prefs: crate::prefs::get(),
@@ -2653,23 +2656,34 @@ fn layout(hwnd: HWND) {
         let status_h = if status_bar { sr.bottom - sr.top } else { 0 };
         let h = (client.bottom - status_h - top).max(0);
         let gap = splitter_width(hwnd);
-        // Vertical tabs: a full-height column at the far left, with the sidebar right of it.
-        let vertical = with_app(|a| a.vertical_tabs.then_some(a.tab_list)).flatten();
-        let left = match vertical {
-            Some(tab_list) => {
-                let width = tabbar::column_width(hwnd, client.right);
-                let head = tabbar::heading_height(hwnd);
-                let _ = MoveWindow(tab_list, 0, top + head, width, (h - head).max(0), true);
-                tabbar::fit_list_column(tab_list);
-                width + gap
-            }
-            None => 0,
-        };
-        let sidebar = tree::clamp_split(split, (client.right - left).max(0), GetDpiForWindow(hwnd));
-        let _ = MoveWindow(tree, left, top, sidebar, h, true);
+        // Vertical tabs: a full-height column at the far right; everything else fits left of it.
+        // While peeking, the collapsed column's list widens over the file list.
+        let inner = content_right(hwnd);
+        if let Some((tab_list, peek)) =
+            with_app(|a| a.vertical_tabs.then_some((a.tab_list, a.tabs_peek))).flatten()
+        {
+            let width = if peek {
+                tabbar::expanded_width(hwnd, client.right)
+            } else {
+                tabbar::column_width(hwnd, client.right)
+            };
+            let head = tabbar::heading_height(hwnd);
+            let _ = SetWindowPos(
+                tab_list,
+                Some(HWND_TOP),
+                client.right - width,
+                top + head,
+                width,
+                (h - head).max(0),
+                SWP_NOACTIVATE,
+            );
+            tabbar::fit_list_column(tab_list);
+        }
+        let sidebar = tree::clamp_split(split, inner, GetDpiForWindow(hwnd));
+        let _ = MoveWindow(tree, 0, top, sidebar, h, true);
         // From here, `split` is the sidebar's right edge, where the folder lists start.
-        let split = left + sidebar;
-        let rest = (client.right - split - gap).max(0);
+        let split = sidebar;
+        let rest = (inner - split - gap).max(0);
         // Preview pane, when shown: a third of the space right of the sidebar.
         let preview_w = if preview::is_visible() {
             with_app(|a| a.preview_width).flatten().unwrap_or(rest / 3).max(scale(hwnd, 100)).min(rest / 2)
@@ -2696,7 +2710,7 @@ fn layout(hwnd: HWND) {
             let _ = MoveWindow(list, split + gap, top, rest - preview_space, h, true);
         }
         if let Some(pane) = with_app(|a| a.preview.hwnd) {
-            let _ = MoveWindow(pane, client.right - preview_w, top, preview_w, h, true);
+            let _ = MoveWindow(pane, inner - preview_w, top, preview_w, h, true);
         }
     }
     panes::layout_labels(hwnd);
@@ -2710,12 +2724,24 @@ fn splitter_width(hwnd: HWND) -> i32 {
     scale(hwnd, 5)
 }
 
+/// The right edge of the sidebar, lists and preview: the window's, or left of the vertical tabs.
+fn content_right(hwnd: HWND) -> i32 {
+    let mut client = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+    }
+    match tabbar::heading_rect(hwnd) {
+        Some(head) => (head.left - splitter_width(hwnd)).max(0),
+        None => client.right,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SplitKind {
     Sidebar,
     Panes,
     Preview,
-    /// The vertical tab column's right edge.
+    /// The vertical tab column's left edge.
     Tabs,
 }
 
@@ -2741,10 +2767,10 @@ fn splitter_at(hwnd: HWND, lp: LPARAM) -> Option<(SplitKind, i32)> {
     })?;
     let gap = splitter_width(hwnd);
     let sidebar = client_rect_of(hwnd, tree).right;
-    if let Some(tab_list) =
-        with_app(|a| (a.vertical_tabs && !a.tabs_collapsed).then_some(a.tab_list)).flatten()
+    if with_app(|a| !a.tabs_collapsed) == Some(true)
+        && let Some(head) = tabbar::heading_rect(hwnd)
     {
-        let edge = client_rect_of(hwnd, tab_list).right;
+        let edge = head.left - gap;
         if (edge..edge + gap).contains(&x) {
             return Some((SplitKind::Tabs, edge));
         }
@@ -2774,18 +2800,17 @@ fn drag_splitter(hwnd: HWND, kind: SplitKind, x: i32) {
     match kind {
         SplitKind::Sidebar => {
             let dpi = unsafe { GetDpiForWindow(hwnd) };
-            // With vertical tabs the sidebar starts right of their column.
-            let left = with_app(|a| a.vertical_tabs.then_some(a.tab_list))
-                .flatten()
-                .map_or(0, |l| client_rect_of(hwnd, l).right + splitter_width(hwnd));
-            with_app(|a| a.split = tree::clamp_split(x - left, client.right - left, dpi));
+            let inner = content_right(hwnd);
+            with_app(|a| a.split = tree::clamp_split(x, inner, dpi));
         }
         SplitKind::Preview => {
-            with_app(|a| a.preview_width = Some((client.right - x - splitter_width(hwnd)).max(100)));
+            let inner = content_right(hwnd);
+            with_app(|a| a.preview_width = Some((inner - x - splitter_width(hwnd)).max(100)));
         }
         SplitKind::Tabs => {
             let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
-            with_app(|a| a.tab_list_width = Some((x * 96 / dpi.max(1)).max(1)));
+            let width = client.right - x - splitter_width(hwnd);
+            with_app(|a| a.tab_list_width = Some((width * 96 / dpi.max(1)).max(1)));
         }
         SplitKind::Panes => {
             if let Some((left, right)) = with_app(|a| {
@@ -2803,7 +2828,7 @@ fn drag_splitter(hwnd: HWND, kind: SplitKind, x: i32) {
     }
 }
 
-/// The tab strip's height; none with the tabs above the sidebar.
+/// The tab strip's height; none with the tabs in a column.
 fn tab_height(hwnd: HWND) -> i32 {
     if with_app(|a| a.vertical_tabs) == Some(true) { 0 } else { scale(hwnd, 30) }
 }
@@ -2969,7 +2994,7 @@ pub fn active_list() -> Option<HWND> {
     with_app(|a| a.view.list)
 }
 
-/// The tab list shown above the sidebar with vertical tabs, for the window tests.
+/// The tab list shown with vertical tabs, for the window tests.
 pub fn tab_list() -> Option<HWND> {
     with_app(|a| a.tab_list)
 }

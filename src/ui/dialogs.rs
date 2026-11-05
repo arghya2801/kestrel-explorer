@@ -139,7 +139,7 @@ Ctrl+Tab / Ctrl+Shift+Tab    Next / previous tab\r\n\
 Middle-click a tab, or its X    Close that tab\r\n\
 Middle-click a folder    Open it in a tab behind this one\r\n\
 Drag a tab    Move it\r\n\
-Right-click a tab    New, duplicate, reopen, move, close others or to the right, tabs above the sidebar\r\n\
+Right-click a tab    New, duplicate, reopen, move, close others or to the right, tabs on the right\r\n\
 On a focused tab strip or list    Arrows move, Enter opens, Delete closes, Shift+F10 the menu\r\n\
 Ctrl+N    New window, side by side\r\n\
 Ctrl+Shift+S    Toggle two folder panes\r\n\
@@ -338,7 +338,7 @@ unsafe fn create(owner: HWND, guide: bool, class: PCWSTR, operations: bool) -> w
                     ),
                     (1, DESCENDING, "Sort descendi&ng", None, true),
                     (1, GRID, "Show &thumbnails instead of details", None, true),
-                    (2, TAB_POSITION, "Tab &position", Some("Along the top|In a column on the left".into()), false),
+                    (2, TAB_POSITION, "Tab &position", Some("Along the top|In a column on the right".into()), false),
                     (
                         2,
                         NEW_TAB,

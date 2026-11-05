@@ -16,7 +16,7 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 - Toolbar buttons have tooltips naming their command and shortcut; every menu item shows its shortcut.
 - A Sort button with the sort key, its direction and Group by. View now has the layout, then Show, Panes and Tabs submenus.
 - This PC shows drives as tiles under "Devices and drives" and "Network locations", with a bar for the space used and "X free of Y".
-- Vertical tabs have their own full-height column at the left, which collapses to lettered badges.
+- Vertical tabs have their own full-height column at the right, which collapses to lettered badges. Resting the mouse on the collapsed column widens it over the file list to show the names.
 - Settings has seven pages and many new options: accent color, text size, row spacing, toolbar labels, status bar, title path; file name extensions, protected system files, folders first, single-click opening, double-click to go up, asking before recycling, size units, date style; where new tabs open, close buttons, closing the last tab; sidebar sections and following the open folder; the terminal; and a Keyboard page that rebinds any command without a restart.
 
 ### Changed

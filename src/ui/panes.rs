@@ -86,7 +86,9 @@ pub(super) unsafe fn create(
             parent,
             WC_LISTVIEWW,
             w!(""),
+            // Clipped to its siblings: the collapsed tab column widens over it on hover.
             WS_TABSTOP
+                | WS_CLIPSIBLINGS
                 | WINDOW_STYLE(
                     LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS | LVS_EDITLABELS,
                 ),
