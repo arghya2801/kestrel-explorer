@@ -32,6 +32,9 @@ thread_local! {
     static DRAG: Cell<Option<(usize, POINT, bool)>> = const { Cell::new(None) };
     /// The tab list's row under the mouse, and whether the mouse is on its close button.
     static LIST_HOT: Cell<(Option<usize>, bool)> = const { Cell::new((None, false)) };
+    /// Whether the collapsed column's peek timer is running: started when the mouse enters,
+    /// not restarted as it moves.
+    static PEEK_ARMED: Cell<bool> = const { Cell::new(false) };
     /// The tab list's row being dragged.
     static LIST_DRAG: Cell<Option<usize>> = const { Cell::new(None) };
 }
@@ -797,6 +800,10 @@ unsafe fn draw_row(cd: &NMLVCUSTOMDRAW) {
     }
 }
 
+/// The tab list's timer that widens the collapsed column, and its delay.
+const PEEK_TIMER: usize = 7;
+const PEEK_DELAY_MS: u32 = 120;
+
 /// Mouse handling for the tab list: close buttons, hover, dragging rows to reorder, and
 /// middle-click to close.
 unsafe extern "system" fn list_proc(
@@ -808,7 +815,7 @@ unsafe extern "system" fn list_proc(
     _data: usize,
 ) -> LRESULT {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        ReleaseCapture, TME_HOVER, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+        ReleaseCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     };
     let invalidate = || unsafe {
         let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(list), None, false);
@@ -853,24 +860,36 @@ unsafe extern "system" fn list_proc(
             if LIST_HOT.with(|h| h.replace((row, on_close))) != (row, on_close) {
                 invalidate();
             }
-            // Collapsed, a resting mouse (the system's hover time) widens the column to show names.
-            let peek = badges();
+            // Collapsed, the mouse entering widens the column to show names after a short delay,
+            // so passing over it on the way to the file list's scroll bar doesn't.
+            if badges() && !PEEK_ARMED.with(|a| a.replace(true)) {
+                unsafe { SetTimer(Some(list), PEEK_TIMER, PEEK_DELAY_MS, None) };
+            }
             let mut track = TRACKMOUSEEVENT {
                 cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                dwFlags: if peek { TME_LEAVE | TME_HOVER } else { TME_LEAVE },
+                dwFlags: TME_LEAVE,
                 hwndTrack: list,
-                dwHoverTime: u32::MAX, // HOVER_DEFAULT
+                dwHoverTime: 0,
             };
             unsafe {
                 let _ = TrackMouseEvent(&mut track);
             }
         }
-        WM_MOUSEHOVER => {
+        WM_TIMER if wp.0 == PEEK_TIMER => {
+            unsafe {
+                let _ = KillTimer(Some(list), PEEK_TIMER);
+            }
             crate::crash::guard(|| set_peek(true));
+            return LRESULT(0);
         }
         WM_MOUSELEAVE => {
             LIST_HOT.with(|h| h.set((None, false)));
             invalidate();
+            if PEEK_ARMED.with(|a| a.replace(false)) {
+                unsafe {
+                    let _ = KillTimer(Some(list), PEEK_TIMER);
+                }
+            }
             crate::crash::guard(|| set_peek(false));
         }
         WM_LBUTTONUP if LIST_DRAG.with(Cell::get).is_some() => {

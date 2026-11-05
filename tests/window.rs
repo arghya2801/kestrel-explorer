@@ -2285,7 +2285,8 @@ fn vertical_tabs_get_their_own_column_at_the_right() {
     }
     // Resting the mouse on it widens it over the file list, which keeps its size.
     let files = rect(ui::active_list().unwrap());
-    unsafe { SendMessageW(tabs, WM_MOUSEHOVER, None, None) };
+    // The mouse entering starts a short timer (7); the hidden test window can't hold the mouse.
+    unsafe { SendMessageW(tabs, WM_TIMER, Some(WPARAM(7)), None) };
     assert!(width() >= before + 30, "peek: {}", width());
     assert_eq!(rect(ui::active_list().unwrap()).right, files.right);
     unsafe { SendMessageW(tabs, WM_MOUSELEAVE, None, None) };
@@ -2848,7 +2849,7 @@ fn render_review_windows() {
         command(hwnd, ui::toolbar::TABS_COLLAPSE);
         pump_until(Duration::from_millis(250), || false);
         capture(hwnd, &out.join(format!("{name}-collapsed.bmp")));
-        unsafe { SendMessageW(ui::tab_list().unwrap(), WM_MOUSEHOVER, None, None) };
+        unsafe { SendMessageW(ui::tab_list().unwrap(), WM_TIMER, Some(WPARAM(7)), None) };
         pump_until(Duration::from_millis(250), || false);
         capture(hwnd, &out.join(format!("{name}-peek.bmp")));
         unsafe { SendMessageW(ui::tab_list().unwrap(), WM_MOUSELEAVE, None, None) };
