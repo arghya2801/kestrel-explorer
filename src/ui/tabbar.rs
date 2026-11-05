@@ -1275,13 +1275,20 @@ pub(super) fn switch_to(to: usize) {
     for id in ids {
         super::stop_watching_view(id);
     }
+    // One repaint for the whole switch instead of one per control moved, shown or hidden. Off
+    // before the old lists hide, or the window's background shows through for a frame.
+    let Some(hwnd) = with_app(|a| a.hwnd) else { return };
+    let quiet = unsafe { IsWindowVisible(hwnd) }.as_bool();
+    if quiet {
+        unsafe { SendMessageW(hwnd, WM_SETREDRAW, Some(WPARAM(0)), None) };
+    }
     for list in lists {
         unsafe {
             SendMessageW(list, LVM_CANCELEDITLABEL, None, None);
             let _ = ShowWindow(list, SW_HIDE);
         }
     }
-    let Some((hwnd, strip, list, ids)) = with_app(|a| {
+    let Some((strip, list, ids)) = with_app(|a| {
         let mut incoming = a.tabs.items_mut()[to].workspace.take()?;
         std::mem::swap(&mut a.view, &mut incoming.view);
         std::mem::swap(&mut a.other, &mut incoming.other);
@@ -1296,16 +1303,14 @@ pub(super) fn switch_to(to: usize) {
         {
             ids.push(other.id);
         }
-        Some((a.hwnd, a.tab_strip, a.view.list, ids))
+        Some((a.tab_strip, a.view.list, ids))
     })
     .flatten() else {
+        if quiet {
+            unsafe { SendMessageW(hwnd, WM_SETREDRAW, Some(WPARAM(1)), None) };
+        }
         return;
     };
-    // One repaint for the whole switch instead of one per control moved, shown or hidden.
-    let quiet = unsafe { IsWindowVisible(hwnd) }.as_bool();
-    if quiet {
-        unsafe { SendMessageW(hwnd, WM_SETREDRAW, Some(WPARAM(0)), None) };
-    }
     unsafe {
         SendMessageW(strip, TCM_SETCURSEL, Some(WPARAM(to)), None);
     }

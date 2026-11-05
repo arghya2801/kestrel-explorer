@@ -1023,8 +1023,21 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
                 dark::edit_colors(HDC(wp.0 as _)).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
             }
-            WM_ERASEBKGND if dark::erase(hwnd, HDC(wp.0 as _)) => {
-                chrome::paint(hwnd, HDC(wp.0 as _));
+            // The background and the drawn chrome (fields, separators) go to the screen in one
+            // copy, so a full repaint, as a tab switch does, doesn't blink.
+            WM_ERASEBKGND if with_app(|a| a.brushes.is_some()) == Some(true) => {
+                let target = HDC(wp.0 as _);
+                let mut r = RECT::default();
+                let _ = GetClientRect(hwnd, &mut r);
+                let mut hdc = HDC::default();
+                let buffer = BeginBufferedPaint(target, &r, BPBF_COMPATIBLEBITMAP, None, &mut hdc);
+                let buffered = buffer != 0;
+                let hdc = if buffered { hdc } else { target };
+                dark::erase(hwnd, hdc);
+                chrome::paint(hwnd, hdc);
+                if buffered {
+                    let _ = EndBufferedPaint(buffer, true);
+                }
                 LRESULT(1)
             }
             // Windows' light/dark app setting changed.
