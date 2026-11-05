@@ -1,8 +1,8 @@
 //! Custom key bindings from `keys.txt` in the data folder, one per line:
 //! `Ctrl+Shift+E = show-in-explorer`. Lines starting with `#` are comments.
-//! Read once per process; restart Kestrel after editing.
+//! Read on first use; Settings > Keyboard writes the file and reloads it.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, RwLock};
 
 /// A key press: virtual-key code plus Ctrl, Shift and Alt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,25 +37,38 @@ pub fn parse_chord(text: &str) -> Option<Chord> {
     (chord.vk != 0).then_some(chord)
 }
 
+/// Keys known by name, as keys.txt writes them.
+const NAMED: [(&str, &str, u16); 15] = [
+    ("left", "Left", 0x25),
+    ("up", "Up", 0x26),
+    ("right", "Right", 0x27),
+    ("down", "Down", 0x28),
+    ("home", "Home", 0x24),
+    ("end", "End", 0x23),
+    ("pageup", "PageUp", 0x21),
+    ("pagedown", "PageDown", 0x22),
+    ("insert", "Insert", 0x2D),
+    ("delete", "Delete", 0x2E),
+    ("backspace", "Backspace", 0x08),
+    ("enter", "Enter", 0x0D),
+    ("space", "Space", 0x20),
+    ("tab", "Tab", 0x09),
+    ("esc", "Esc", 0x1B),
+];
+
+/// `chord` as keys.txt writes it: "Ctrl+Shift+K". `None` for keys keys.txt can't name.
+pub fn chord_text(chord: Chord) -> Option<String> {
+    let key = match chord.vk {
+        vk @ (0x30..=0x39 | 0x41..=0x5A) => (vk as u8 as char).to_string(),
+        vk @ 0x70..=0x87 => format!("F{}", vk - 0x70 + 1),
+        vk => NAMED.iter().find(|n| n.2 == vk)?.1.to_string(),
+    };
+    let mods = [(chord.ctrl, "Ctrl+"), (chord.shift, "Shift+"), (chord.alt, "Alt+")];
+    Some(mods.iter().filter(|m| m.0).map(|m| m.1).collect::<String>() + &key)
+}
+
 fn key_code(key: &str) -> Option<u16> {
-    let named = [
-        ("left", 0x25),
-        ("up", 0x26),
-        ("right", 0x27),
-        ("down", 0x28),
-        ("home", 0x24),
-        ("end", 0x23),
-        ("pageup", 0x21),
-        ("pagedown", 0x22),
-        ("insert", 0x2D),
-        ("delete", 0x2E),
-        ("backspace", 0x08),
-        ("enter", 0x0D),
-        ("space", 0x20),
-        ("tab", 0x09),
-        ("esc", 0x1B),
-    ];
-    if let Some(&(_, vk)) = named.iter().find(|(name, _)| *name == key) {
+    if let Some(&(_, _, vk)) = NAMED.iter().find(|(name, _, _)| *name == key) {
         return Some(vk);
     }
     if let [c] = key.as_bytes()
@@ -90,17 +103,41 @@ pub fn parse(text: &str, commands: &[(&str, usize)]) -> (Vec<Binding>, Vec<Strin
     (bindings, problems)
 }
 
-/// This process's bindings from keys.txt, read on first use.
-pub fn bindings(commands: &[(&str, usize)]) -> &'static [Binding] {
-    static LOADED: OnceLock<Vec<Binding>> = OnceLock::new();
-    LOADED.get_or_init(|| {
-        let text = std::fs::read_to_string(crate::crash::data_dir().join("keys.txt")).unwrap_or_default();
-        let (bindings, problems) = parse(&text, commands);
-        for p in problems {
-            crate::crash::log(&p);
-        }
-        bindings
-    })
+static LOADED: RwLock<Option<Arc<Vec<Binding>>>> = RwLock::new(None);
+
+/// This process's bindings from keys.txt, read on first use and after `save`.
+pub fn bindings(commands: &[(&str, usize)]) -> Arc<Vec<Binding>> {
+    if let Some(loaded) = LOADED.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        return loaded;
+    }
+    let text = std::fs::read_to_string(crate::crash::data_dir().join("keys.txt")).unwrap_or_default();
+    let (bindings, problems) = parse(&text, commands);
+    for p in problems {
+        crate::crash::log(&p);
+    }
+    let bindings = Arc::new(bindings);
+    *LOADED.write().unwrap_or_else(|e| e.into_inner()) = Some(bindings.clone());
+    bindings
+}
+
+/// Writes keys.txt with `lines` (keys, command name), keeping its comments, and reloads it.
+pub fn save(lines: &[(String, &str)]) -> std::io::Result<()> {
+    let path = crate::crash::data_dir().join("keys.txt");
+    let old = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut text: String =
+        old.lines().filter(|l| l.trim_start().starts_with('#')).map(|l| format!("{l}\n")).collect();
+    if text.is_empty() {
+        text = "# Kestrel key bindings: keys = command. Settings > Keyboard edits this file.\n".into();
+    }
+    for (keys, name) in lines {
+        text += &format!("{keys} = {name}\n");
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, text)?;
+    *LOADED.write().unwrap_or_else(|e| e.into_inner()) = None;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -123,5 +160,13 @@ mod tests {
         assert_eq!((bindings[0].command, bindings[0].chord.vk), (109, b'E' as u16));
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems[0].contains("line 4") && problems[1].contains("line 5"));
+    }
+
+    #[test]
+    fn chords_name_themselves_as_keys_txt_reads_them() {
+        for text in ["Ctrl+Shift+K", "Alt+Left", "F12", "Ctrl+7", "Shift+Delete", "Ctrl+Alt+PageDown"] {
+            assert_eq!(chord_text(parse_chord(text).unwrap()).as_deref(), Some(text));
+        }
+        assert_eq!(chord_text(Chord { vk: 0xBA, ctrl: true, shift: false, alt: false }), None);
     }
 }

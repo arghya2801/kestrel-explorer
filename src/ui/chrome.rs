@@ -38,22 +38,40 @@ fn glyph(id: usize) -> Option<char> {
         toolbar::REFRESH => '\u{E72C}',
         toolbar::SPLIT => '\u{E89A}',
         toolbar::VIEW => '\u{E8A9}',
+        toolbar::SORT_MENU => '\u{E8CB}',
         toolbar::MORE => '\u{E712}',
         toolbar::SETTINGS => '\u{E713}',
         toolbar::HELP => '\u{E897}',
         super::tabbar::NEW_TAB => '\u{E710}',
+        toolbar::TAB_LIST => '\u{E70D}',
+        toolbar::TABS_COLLAPSE => {
+            // The column sits at the right: collapse points right, expand left.
+            if with_app(|a| a.tabs_collapsed) == Some(true) { '\u{E76B}' } else { '\u{E76C}' }
+        }
         _ => return None,
     })
 }
 
 /// Buttons that open a menu get a small arrow after the label.
 fn opens_menu(id: usize) -> bool {
-    matches!(id, toolbar::VIEW | toolbar::MORE)
+    matches!(id, toolbar::VIEW | toolbar::MORE | toolbar::SORT_MENU)
 }
 
 /// Icon-only buttons: the label is still the window text, for screen readers.
 fn icon_only(id: usize) -> bool {
-    matches!(id, ID_BACK | ID_FORWARD | ID_UP | breadcrumbs::EDIT | super::tabbar::NEW_TAB)
+    // Settings can drop the toolbar's labels; the tooltips still name each button.
+    let toolbar = super::toolbar::is_toolbar_command(id) && !crate::prefs::get().toolbar_labels;
+    toolbar
+        || matches!(
+            id,
+            ID_BACK
+                | ID_FORWARD
+                | ID_UP
+                | breadcrumbs::EDIT
+                | super::tabbar::NEW_TAB
+                | toolbar::TAB_LIST
+                | toolbar::TABS_COLLAPSE
+        )
 }
 
 thread_local! {
@@ -167,6 +185,9 @@ pub(super) fn button_width(parent: HWND, button: HWND, id: usize) -> i32 {
     let (label, arrow) = measure(parent, |dc| (width_of(dc, &text), width_of(dc, &arrow)));
     let icon = if glyph(id).is_some() { scale(parent, ICON + 8) } else { 0 };
     let arrow = if arrow > 0 { arrow + scale(parent, 6) } else { 0 };
+    if icon_only(id) {
+        return scale(parent, PAD) * 2 + scale(parent, ICON) + arrow;
+    }
     scale(parent, PAD) * 2 + icon + label + arrow
 }
 
@@ -184,6 +205,8 @@ pub(super) fn is_top_button(hwnd: HWND) -> bool {
         a.buttons.contains(&hwnd)
             || a.toolbar.contains(&hwnd)
             || a.address_edit_button == hwnd
+            || a.tab_buttons.contains(&hwnd)
+            || a.crumb_more == hwnd
             || a.breadcrumbs.iter().any(|p| p.0 == hwnd)
     }) == Some(true)
 }
@@ -212,7 +235,7 @@ pub(super) unsafe fn round_outline(hdc: HDC, r: &RECT, fill: u32, edge: u32, rad
 }
 
 /// A rounded outline of `width` pixels.
-unsafe fn outline(hdc: HDC, r: &RECT, color: u32, radius: i32, width: i32) {
+pub(super) unsafe fn outline(hdc: HDC, r: &RECT, color: u32, radius: i32, width: i32) {
     unsafe {
         let pen = CreatePen(PS_SOLID, width, COLORREF(color));
         let (ob, op) = (SelectObject(hdc, GetStockObject(NULL_BRUSH)), SelectObject(hdc, HGDIOBJ(pen.0)));
@@ -223,7 +246,7 @@ unsafe fn outline(hdc: HDC, r: &RECT, color: u32, radius: i32, width: i32) {
     }
 }
 
-unsafe fn fill(hdc: HDC, r: &RECT, color: u32) {
+pub(super) unsafe fn fill(hdc: HDC, r: &RECT, color: u32) {
     unsafe {
         let brush = CreateSolidBrush(COLORREF(color));
         FillRect(hdc, r, brush);
@@ -239,7 +262,7 @@ unsafe fn text(hdc: HDC, s: &[u16], r: &mut RECT, color: u32, format: DRAW_TEXT_
     }
 }
 
-unsafe fn icon(hdc: HDC, hwnd: HWND, c: char, r: &mut RECT, color: u32, format: DRAW_TEXT_FORMAT) {
+pub(super) unsafe fn icon(hdc: HDC, hwnd: HWND, c: char, r: &mut RECT, color: u32, format: DRAW_TEXT_FORMAT) {
     let mut buf = [0u16; 2];
     let font = icon_font(hwnd);
     if font.is_invalid() {
@@ -260,7 +283,12 @@ pub(super) unsafe fn draw_button(nm: &NMCUSTOMDRAW) -> Option<LRESULT> {
     let hwnd = nm.hdr.hwndFrom;
     let id = unsafe { GetDlgCtrlID(hwnd) } as usize;
     let (p, toggled, crumb, last_crumb) = with_app(|a| {
-        let at = a.breadcrumbs.iter().position(|c| c.0 == hwnd);
+        // "…" draws as a crumb before the first one shown.
+        let at = a
+            .breadcrumbs
+            .iter()
+            .position(|c| c.0 == hwnd)
+            .or((a.crumb_more == hwnd).then_some(a.breadcrumbs.len()));
         (
             a.palette,
             id == toolbar::SPLIT && a.split_view,
@@ -367,6 +395,35 @@ pub(super) fn paint(hwnd: HWND, hdc: HDC) {
         }
         for r in toolbar::separators(hwnd) {
             fill(hdc, &r, stroke);
+        }
+        // Vertical tabs: the "Tabs (n)" heading, and a line down the column's edge.
+        if let Some(head) = super::tabbar::heading_rect(hwnd)
+            && let Some((font, collapsed)) = with_app(|a| (a.font, a.tabs_collapsed))
+        {
+            if !collapsed {
+                let old = SelectObject(hdc, HGDIOBJ(font.0));
+                SetBkMode(hdc, TRANSPARENT);
+                let label: Vec<u16> = super::tabbar::heading_text().encode_utf16().collect();
+                let mut r =
+                    RECT { left: head.left + scale(hwnd, 12), right: head.right - scale(hwnd, 64), ..head };
+                text(hdc, &label, &mut r, mix(p.chrome, p.text, 70), DT_LEFT | DT_END_ELLIPSIS);
+                SelectObject(hdc, old);
+            }
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let x = head.left - scale(hwnd, 3);
+            fill(hdc, &RECT { left: x, top: head.top, right: x + 1, bottom: client.bottom }, stroke);
+        }
+        // The tab strip's base line continues under the "+" and "all tabs" buttons.
+        if let Some(strip) = with_app(|a| (!a.vertical_tabs).then_some(a.tab_strip)).flatten() {
+            let r = super::client_rect_of(hwnd, strip);
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            fill(
+                hdc,
+                &RECT { left: r.right, top: r.bottom - 1, right: client.right, bottom: r.bottom },
+                stroke,
+            );
         }
     }
 }

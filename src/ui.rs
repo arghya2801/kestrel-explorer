@@ -54,6 +54,7 @@ mod dialogs;
 mod drag;
 mod grid;
 mod groups;
+mod palette;
 mod panes;
 mod preview;
 mod rename;
@@ -91,6 +92,20 @@ const COMMAND_NAMES: &[(&str, usize)] = &[
     ("swap-panes", toolbar::SWAP_PANES),
     ("mirror-pane", toolbar::MIRROR_PANE),
     ("vertical-tabs", toolbar::VERTICAL_TABS),
+    ("reopen-closed-tab", toolbar::REOPEN_TAB),
+    ("close-other-tabs", toolbar::CLOSE_OTHER_TABS),
+    ("close-tabs-to-the-right", toolbar::CLOSE_TABS_AFTER),
+    ("move-tab-left", toolbar::MOVE_TAB_BACK),
+    ("move-tab-right", toolbar::MOVE_TAB_FORWARD),
+    ("new-tab", tabbar::NEW_TAB),
+    ("close-tab", toolbar::CLOSE_TAB),
+    ("duplicate-tab", toolbar::DUPLICATE_TAB),
+    ("next-tab", toolbar::NEXT_TAB),
+    ("previous-tab", toolbar::PREV_TAB),
+    ("new-window", toolbar::NEW_WINDOW),
+    ("filter", toolbar::FOCUS_FILTER),
+    ("other-pane", toolbar::FOCUS_OTHER_PANE),
+    ("command-palette", toolbar::PALETTE),
     ("refresh", toolbar::REFRESH),
     ("hidden-items", toolbar::HIDDEN),
     ("preview", toolbar::PREVIEW),
@@ -225,6 +240,11 @@ struct App {
     drag_kind: SplitKind,
     address: HWND,
     address_edit_button: HWND,
+    /// The address bar's "…" crumb, and the folders between the root and the shown crumbs that
+    /// a deep path leaves out. `crumbs_first` is the first crumb that fits.
+    crumb_more: HWND,
+    crumbs_drained: Vec<PathBuf>,
+    crumbs_first: usize,
     address_editing: bool,
     breadcrumbs: Vec<(HWND, PathBuf)>,
     /// The address and filter fields drawn around their controls (`chrome::paint`).
@@ -248,9 +268,27 @@ struct App {
     events: Arc<Events<Event>>,
     tabs: Tabs<tabbar::TabSlot>,
     tab_strip: HWND,
-    /// The tabs listed above the sidebar, shown instead of the strip with `vertical_tabs`.
+    /// Tooltips for the top bar's buttons, naming each command's shortcut.
+    tips: HWND,
+    /// The "+", "all tabs" and (vertical) collapse buttons.
+    tab_buttons: [HWND; 3],
+    /// The tabs listed in a column at the right, shown instead of the strip with `vertical_tabs`.
     tab_list: HWND,
     vertical_tabs: bool,
+    /// The vertical tab column's width (96-DPI pixels) once its edge was dragged, and whether
+    /// it's collapsed to badges.
+    tab_list_width: Option<i32>,
+    tabs_collapsed: bool,
+    /// The collapsed column is widened over the file list while the mouse rests on it.
+    tabs_peek: bool,
+    /// The window font, and the bold copy made from it for the active vertical tab.
+    tab_bold: Option<(HFONT, HFONT)>,
+    /// The preferences this window last applied; Settings or another window can change them.
+    applied_prefs: crate::prefs::Prefs,
+    /// The folder the sidebar last followed to, with Settings' "follow the open folder".
+    followed: Option<PathBuf>,
+    /// Recently closed tabs, newest last, for Ctrl+Shift+T.
+    closed_tabs: Vec<crate::settings::SavedTab>,
     next_tab_id: u64,
     theme: ThemeChoice,
     palette: Palette,
@@ -304,6 +342,9 @@ impl App {
             self.tree,
             self.tab_strip,
             self.tab_list,
+            self.tab_buttons[0],
+            self.tab_buttons[1],
+            self.tab_buttons[2],
             b0,
             b1,
             b2,
@@ -312,6 +353,7 @@ impl App {
         controls.extend(self.views().map(|v| v.label));
         controls.extend(&self.toolbar);
         controls.push(self.address_edit_button);
+        controls.push(self.crumb_more);
         controls.extend(self.breadcrumbs.iter().map(|p| p.0));
         controls.extend(preview::controls(&self.preview));
         controls
@@ -417,6 +459,7 @@ unsafe fn child(
 }
 
 pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
+    crate::prefs::init(settings.prefs);
     unsafe {
         let hinstance = GetModuleHandleW(None)?.into();
         let wc = WNDCLASSEXW {
@@ -493,7 +536,7 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let list = view.list;
         let status = child(hwnd, STATUSCLASSNAMEW, w!(""), WINDOW_STYLE(SBARS_SIZEGRIP), none, 0)?;
         let tree = tree::create(hwnd)?;
-        let tab_strip = tabbar::create(hwnd)?;
+        let (tab_strip, tab_buttons) = tabbar::create(hwnd)?;
         let tab_list = tabbar::create_list(hwnd)?;
         startup_mark("sidebar controls");
         let preview_pane = preview::create(hwnd)?;
@@ -502,7 +545,21 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         startup_mark("toolbar controls");
 
         set_font(
-            &[list, status, address, filter, tree, tab_strip, tab_list, buttons[0], buttons[1], buttons[2]],
+            &[
+                list,
+                status,
+                address,
+                filter,
+                tree,
+                tab_strip,
+                tab_list,
+                tab_buttons[0],
+                tab_buttons[1],
+                tab_buttons[2],
+                buttons[0],
+                buttons[1],
+                buttons[2],
+            ],
             font,
         );
         set_font(&preview::controls(&preview_pane), font);
@@ -512,6 +569,15 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
         let address_edit_button =
             child(hwnd, w!("BUTTON"), w!("Edit"), WS_TABSTOP, WINDOW_EX_STYLE(0), breadcrumbs::EDIT)?;
         set_font(&[address_edit_button], font);
+        let crumb_more =
+            child(hwnd, w!("BUTTON"), w!("…"), WS_TABSTOP, WINDOW_EX_STYLE(0), breadcrumbs::MORE)?;
+        let _ = ShowWindow(crumb_more, SW_HIDE);
+        set_font(&[crumb_more], font);
+        let mut tipped = buttons.to_vec();
+        tipped.extend(&toolbar_buttons);
+        tipped.extend(tab_buttons);
+        tipped.push(address_edit_button);
+        let tips = palette::add_tooltips(hwnd, &tipped);
         APP.with(|cell| {
             *cell.borrow_mut() = Some(App {
                 hwnd,
@@ -525,6 +591,9 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 drag_kind: SplitKind::Sidebar,
                 address,
                 address_edit_button,
+                crumb_more,
+                crumbs_drained: Vec::new(),
+                crumbs_first: 0,
                 address_editing: false,
                 breadcrumbs: Vec::new(),
                 fields: [RECT::default(); 2],
@@ -542,8 +611,17 @@ pub fn create_main_window(start: &Path, settings: &Settings) -> Result<HWND> {
                 events,
                 tabs: Tabs::new(tabbar::TabSlot::active(0)),
                 tab_strip,
+                tips,
+                tab_buttons,
                 tab_list,
                 vertical_tabs: false,
+                tab_list_width: settings.tabs_width,
+                tabs_collapsed: settings.tabs_collapsed,
+                tabs_peek: false,
+                tab_bold: None,
+                closed_tabs: Vec::new(),
+                applied_prefs: crate::prefs::get(),
+                followed: None,
                 next_tab_id: 1,
                 theme: settings.theme,
                 palette: Palette::new(false),
@@ -631,15 +709,37 @@ pub fn translate(msg: &MSG) -> bool {
         unsafe { SendMessageW(msg.hwnd, LVM_SCROLL, Some(WPARAM(-delta as usize)), Some(LPARAM(0))) };
         return true;
     }
+    // Middle-click on a folder opens it in a new tab behind this one, as on a browser link.
+    if msg.message == WM_MBUTTONUP
+        && let Some(dir) = crash::guard(|| folder_at(msg.hwnd, msg.lParam)).flatten()
+    {
+        tabbar::open_in_background(dir);
+        return true;
+    }
     if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
         return false;
     }
     crash::guard(|| on_key(msg)).unwrap_or(false)
 }
 
+/// The folder in file list `list` at client point `lp`, if a folder is there.
+fn folder_at(list: HWND, lp: LPARAM) -> Option<PathBuf> {
+    let view = with_app(|a| a.views().find(|v| v.list == list).map(|v| v.id)).flatten()?;
+    let pt = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
+    let mut hit = LVHITTESTINFO { pt, ..Default::default() };
+    let row = unsafe { SendMessageW(list, LVM_HITTEST, None, Some(LPARAM(&mut hit as *mut _ as isize))) }.0;
+    let row = usize::try_from(row).ok()?;
+    match with_view(view, |v| v.browser.path_at(row)).flatten()? {
+        (dir, true) => Some(dir),
+        _ => None,
+    }
+}
+
 fn on_key(msg: &MSG) -> bool {
     panes::activate(msg.hwnd);
-    let Some((list, address, tree, filter)) = with_app(|a| (a.view.list, a.address, a.tree, a.filter)) else {
+    let Some((list, address, tree, filter, strip, tab_list)) =
+        with_app(|a| (a.view.list, a.address, a.tree, a.filter, a.tab_strip, a.tab_list))
+    else {
         return false;
     };
     if msg.message == WM_KEYDOWN && msg.wParam.0 == VK_F1.0 as usize {
@@ -648,7 +748,7 @@ fn on_key(msg: &MSG) -> bool {
         }
         return true;
     }
-    if ![list, address, tree, filter].contains(&msg.hwnd)
+    if ![list, address, tree, filter, strip, tab_list].contains(&msg.hwnd)
         && !toolbar::owns(msg.hwnd)
         && !breadcrumbs::owns(msg.hwnd)
         && with_app(|a| a.address_edit_button) != Some(msg.hwnd)
@@ -671,6 +771,11 @@ fn on_key(msg: &MSG) -> bool {
     {
         unsafe { SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(binding.command)), Some(LPARAM(0))) };
         return true;
+    }
+    if (msg.hwnd == strip || msg.hwnd == tab_list)
+        && let Some(done) = tabbar::on_key(msg.hwnd, key, shift)
+    {
+        return done;
     }
     if msg.message == WM_SYSKEYDOWN {
         match key {
@@ -757,14 +862,19 @@ fn on_key(msg: &MSG) -> bool {
             }
         }
         VK_ESCAPE => cancel_loading(),
+        VK_P if ctrl && shift => palette::open(with_app(|a| a.hwnd).unwrap_or_default()),
+        VK_T if ctrl && shift => tabbar::reopen(),
         VK_T if ctrl => tabbar::new_tab(None),
+        k if ctrl && !shift && (VK_1.0..=VK_9.0).contains(&k.0) => {
+            tabbar::select_number((k.0 - VK_1.0 + 1) as usize)
+        }
         VK_E if ctrl && shift => tree::reveal(),
         VK_K if ctrl && shift => tabbar::duplicate(with_app(|a| a.tabs.active()).unwrap_or(0)),
         VK_N if ctrl && !shift => open_side_by_side(with_app(|a| a.hwnd).unwrap_or_default()),
         VK_W if ctrl => tabbar::close_active(),
         VK_TAB if ctrl => tabbar::cycle(shift_held()),
         VK_TAB => unsafe {
-            // Focus order: address bar, sidebar, list.
+            // Focus order: address bar, filter, toolbar, tabs, sidebar, list.
             let mut order = vec![address, filter];
             order.extend(
                 with_app(|a| a.toolbar.clone())
@@ -772,6 +882,7 @@ fn on_key(msg: &MSG) -> bool {
                     .into_iter()
                     .filter(|&h| IsWindowVisible(h).as_bool() && IsWindowEnabled(h).as_bool()),
             );
+            order.push(if with_app(|a| a.vertical_tabs) == Some(true) { tab_list } else { strip });
             order.extend([tree, list]);
             if let Some(other) =
                 with_app(|a| a.split_view.then(|| a.other.as_ref().map(|v| v.list)).flatten()).flatten()
@@ -800,6 +911,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
             WM_APP_PREFERENCES => {
+                apply_prefs(hwnd);
                 if let Some((pins, unpinned)) = crate::session::pins() {
                     let changed = with_app(|a| {
                         let changed = a.pins != pins || a.unpinned != unpinned;
@@ -859,6 +971,8 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         .iter()
                         .chain(a.toolbar.iter())
                         .chain(std::iter::once(&a.address_edit_button))
+                        .chain(std::iter::once(&a.crumb_more))
+                        .chain(a.tab_buttons.iter())
                         .any(|b| b.0 as isize == from)
                         || a.breadcrumbs.iter().any(|p| p.0.0 as isize == from)
                 }) == Some(true);
@@ -867,9 +981,9 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     return DefWindowProcW(hwnd, msg, wp, lp);
                 }
                 match id {
-                    ID_BACK if from_button => run(Browser::back),
-                    ID_FORWARD if from_button => run(Browser::forward),
-                    ID_UP if from_button => run(Browser::up),
+                    ID_BACK if from_button || from == 0 => run(Browser::back),
+                    ID_FORWARD if from_button || from == 0 => run(Browser::forward),
+                    ID_UP if from_button || from == 0 => run(Browser::up),
                     id if (from == 0 || from_button)
                         && (breadcrumbs::execute(id)
                             || toolbar::execute(id)
@@ -877,8 +991,16 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                             || tabbar::execute(id)) => {}
                     _ => return DefWindowProcW(hwnd, msg, wp, lp),
                 }
-                if !matches!(id, toolbar::SETTINGS | toolbar::SHORTCUTS | toolbar::HELP | breadcrumbs::EDIT)
-                    && let Some(list) = with_app(|a| a.view.list)
+                if !matches!(
+                    id,
+                    toolbar::SETTINGS
+                        | toolbar::SHORTCUTS
+                        | toolbar::HELP
+                        | toolbar::PALETTE
+                        | toolbar::FOCUS_FILTER
+                        | toolbar::FOCUS_OTHER_PANE
+                        | breadcrumbs::EDIT
+                ) && let Some(list) = with_app(|a| a.view.list)
                 {
                     let _ = SetFocus(Some(list));
                 }
@@ -901,8 +1023,21 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
                 dark::edit_colors(HDC(wp.0 as _)).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp))
             }
-            WM_ERASEBKGND if dark::erase(hwnd, HDC(wp.0 as _)) => {
-                chrome::paint(hwnd, HDC(wp.0 as _));
+            // The background and the drawn chrome (fields, separators) go to the screen in one
+            // copy, so a full repaint, as a tab switch does, doesn't blink.
+            WM_ERASEBKGND if with_app(|a| a.brushes.is_some()) == Some(true) => {
+                let target = HDC(wp.0 as _);
+                let mut r = RECT::default();
+                let _ = GetClientRect(hwnd, &mut r);
+                let mut hdc = HDC::default();
+                let buffer = BeginBufferedPaint(target, &r, BPBF_COMPATIBLEBITMAP, None, &mut hdc);
+                let buffered = buffer != 0;
+                let hdc = if buffered { hdc } else { target };
+                dark::erase(hwnd, hdc);
+                chrome::paint(hwnd, hdc);
+                if buffered {
+                    let _ = EndBufferedPaint(buffer, true);
+                }
                 LRESULT(1)
             }
             // Windows' light/dark app setting changed.
@@ -963,7 +1098,7 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let _ = GetCursorPos(&mut pt);
                 let _ = ScreenToClient(hwnd, &mut pt);
                 let at = LPARAM(((pt.y as isize & 0xFFFF) << 16) | (pt.x as isize & 0xFFFF));
-                if over_splitter(hwnd, at) {
+                if splitter_at(hwnd, at).is_some() {
                     SetCursor(LoadCursorW(None, IDC_SIZEWE).ok());
                     return LRESULT(1);
                 }
@@ -1068,6 +1203,19 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 stop_watching();
                 if let Some(app) = APP.with(|cell| cell.try_borrow_mut().ok().and_then(|mut a| a.take())) {
                     let _ = DeleteObject(HGDIOBJ(app.font.0));
+                    let spacer = SendMessageW(
+                        app.tab_list,
+                        LVM_GETIMAGELIST,
+                        Some(WPARAM(LVSIL_SMALL as usize)),
+                        None,
+                    )
+                    .0;
+                    if spacer != 0 {
+                        let _ = ImageList_Destroy(Some(HIMAGELIST(spacer)));
+                    }
+                    if let Some((_, bold)) = app.tab_bold {
+                        let _ = DeleteObject(HGDIOBJ(bold.0));
+                    }
                 }
                 chrome::shutdown();
                 PostQuitMessage(0);
@@ -1084,7 +1232,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
         return unsafe { chrome::draw_button(&*(lp.0 as *const NMCUSTOMDRAW)) };
     }
     if hdr.code == TTN_GETDISPINFOW
-        && let Some(done) = tabbar::tooltip(hdr, lp)
+        && let Some(done) = tabbar::tooltip(hdr, lp).or_else(|| palette::tooltip(hdr, lp))
     {
         return Some(done);
     }
@@ -1104,7 +1252,9 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
             with_app(|a| Some((a.view_mut(view)?.groups.clone(), a.palette))).flatten()?;
         let cd = unsafe { &*(lp.0 as *const NMLVCUSTOMDRAW) };
         return unsafe {
-            groups::draw_header(cd, &groups, palette).or_else(|| dark::column_lines(cd, palette))
+            this_pc_tile(cd, view, palette)
+                .or_else(|| groups::draw_header(cd, &groups, palette))
+                .or_else(|| dark::column_lines(cd, palette))
         };
     }
     if hdr.code == LVN_ODCACHEHINT {
@@ -1126,6 +1276,7 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
         hdr.code,
         NM_SETFOCUS
             | NM_CLICK
+            | NM_DBLCLK
             | LVN_COLUMNCLICK
             | LVN_ITEMACTIVATE
             | LVN_BEGINDRAG
@@ -1178,6 +1329,12 @@ unsafe fn on_notify(hdr: &NMHDR, lp: LPARAM) -> Option<LRESULT> {
             }
             LVN_BEGINLABELEDITW => Some(commands::begin_rename(lp)),
             LVN_ENDLABELEDITW => Some(commands::end_rename(lp)),
+            NM_DBLCLK
+                if (*(lp.0 as *const NMITEMACTIVATE)).iItem < 0 && crate::prefs::get().up_on_double_click =>
+            {
+                run(Browser::up);
+                Some(LRESULT(0))
+            }
             LVN_ITEMACTIVATE => {
                 let row = (*(lp.0 as *const NMITEMACTIVATE)).iItem;
                 let target =
@@ -1216,6 +1373,9 @@ fn fill(v: &mut panes::FolderView, item: &mut LVITEMW) {
     }
     let wide = |t: String| t.encode_utf16().collect::<Vec<_>>();
     match COLUMNS.get(item.iSubItem as usize).map(|c| c.2) {
+        Some(SortKey::Name) if drive.is_none() && !s.is_dir(i) && !crate::prefs::get().show_extensions => {
+            write(item, crate::format::without_extension(s.name(i)))
+        }
         Some(SortKey::Name) => write(item, s.name(i)),
         Some(SortKey::Modified) => write(item, &wide(format::time(s.entries[i].modified))),
         Some(SortKey::Type) if drive.is_some() => write(item, &wide(drive.unwrap().detail.clone())),
@@ -1564,12 +1724,15 @@ fn late_init() {
                 Some(WPARAM(TVSIL_NORMAL as usize)),
                 Some(LPARAM(image_list.0)),
             );
+            // The tab list draws its own rows; a blank image list only sets their height.
+            // ponytail: sized at startup DPI; recreate on WM_DPICHANGED if rows look off.
             if let Some(tab_list) = with_app(|a| a.tab_list) {
+                let spacer = ImageList_Create(1, scale(tab_list, 30), ILC_COLOR32, 1, 1);
                 SendMessageW(
                     tab_list,
                     LVM_SETIMAGELIST,
                     Some(WPARAM(LVSIL_SMALL as usize)),
-                    Some(LPARAM(image_list.0)),
+                    Some(LPARAM(spacer.0)),
                 );
             }
         }
@@ -1645,6 +1808,8 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
             pins: a.pins.clone(),
             unpinned: a.unpinned.clone(),
             vertical_tabs: a.vertical_tabs,
+            tabs_width: a.tab_list_width,
+            tabs_collapsed: a.tabs_collapsed,
             recent: a.recent.clone(),
             grouped: a.grouped.clone(),
             ..Default::default()
@@ -1661,6 +1826,12 @@ fn current_settings(hwnd: HWND) -> Option<Settings> {
         s.columns = (0..COLUMNS.len())
             .map(|i| SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(i)), None).0 as i32)
             .collect();
+        // Split panes narrow the Name column for now; the saved width is the unsplit one.
+        if let Some(name) = with_app(|a| a.view.name_before_split).flatten()
+            && let Some(first) = s.columns.first_mut()
+        {
+            *first = name;
+        }
     }
     (s.tabs, s.active_tab) = tabbar::saved();
     Some(s)
@@ -2066,10 +2237,29 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool, focus: Option<&[u16
         }
         unsafe { SendMessageW(list, LVM_CANCELEDITLABEL, None, None) };
     }
-    // Group by date, in folders that asked for it.
-    let Some((sections, view_groups)) = with_app(|a| {
+    // Group by date, in folders that asked for it; This PC by kind of drive.
+    let Some((sections, view_groups, this_pc, grid)) = with_app(|a| {
         let v = a.views().find(|v| v.id == id)?;
         let grouped = v.browser.dir().is_some_and(|d| a.grouped.iter().any(|g| g == d));
+        let this_pc = v.browser.dir().is_some_and(crate::places::is_this_pc);
+        if this_pc {
+            let s = v.browser.snapshot()?;
+            let (mut local, mut network) = (Vec::new(), Vec::new());
+            for (row, &e) in v.browser.order.iter().enumerate() {
+                let on_network = s.drives.get(e as usize).is_some_and(|d| d.network);
+                if on_network { &mut network } else { &mut local }.push(row as u32);
+            }
+            // By drive letter, as Explorer lists them, whatever the sort.
+            let root =
+                |row: &u32| s.drives.get(v.browser.order[*row as usize] as usize).map(|d| d.root.clone());
+            local.sort_by_key(root);
+            network.sort_by_key(root);
+            let sections = [("Devices and drives", local), ("Network locations", network)]
+                .into_iter()
+                .filter(|(_, rows)| !rows.is_empty())
+                .collect();
+            return Some((Some(sections), v.groups.clone(), true, v.grid.enabled));
+        }
         let sections = grouped.then(|| {
             let today = crate::groups::today();
             let s = v.browser.snapshot();
@@ -2078,7 +2268,7 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool, focus: Option<&[u16
             let groups = crate::groups::by_date(days, today);
             groups.into_iter().map(|(b, rows)| (crate::groups::LABELS[b], rows)).collect()
         });
-        Some((sections, v.groups.clone()))
+        Some((sections, v.groups.clone(), false, v.grid.enabled))
     })
     .flatten() else {
         return;
@@ -2104,6 +2294,7 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool, focus: Option<&[u16
         };
         set(-1, 0);
         groups::show(list, &view_groups, sections);
+        this_pc_view(list, this_pc, grid);
         let flags = if new_folder { 0 } else { LVSICF_NOSCROLL };
         SendMessageW(list, LVM_SETITEMCOUNT, Some(WPARAM(count)), Some(LPARAM(flags as isize)));
         if select.len() == count && count > 0 {
@@ -2141,7 +2332,14 @@ fn refresh_view(id: u64, select: &[usize], new_folder: bool, focus: Option<&[u16
 fn update_chrome() {
     let Some((hwnd, buttons, enabled, title, filter, filter_text)) = with_app(|a| {
         let b = &a.view.browser;
-        let dir = b.dir().map(|d| d.display().to_string()).unwrap_or_default();
+        let full = crate::prefs::get().full_path_title;
+        let dir = b
+            .dir()
+            .map(|d| match d.file_name() {
+                Some(name) if !full => name.to_string_lossy().into_owned(),
+                _ => d.display().to_string(),
+            })
+            .unwrap_or_default();
         let title = match b.query() {
             Some(q) => format!("\"{q}\" in {dir}"),
             None => dir,
@@ -2166,6 +2364,18 @@ fn update_chrome() {
     }
     toolbar::update();
     panes::update_labels();
+    // Settings: the sidebar follows each folder opened.
+    let follow = with_app(|a| {
+        let dir = a.view.browser.dir().map(PathBuf::from);
+        let new = crate::prefs::get().sidebar_follows && dir.is_some() && a.followed != dir;
+        if new {
+            a.followed = dir;
+        }
+        new
+    });
+    if follow == Some(true) {
+        tree::reveal();
+    }
     // A folder can bring its own sort; the header arrow follows.
     update_sort_arrows();
     tree::sync();
@@ -2270,6 +2480,136 @@ fn column_menu(hwnd: HWND, list: HWND, lp: LPARAM) {
     }
 }
 
+/// This PC shows its drives as tiles, as Explorer does; other folders use the chosen view.
+fn this_pc_view(list: HWND, this_pc: bool, grid: bool) {
+    let want = if this_pc {
+        LV_VIEW_TILE
+    } else if grid {
+        LV_VIEW_ICON
+    } else {
+        LV_VIEW_DETAILS
+    };
+    unsafe {
+        if SendMessageW(list, LVM_GETVIEW, None, None).0 as u32 == want {
+            return;
+        }
+        if this_pc {
+            let info = LVTILEVIEWINFO {
+                cbSize: size_of::<LVTILEVIEWINFO>() as u32,
+                dwMask: LVTVIM_TILESIZE | LVTVIM_COLUMNS,
+                dwFlags: LVTVIF_FIXEDSIZE,
+                sizeTile: windows::Win32::Foundation::SIZE { cx: scale(list, 300), cy: scale(list, 64) },
+                cLines: 1,
+                ..Default::default()
+            };
+            SendMessageW(list, LVM_SETTILEVIEWINFO, None, Some(LPARAM(&info as *const _ as isize)));
+        }
+        SendMessageW(list, LVM_SETVIEW, Some(WPARAM(want as usize)), None);
+    }
+}
+
+/// Paints a This PC tile: the drive's icon and name, a bar for the space used (red when
+/// less than a tenth is free), and "X free of Y". `None` outside This PC and in high contrast.
+unsafe fn this_pc_tile(cd: &NMLVCUSTOMDRAW, view: u64, p: Palette) -> Option<LRESULT> {
+    use crate::theme::mix;
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Graphics::Gdi::*;
+    let list = cd.nmcd.hdr.hwndFrom;
+    if crate::theme::high_contrast()
+        || cd.dwItemType == LVCDI_GROUP
+        || unsafe { SendMessageW(list, LVM_GETVIEW, None, None) }.0 as u32 != LV_VIEW_TILE
+    {
+        return None;
+    }
+    match cd.nmcd.dwDrawStage {
+        CDDS_PREPAINT => return Some(LRESULT(CDRF_NOTIFYITEMDRAW as isize)),
+        CDDS_ITEMPREPAINT => {}
+        _ => return None,
+    }
+    let row = cd.nmcd.dwItemSpec;
+    let drive = with_view(view, |v| {
+        let e = *v.browser.order.get(row)?;
+        v.browser.snapshot()?.drives.get(e as usize).cloned()
+    })
+    .flatten()?;
+    let s = |n| scale(list, n);
+    unsafe {
+        let hdc = cd.nmcd.hdc;
+        let mut r = RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
+        SendMessageW(list, LVM_GETITEMRECT, Some(WPARAM(row)), Some(LPARAM(&mut r as *mut _ as isize)));
+        let state =
+            SendMessageW(list, LVM_GETITEMSTATE, Some(WPARAM(row)), Some(LPARAM(LVIS_SELECTED.0 as isize))).0;
+        let selected = state as u32 & LVIS_SELECTED.0 != 0;
+        let hot = cd.nmcd.uItemState.contains(CDIS_HOT);
+        let back = if selected {
+            mix(p.window, p.accent, if p.dark { 32 } else { 20 })
+        } else if hot {
+            mix(p.window, p.text, 7)
+        } else {
+            p.window
+        };
+        let tile =
+            RECT { left: r.left + s(2), top: r.top + s(2), right: r.right - s(2), bottom: r.bottom - s(2) };
+        chrome::round_outline(hdc, &tile, back, back, s(5));
+        if let Some(images) = crate::icons::large_image_list() {
+            let y = (tile.top + tile.bottom) / 2 - 16;
+            let _ = ImageList_Draw(images, drive.icon, hdc, tile.left + s(10), y, ILD_TRANSPARENT);
+        }
+        let mut name = [0u16; 260];
+        let mut item = LVITEMW {
+            pszText: windows::core::PWSTR(name.as_mut_ptr()),
+            cchTextMax: 260,
+            ..Default::default()
+        };
+        let len = SendMessageW(
+            list,
+            LVM_GETITEMTEXTW,
+            Some(WPARAM(row)),
+            Some(LPARAM(&mut item as *mut _ as isize)),
+        )
+        .0 as usize;
+        let font = HFONT(SendMessageW(list, WM_GETFONT, None, None).0 as _);
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        SetBkMode(hdc, TRANSPARENT);
+        let left = tile.left + s(10) + 32 + s(12);
+        let right = tile.right - s(10);
+        let flags = DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX;
+        let mut line = RECT { left, top: tile.top + s(6), right, bottom: tile.top + s(24) };
+        SetTextColor(hdc, COLORREF(p.text));
+        DrawTextW(hdc, &mut name[..len.min(260)], &mut line, flags | DT_VCENTER);
+        let quiet = mix(back, p.text, 65);
+        if drive.total > 0 {
+            let bar = RECT { left, top: tile.top + s(28), right, bottom: tile.top + s(33) };
+            let track = CreateSolidBrush(COLORREF(mix(back, p.text, 16)));
+            FillRect(hdc, &bar, track);
+            let _ = DeleteObject(HGDIOBJ(track.0));
+            let used = drive.total.saturating_sub(drive.free);
+            let width = ((bar.right - bar.left) as u64 * used / drive.total) as i32;
+            // #E81123, Windows' "almost full" red, as a COLORREF (0x00BBGGRR).
+            let full = drive.free * 10 < drive.total;
+            let ink = CreateSolidBrush(COLORREF(if full { 0x0023_11E8 } else { p.accent }));
+            FillRect(hdc, &RECT { right: bar.left + width, ..bar }, ink);
+            let _ = DeleteObject(HGDIOBJ(ink.0));
+            let text =
+                format!("{} free of {}", crate::format::bytes(drive.free), crate::format::bytes(drive.total));
+            let mut text: Vec<u16> = text.encode_utf16().collect();
+            let mut line = RECT { left, top: tile.top + s(36), right, bottom: tile.bottom - s(4) };
+            SetTextColor(hdc, COLORREF(quiet));
+            DrawTextW(hdc, &mut text, &mut line, flags);
+        } else {
+            let mut text: Vec<u16> = drive.detail.encode_utf16().collect();
+            let mut line = RECT { left, top: tile.top + s(28), right, bottom: tile.bottom - s(4) };
+            SetTextColor(hdc, COLORREF(quiet));
+            DrawTextW(hdc, &mut text, &mut line, flags);
+        }
+        SelectObject(hdc, old);
+        if cd.nmcd.uItemState.contains(CDIS_FOCUS) && GetFocus() == list {
+            chrome::outline(hdc, &tile, p.text, s(5), 1);
+        }
+    }
+    Some(LRESULT(CDRF_SKIPDEFAULT as isize))
+}
+
 fn scale(hwnd: HWND, px: i32) -> i32 {
     px * unsafe { GetDpiForWindow(hwnd) } as i32 / 96
 }
@@ -2319,23 +2659,44 @@ fn layout(hwnd: HWND) {
             true,
         );
         toolbar::layout(hwnd, client.right);
-        let _ = MoveWindow(strip, 0, scale(hwnd, toolbar::BOTTOM), client.right, tab_height(hwnd), true);
+        let strip_width = (client.right - tabbar::reserve(hwnd)).max(0);
+        let _ = MoveWindow(strip, 0, scale(hwnd, toolbar::BOTTOM), strip_width, tab_height(hwnd), true);
+        tabbar::place_buttons();
         let top = content_top(hwnd);
-        let h = (client.bottom - (sr.bottom - sr.top) - top).max(0);
-        let split = tree::clamp_split(split, client.right, GetDpiForWindow(hwnd));
+        // Settings can hide the status bar.
+        let status_bar = crate::prefs::get().status_bar;
+        let _ = ShowWindow(status, if status_bar { SW_SHOWNA } else { SW_HIDE });
+        let status_h = if status_bar { sr.bottom - sr.top } else { 0 };
+        let h = (client.bottom - status_h - top).max(0);
         let gap = splitter_width(hwnd);
-        // Vertical tabs sit above the sidebar, a gap apart.
-        let tabs_h = match with_app(|a| a.vertical_tabs.then_some(a.tab_list)).flatten() {
-            Some(tab_list) => {
-                let tabs_h = tabbar::list_height(tab_list, h);
-                let _ = MoveWindow(tab_list, 0, top, split, tabs_h, true);
-                tabbar::fit_list_column(tab_list);
-                tabs_h + gap
-            }
-            None => 0,
-        };
-        let _ = MoveWindow(tree, 0, top + tabs_h, split, (h - tabs_h).max(0), true);
-        let rest = (client.right - split - gap).max(0);
+        // Vertical tabs: a full-height column at the far right; everything else fits left of it.
+        // While peeking, the collapsed column's list widens over the file list.
+        let inner = content_right(hwnd);
+        if let Some((tab_list, peek)) =
+            with_app(|a| a.vertical_tabs.then_some((a.tab_list, a.tabs_peek))).flatten()
+        {
+            let width = if peek {
+                tabbar::expanded_width(hwnd, client.right)
+            } else {
+                tabbar::column_width(hwnd, client.right)
+            };
+            let head = tabbar::heading_height(hwnd);
+            let _ = SetWindowPos(
+                tab_list,
+                Some(HWND_TOP),
+                client.right - width,
+                top + head,
+                width,
+                (h - head).max(0),
+                SWP_NOACTIVATE,
+            );
+            tabbar::fit_list_column(tab_list);
+        }
+        let sidebar = tree::clamp_split(split, inner, GetDpiForWindow(hwnd));
+        let _ = MoveWindow(tree, 0, top, sidebar, h, true);
+        // From here, `split` is the sidebar's right edge, where the folder lists start.
+        let split = sidebar;
+        let rest = (inner - split - gap).max(0);
         // Preview pane, when shown: a third of the space right of the sidebar.
         let preview_w = if preview::is_visible() {
             with_app(|a| a.preview_width).flatten().unwrap_or(rest / 3).max(scale(hwnd, 100)).min(rest / 2)
@@ -2362,7 +2723,7 @@ fn layout(hwnd: HWND) {
             let _ = MoveWindow(list, split + gap, top, rest - preview_space, h, true);
         }
         if let Some(pane) = with_app(|a| a.preview.hwnd) {
-            let _ = MoveWindow(pane, client.right - preview_w, top, preview_w, h, true);
+            let _ = MoveWindow(pane, inner - preview_w, top, preview_w, h, true);
         }
     }
     panes::layout_labels(hwnd);
@@ -2376,11 +2737,25 @@ fn splitter_width(hwnd: HWND) -> i32 {
     scale(hwnd, 5)
 }
 
+/// The right edge of the sidebar, lists and preview: the window's, or left of the vertical tabs.
+fn content_right(hwnd: HWND) -> i32 {
+    let mut client = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+    }
+    match tabbar::heading_rect(hwnd) {
+        Some(head) => (head.left - splitter_width(hwnd)).max(0),
+        None => client.right,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SplitKind {
     Sidebar,
     Panes,
     Preview,
+    /// The vertical tab column's left edge.
+    Tabs,
 }
 
 fn client_rect_of(parent: HWND, child: HWND) -> RECT {
@@ -2405,6 +2780,14 @@ fn splitter_at(hwnd: HWND, lp: LPARAM) -> Option<(SplitKind, i32)> {
     })?;
     let gap = splitter_width(hwnd);
     let sidebar = client_rect_of(hwnd, tree).right;
+    if with_app(|a| !a.tabs_collapsed) == Some(true)
+        && let Some(head) = tabbar::heading_rect(hwnd)
+    {
+        let edge = head.left - gap;
+        if (edge..edge + gap).contains(&x) {
+            return Some((SplitKind::Tabs, edge));
+        }
+    }
     if (sidebar..sidebar + gap).contains(&x) {
         return Some((SplitKind::Sidebar, sidebar));
     }
@@ -2422,9 +2805,6 @@ fn splitter_at(hwnd: HWND, lp: LPARAM) -> Option<(SplitKind, i32)> {
     }
     None
 }
-fn over_splitter(hwnd: HWND, lp: LPARAM) -> bool {
-    splitter_at(hwnd, lp).is_some()
-}
 fn drag_splitter(hwnd: HWND, kind: SplitKind, x: i32) {
     let mut client = RECT::default();
     unsafe {
@@ -2433,10 +2813,17 @@ fn drag_splitter(hwnd: HWND, kind: SplitKind, x: i32) {
     match kind {
         SplitKind::Sidebar => {
             let dpi = unsafe { GetDpiForWindow(hwnd) };
-            with_app(|a| a.split = tree::clamp_split(x, client.right, dpi));
+            let inner = content_right(hwnd);
+            with_app(|a| a.split = tree::clamp_split(x, inner, dpi));
         }
         SplitKind::Preview => {
-            with_app(|a| a.preview_width = Some((client.right - x - splitter_width(hwnd)).max(100)));
+            let inner = content_right(hwnd);
+            with_app(|a| a.preview_width = Some((inner - x - splitter_width(hwnd)).max(100)));
+        }
+        SplitKind::Tabs => {
+            let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
+            let width = client.right - x - splitter_width(hwnd);
+            with_app(|a| a.tab_list_width = Some((width * 96 / dpi.max(1)).max(1)));
         }
         SplitKind::Panes => {
             if let Some((left, right)) = with_app(|a| {
@@ -2454,7 +2841,7 @@ fn drag_splitter(hwnd: HWND, kind: SplitKind, x: i32) {
     }
 }
 
-/// The tab strip's height; none with the tabs above the sidebar.
+/// The tab strip's height; none with the tabs in a column.
 fn tab_height(hwnd: HWND) -> i32 {
     if with_app(|a| a.vertical_tabs) == Some(true) { 0 } else { scale(hwnd, 30) }
 }
@@ -2479,6 +2866,8 @@ fn message_font(hwnd: HWND) -> HFONT {
             0,
             GetDpiForWindow(hwnd),
         );
+        let size = crate::prefs::get().text_size.min(crate::prefs::TEXT_SIZES.len() - 1);
+        ncm.lfMessageFont.lfHeight = ncm.lfMessageFont.lfHeight * crate::prefs::TEXT_SIZES[size].1 / 100;
         CreateFontIndirectW(&ncm.lfMessageFont)
     }
 }
@@ -2489,7 +2878,54 @@ fn set_font(controls: &[HWND], font: HFONT) {
     }
 }
 
+/// Brings this window up to date with the process's preferences after Settings changed them:
+/// list behavior, sorting and filtering, text size, colors, the sidebar, toolbar and tabs.
+fn apply_prefs(hwnd: HWND) {
+    let new = crate::prefs::get();
+    let Some((old, theme)) = with_app(|a| (std::mem::replace(&mut a.applied_prefs, new), a.theme)) else {
+        return;
+    };
+    if old == new {
+        return;
+    }
+    let views = with_app(|a| a.views().map(|v| (v.id, v.list)).collect::<Vec<_>>()).unwrap_or_default();
+    for (id, list) in views {
+        panes::apply_prefs(list);
+        if let Some(job) = with_view(id, |v| v.browser.resort_job()).flatten() {
+            spawn_sort(job);
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(list), None, true);
+        }
+    }
+    if old.text_size != new.text_size {
+        let font = message_font(hwnd);
+        if let Some((old_font, controls)) = with_app(|a| (std::mem::replace(&mut a.font, font), a.controls()))
+        {
+            set_font(&controls, font);
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(old_font.0));
+            }
+        }
+    }
+    if (old.sidebar_quick_access, old.sidebar_network) != (new.sidebar_quick_access, new.sidebar_network) {
+        tree::reload();
+    }
+    dark::apply(hwnd, Palette::new(theme.is_dark(system_prefers_dark())));
+    tabbar::refresh();
+    layout(hwnd);
+    update_chrome();
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), None, true);
+    }
+}
+
 fn apply_settings(hwnd: HWND, settings: Settings) {
+    crate::prefs::set(settings.prefs);
+    apply_prefs(hwnd);
+    if with_app(|a| a.vertical_tabs) != Some(settings.vertical_tabs) {
+        tabbar::set_vertical(settings.vertical_tabs);
+    }
     let Some((list, job)) = with_app(|a| {
         a.theme = settings.theme;
         a.restore_session = settings.restore_session;
@@ -2571,7 +3007,7 @@ pub fn active_list() -> Option<HWND> {
     with_app(|a| a.view.list)
 }
 
-/// The tab list shown above the sidebar with vertical tabs, for the window tests.
+/// The tab list shown with vertical tabs, for the window tests.
 pub fn tab_list() -> Option<HWND> {
     with_app(|a| a.tab_list)
 }

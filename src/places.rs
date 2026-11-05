@@ -42,6 +42,11 @@ pub struct DriveRow {
     pub detail: String,
     /// Index in the system image list.
     pub icon: i32,
+    /// Free and total bytes, when the drive answered; 0 otherwise.
+    pub free: u64,
+    pub total: u64,
+    /// A mapped network drive, listed under Network locations.
+    pub network: bool,
 }
 
 /// This PC: a folder entry per drive, named as in the sidebar, with its capacity as the size.
@@ -62,7 +67,8 @@ pub fn list_this_pc() -> io::Result<Snapshot> {
             false => kind_name(d.kind).to_string(),
         };
         let icon = crate::icons::file_icon(&d.root).unwrap_or(0);
-        snap.drives.push(DriveRow { root: d.root, detail, icon });
+        let (free, total) = if sized { (free, total) } else { (0, 0) };
+        snap.drives.push(DriveRow { root: d.root, detail, icon, free, total, network });
     }
     let devices = devices().unwrap_or_else(|e| {
         crate::crash::log(&format!("Devices unavailable: {e}"));
@@ -111,7 +117,8 @@ pub fn devices() -> io::Result<Vec<(String, DriveRow)>> {
                 continue;
             }
             let icon = crate::icons::file_icon(&root).unwrap_or(0);
-            devices.push((label, DriveRow { root, detail: "Device (opens in Windows)".into(), icon }));
+            let detail = "Device (opens in Windows)".into();
+            devices.push((label, DriveRow { root, detail, icon, free: 0, total: 0, network: false }));
         }
     }
     Ok(devices)

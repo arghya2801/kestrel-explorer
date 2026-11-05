@@ -497,13 +497,14 @@ fn dragging_the_splitter_resizes_the_sidebar() {
 }
 
 #[test]
-fn tab_cycles_address_filter_sidebar_list() {
+fn tab_cycles_address_filter_tabs_sidebar_list() {
     let _desktop = desktop();
     let t = TempDir::new("tab");
     let hwnd = open(&t.0);
     let edit = find(hwnd, w!("Edit"));
     let filter = unsafe { FindWindowExW(Some(hwnd), Some(edit), w!("Edit"), None) }.unwrap();
-    let order = [edit, filter, tree_of(hwnd), list_of(hwnd)];
+    let strip = find(hwnd, w!("SysTabControl32"));
+    let order = [edit, filter, strip, tree_of(hwnd), list_of(hwnd)];
     for i in 0..order.len() {
         // Something else on the desktop can take activation away for a moment, leaving
         // nothing focused. Retry then; focus landing on the wrong control fails at once.
@@ -1134,6 +1135,11 @@ fn ctrl_key(to: HWND, vk: VIRTUAL_KEY, shift: bool) {
     }
 }
 
+/// Sends the NM_CLICK a ListView sends its parent when row `row` is clicked.
+fn click_row(main: HWND, list: HWND, row: i32) {
+    notify(main, NMITEMACTIVATE { hdr: hdr(list, NM_CLICK), iItem: row, ..Default::default() });
+}
+
 fn tab_labels(main: HWND) -> Vec<String> {
     let strip = find(main, w!("SysTabControl32"));
     let n = unsafe { SendMessageW(strip, TCM_GETITEMCOUNT, None, None) }.0 as usize;
@@ -1241,14 +1247,120 @@ fn middle_click_closes_the_tab_under_the_cursor() {
     close(hwnd);
 }
 
+/// Client point `(x, y)` of `hwnd` as a mouse message's LPARAM.
+fn at(x: i32, y: i32) -> LPARAM {
+    LPARAM((((y & 0xFFFF) << 16) | (x & 0xFFFF)) as isize)
+}
+
+/// Tab `i`'s rectangle in the strip, as the strip draws it.
+fn tab_rect(strip: HWND, i: usize) -> windows::Win32::Foundation::RECT {
+    let mut r = windows::Win32::Foundation::RECT::default();
+    let mut client = r;
+    let px = |n: i32| n * unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(strip) } as i32 / 96;
+    unsafe {
+        SendMessageW(strip, TCM_GETITEMRECT, Some(WPARAM(i)), Some(LPARAM(&mut r as *mut _ as isize)));
+        GetClientRect(strip, &mut client).unwrap();
+    }
+    r.top = client.top + px(4);
+    r.bottom = client.bottom;
+    r
+}
+
+#[test]
+fn tabs_close_from_their_button_and_reorder_by_dragging() {
+    let t = TempDir::new("tab-mouse");
+    for name in ["a", "b", "c"] {
+        std::fs::create_dir(t.0.join(name)).unwrap();
+    }
+    let hwnd = open(&t.0.join("a"));
+    for name in ["b", "c"] {
+        ctrl_key(ui::active_list().unwrap(), VK_T, false);
+        navigate_to(hwnd, &t.0.join(name));
+        assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with(name)));
+    }
+    let names =
+        || tab_labels(hwnd).iter().map(|l| l.split(" · ").next().unwrap().to_string()).collect::<Vec<_>>();
+    assert!(pump_until(WAIT, || names() == ["a", "b", "c"]), "{:?}", names());
+    let strip = find(hwnd, w!("SysTabControl32"));
+    let px = |n: i32| n * unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(strip) } as i32 / 96;
+    let middle = |i: usize| {
+        let r = tab_rect(strip, i);
+        (r.left + px(12), (r.top + r.bottom) / 2)
+    };
+    // Drag the first tab past the last.
+    let (x0, y) = middle(0);
+    let (x2, _) = middle(2);
+    unsafe {
+        SendMessageW(
+            strip,
+            WM_LBUTTONDOWN,
+            Some(WPARAM(windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize)),
+            Some(at(x0, y)),
+        );
+        SendMessageW(
+            strip,
+            WM_MOUSEMOVE,
+            Some(WPARAM(windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize)),
+            Some(at(x0 + px(20), y)),
+        );
+        SendMessageW(
+            strip,
+            WM_MOUSEMOVE,
+            Some(WPARAM(windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize)),
+            Some(at(x2, y)),
+        );
+        SendMessageW(strip, WM_LBUTTONUP, None, Some(at(x2, y)));
+    }
+    assert_eq!(names(), ["b", "c", "a"]);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("a")), "the dragged tab is active");
+    // The active tab's close button closes it.
+    let r = tab_rect(strip, 2);
+    let x_button = (r.right - px(8) - px(8), (r.top + r.bottom) / 2);
+    unsafe {
+        SendMessageW(strip, WM_MOUSEMOVE, None, Some(at(x_button.0, x_button.1)));
+        SendMessageW(
+            strip,
+            WM_LBUTTONDOWN,
+            Some(WPARAM(windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize)),
+            Some(at(x_button.0, x_button.1)),
+        );
+        SendMessageW(strip, WM_LBUTTONUP, None, Some(at(x_button.0, x_button.1)));
+    }
+    assert!(pump_until(WAIT, || names() == ["b", "c"]), "{:?}", names());
+    close(hwnd);
+}
+
+#[test]
+fn a_full_strip_keeps_new_tab_and_all_tabs_beside_it() {
+    let t = TempDir::new("tab-overflow");
+    let hwnd = open(&t.0);
+    let strip = find(hwnd, w!("SysTabControl32"));
+    let plus = unsafe { GetDlgItem(Some(hwnd), 240) }.unwrap(); // tabbar::NEW_TAB
+    let all = unsafe { GetDlgItem(Some(hwnd), ui::toolbar::TAB_LIST as i32) }.unwrap();
+    let rect = |h: HWND| {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        unsafe { GetWindowRect(h, &mut r) }.unwrap();
+        r
+    };
+    assert!(rect(plus).right <= rect(strip).right, "with one tab, + follows it");
+    for _ in 0..20 {
+        unsafe { SendMessageW(plus, BM_CLICK, None, None) };
+    }
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 21));
+    let visible = |h: HWND| unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0;
+    assert!(visible(plus) && visible(all));
+    assert!(rect(plus).left >= rect(strip).right, "+ moved right of the full strip");
+    assert!(rect(all).left >= rect(plus).right);
+    close(hwnd);
+}
+
 #[test]
 fn plus_button_and_ctrl_shift_k_open_tabs() {
     let t = TempDir::new("plus");
     std::fs::create_dir(t.0.join("sub")).unwrap();
     let hwnd = open(&t.0);
     assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()) == ["sub"]));
-    let strip = find(hwnd, w!("SysTabControl32"));
-    let plus = unsafe { GetDlgItem(Some(strip), 240) }.unwrap(); // tabbar::NEW_TAB
+    let plus = unsafe { GetDlgItem(Some(hwnd), 240) }.unwrap(); // tabbar::NEW_TAB
     // Shown right of the last tab (the test window itself stays hidden, so check the style).
     assert!(unsafe { GetWindowLongW(plus, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0);
     unsafe { SendMessageW(plus, BM_CLICK, None, None) };
@@ -2053,9 +2165,14 @@ fn this_pc_lists_drives_and_is_above_each_drive() {
     let button = |text| unsafe { FindWindowExW(Some(hwnd), None, w!("Button"), text) }.unwrap();
     assert!(!unsafe { IsWindowEnabled(button(w!("Delete"))) }.as_bool());
     assert!(!unsafe { IsWindowEnabled(button(w!("New folder"))) }.as_bool());
+    // Tiles in sections, as in Explorer; a drive's folder goes back to the chosen view.
+    let view = || unsafe { SendMessageW(list, LVM_GETVIEW, None, None) }.0 as u32;
+    assert_eq!(view(), LV_VIEW_TILE);
+    assert_eq!(group_headers(list).first().map(String::as_str), Some("Devices and drives"));
     activate(hwnd, list, row as i32);
     let root = std::env::var("SystemDrive").unwrap() + "\\";
     assert!(pump_until(WAIT, || ui_dir(hwnd) == root), "{}", ui_dir(hwnd));
+    assert!(pump_until(WAIT, || view() == LV_VIEW_DETAILS));
     alt_key(list, VK_UP);
     assert!(pump_until(WAIT, || ui_dir(hwnd) == "This PC"), "{}", ui_dir(hwnd));
     // The sidebar's This PC opens the page too.
@@ -2109,7 +2226,7 @@ fn tabs_on_folders_of_the_same_name_show_their_parents() {
 }
 
 #[test]
-fn vertical_tabs_list_the_tabs_above_the_sidebar() {
+fn vertical_tabs_get_their_own_column_at_the_right() {
     let _desktop = desktop();
     let t = TempDir::new("vertical");
     for name in ["one", "two"] {
@@ -2129,22 +2246,365 @@ fn vertical_tabs_list_the_tabs_above_the_sidebar() {
     assert!(visible(strip) && !visible(tabs));
     command(hwnd, ui::toolbar::VERTICAL_TABS);
     assert!(!visible(strip) && visible(tabs));
-    assert_eq!(rows(tabs), [one, two.clone(), "+  New tab".into()]);
+    assert_eq!(rows(tabs), [one, two.clone()]);
     assert_eq!(selected(tabs), [two]);
-    // The sidebar starts below the tab list.
+    // The tabs have a full-height column at the right; the file list ends left of it.
     let rect = |h: HWND| {
         let mut r = windows::Win32::Foundation::RECT::default();
         unsafe { GetWindowRect(h, &mut r) }.unwrap();
         r
     };
-    assert!(rect(tree_of(hwnd)).top >= rect(tabs).bottom);
-    // Choosing a row switches tabs; the last row opens a new one.
+    assert!(rect(ui::active_list().unwrap()).right <= rect(tabs).left);
+    assert!(rect(tabs).bottom >= rect(tree_of(hwnd)).bottom - 2, "the column runs the full height");
+    // "+" moves into the list's heading.
+    let plus = unsafe { GetDlgItem(Some(hwnd), 240) }.unwrap();
+    assert!(visible(plus) && rect(plus).bottom <= rect(tabs).top, "+ sits in the heading");
+    // Dragging the column's edge leftward widens it, and the width is remembered.
+    let client = |h: HWND| {
+        let r = rect(h);
+        let mut pt = windows::Win32::Foundation::POINT { x: r.left, y: (r.top + r.bottom) / 2 };
+        unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt) }.unwrap();
+        pt
+    };
+    let width = || rect(tabs).right - rect(tabs).left;
+    let before = width();
+    let edge = client(tabs);
+    unsafe {
+        SendMessageW(hwnd, WM_LBUTTONDOWN, None, Some(at(edge.x - 2, edge.y)));
+        SendMessageW(hwnd, WM_MOUSEMOVE, None, Some(at(edge.x - 42, edge.y)));
+        SendMessageW(hwnd, WM_LBUTTONUP, None, Some(at(edge.x - 42, edge.y)));
+    }
+    assert!(width() >= before + 30, "dragging the edge didn't widen the column");
+    assert!(rect(ui::active_list().unwrap()).right <= rect(tabs).left);
+    // Collapsing shrinks it to badges, with its buttons inside the narrow column.
+    command(hwnd, ui::toolbar::TABS_COLLAPSE);
+    assert!(width() < before / 2, "collapsed: {}", width());
+    let fold = unsafe { GetDlgItem(Some(hwnd), ui::toolbar::TABS_COLLAPSE as i32) }.unwrap();
+    for b in [plus, fold] {
+        assert!(visible(b) && rect(b).left >= rect(tabs).left && rect(b).right <= rect(tabs).right);
+    }
+    // Resting the mouse on it widens it over the file list, which keeps its size.
+    let files = rect(ui::active_list().unwrap());
+    // The mouse entering starts a short timer (7); the hidden test window can't hold the mouse.
+    unsafe { SendMessageW(tabs, WM_TIMER, Some(WPARAM(7)), None) };
+    assert!(width() >= before + 30, "peek: {}", width());
+    assert_eq!(rect(ui::active_list().unwrap()).right, files.right);
+    unsafe { SendMessageW(tabs, WM_MOUSELEAVE, None, None) };
+    assert!(width() < before / 2, "after the mouse leaves: {}", width());
+    command(hwnd, ui::toolbar::TABS_COLLAPSE);
+    assert!(width() >= before + 30);
+    // Moving the selection (as the arrow keys do) only moves the cursor; it never switches or
+    // opens a tab. Clicking a row, or Enter, switches.
     select_row(tabs, 0);
-    assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()).is_empty() && ui_dir(hwnd).ends_with("one")));
-    select_row(tabs, 2);
-    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 3 && rows(tabs).len() == 4));
+    pump_until(Duration::from_millis(200), || false);
+    assert!(ui_dir(hwnd).ends_with("two") && tab_labels(hwnd).len() == 2);
+    key(tabs, VK_RETURN);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("one")), "{}", ui_dir(hwnd));
+    click_row(hwnd, tabs, 1);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("two")), "{}", ui_dir(hwnd));
+    // The active row's close button closes it.
+    unsafe { SendMessageW(plus, BM_CLICK, None, None) };
+    assert!(pump_until(WAIT, || rows(tabs).len() == 3));
+    let row = {
+        let mut r = windows::Win32::Foundation::RECT { left: LVIR_BOUNDS as i32, ..Default::default() };
+        unsafe {
+            SendMessageW(tabs, LVM_GETITEMRECT, Some(WPARAM(2)), Some(LPARAM(&mut r as *mut _ as isize)))
+        };
+        r
+    };
+    let px = |n: i32| n * unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(tabs) } as i32 / 96;
+    let x_button = at(row.right - px(6) - px(8), (row.top + row.bottom) / 2);
+    unsafe {
+        SendMessageW(tabs, WM_LBUTTONDOWN, Some(WPARAM(1)), Some(x_button));
+        SendMessageW(tabs, WM_LBUTTONUP, None, Some(x_button));
+    }
+    assert!(pump_until(WAIT, || rows(tabs).len() == 2), "{:?}", rows(tabs));
+    click_row(hwnd, tabs, 1);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("two")), "{}", ui_dir(hwnd));
+    // Shortcuts still work while the tab list has the focus.
+    ctrl_key(tabs, VK_W, false);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 1 && ui_dir(hwnd).ends_with("one")));
     close(hwnd);
-    assert!(ui::take_final_settings().unwrap().vertical_tabs);
+    let saved = ui::take_final_settings().unwrap();
+    assert!(saved.vertical_tabs && saved.tabs_width.is_some() && !saved.tabs_collapsed);
+}
+
+#[test]
+fn closed_tabs_reopen_and_tabs_move_jump_and_close_in_bulk() {
+    let t = TempDir::new("tab-commands");
+    for name in ["a", "b", "c"] {
+        std::fs::create_dir(t.0.join(name)).unwrap();
+    }
+    let hwnd = open(&t.0.join("a"));
+    for name in ["b", "c"] {
+        ctrl_key(ui::active_list().unwrap(), VK_T, false);
+        navigate_to(hwnd, &t.0.join(name));
+        assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with(name)));
+    }
+    let names =
+        || tab_labels(hwnd).iter().map(|l| l.split(" · ").next().unwrap().to_string()).collect::<Vec<_>>();
+    assert!(pump_until(WAIT, || names() == ["a", "b", "c"]), "{:?}", names());
+    // Ctrl+1 is the first tab, Ctrl+9 the last.
+    ctrl_key(ui::active_list().unwrap(), VK_1, false);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("a")));
+    ctrl_key(ui::active_list().unwrap(), VK_9, false);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("c")));
+    // Moving keeps the moved tab active.
+    command(hwnd, ui::toolbar::MOVE_TAB_BACK);
+    assert_eq!(names(), ["a", "c", "b"]);
+    assert!(ui_dir(hwnd).ends_with("c"));
+    // A closed tab comes back with Ctrl+Shift+T, which no longer opens a blank tab.
+    ctrl_key(ui::active_list().unwrap(), VK_W, false);
+    assert!(pump_until(WAIT, || names() == ["a", "b"]));
+    ctrl_key(ui::active_list().unwrap(), VK_T, true);
+    assert!(pump_until(WAIT, || names().len() == 3 && ui_dir(hwnd).ends_with("c")), "{:?}", names());
+    ctrl_key(ui::active_list().unwrap(), VK_1, false);
+    command(hwnd, ui::toolbar::CLOSE_TABS_AFTER);
+    assert!(pump_until(WAIT, || names() == ["a"]), "{:?}", names());
+    command(hwnd, ui::toolbar::REOPEN_TAB);
+    command(hwnd, ui::toolbar::REOPEN_TAB);
+    assert!(pump_until(WAIT, || names().len() == 3), "{:?}", names());
+    command(hwnd, ui::toolbar::CLOSE_OTHER_TABS);
+    assert!(pump_until(WAIT, || names().len() == 1), "{:?}", names());
+    close(hwnd);
+}
+
+#[test]
+fn split_tabs_keep_their_name_and_duplicate_with_both_panes() {
+    let _desktop = desktop();
+    let t = TempDir::new("split-tab");
+    std::fs::create_dir_all(t.0.join("left")).unwrap();
+    std::fs::create_dir_all(t.0.join("right").join("inside")).unwrap();
+    let hwnd = open(&t.0);
+    let left = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(left) == ["left", "right"]));
+    select_row(left, 1);
+    command(hwnd, ui::CMD_OPEN_OTHER_PANE);
+    let right = lists_in(hwnd).into_iter().find(|&h| h != left && h != ui::tab_list().unwrap()).unwrap();
+    assert!(pump_until(WAIT, || rows(right) == ["inside"]));
+    let label = tab_labels(hwnd);
+    // Focusing the right pane leaves the tab named by the left one.
+    key(left, VK_F6);
+    assert!(pump_until(WAIT, || ui::active_list() == Some(right)));
+    pump_until(Duration::from_millis(100), || false);
+    assert_eq!(tab_labels(hwnd), label);
+    // Duplicate copies both panes.
+    ctrl_key(right, VK_K, true);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
+    assert!(
+        pump_until(WAIT, || {
+            let shown: Vec<_> = lists_in(hwnd)
+                .into_iter()
+                .filter(|&h| {
+                    unsafe { IsWindowVisible(h) }.as_bool()
+                        || unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0
+                })
+                .map(rows)
+                .collect();
+            shown.contains(&vec!["inside".to_string()])
+                && shown.contains(&vec!["left".to_string(), "right".to_string()])
+        }),
+        "duplicate lost the second pane"
+    );
+    close(hwnd);
+}
+
+#[test]
+fn middle_click_on_a_folder_opens_it_in_a_tab_behind() {
+    let t = TempDir::new("middle-folder");
+    std::fs::create_dir(t.0.join("sub")).unwrap();
+    std::fs::write(t.0.join("file.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["sub", "file.txt"]));
+    let at = |row: usize| {
+        let mut r = windows::Win32::Foundation::RECT { left: LVIR_LABEL as i32, ..Default::default() };
+        unsafe {
+            SendMessageW(list, LVM_GETITEMRECT, Some(WPARAM(row)), Some(LPARAM(&mut r as *mut _ as isize)))
+        };
+        LPARAM(((((r.top + r.bottom) / 2) << 16) | (r.left + 4)) as isize)
+    };
+    unsafe { PostMessageW(Some(list), WM_MBUTTONUP, WPARAM(0), at(1)) }.unwrap();
+    pump_until(Duration::from_millis(200), || false);
+    assert_eq!(tab_labels(hwnd).len(), 1, "a file doesn't open a tab");
+    unsafe { PostMessageW(Some(list), WM_MBUTTONUP, WPARAM(0), at(0)) }.unwrap();
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
+    assert!(pump_until(WAIT, || tab_labels(hwnd)[1].starts_with("sub · ")), "{:?}", tab_labels(hwnd));
+    assert_eq!(rows(ui::active_list().unwrap()), ["sub", "file.txt"], "the current tab stays");
+    close(hwnd);
+}
+
+#[test]
+fn deep_paths_show_an_ellipsis_crumb_for_the_folders_left_out() {
+    let t = TempDir::new("deep-crumbs");
+    let deep = ["a", "b", "c", "d", "e", "f"].iter().fold(t.0.clone(), |p, n| p.join(n));
+    std::fs::create_dir_all(&deep).unwrap();
+    let hwnd = open(&t.0);
+    let more = unsafe { FindWindowExW(Some(hwnd), None, w!("Button"), w!("…")) }.unwrap();
+    let visible = |h: HWND| unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32 & WS_VISIBLE.0 != 0;
+    navigate_to(hwnd, &deep);
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("f")));
+    assert!(pump_until(WAIT, || visible(more)), "a deep path shows \"…\"");
+    navigate_to(hwnd, &t.0.join("a"));
+    assert!(pump_until(WAIT, || ui_dir(hwnd).ends_with("a")));
+    // fep-ui-deep-crumbs-N\a under %TEMP% is still deep; a drive root isn't.
+    navigate_to(hwnd, Path::new("C:\\"));
+    assert!(pump_until(WAIT, || !visible(more)), "a short path has no \"…\"");
+    close(hwnd);
+}
+
+#[test]
+fn splitting_fits_the_columns_and_saves_the_unsplit_name_width() {
+    let t = TempDir::new("split-columns");
+    std::fs::write(t.0.join("a.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt"]));
+    unsafe { SetWindowPos(hwnd, None, 0, 0, 1600, 700, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE) }.unwrap();
+    let widths = |l: HWND| {
+        (0..4)
+            .map(|c| unsafe { SendMessageW(l, LVM_GETCOLUMNWIDTH, Some(WPARAM(c)), None) }.0 as i32)
+            .collect::<Vec<_>>()
+    };
+    let client = |l: HWND| {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        unsafe { GetClientRect(l, &mut r) }.unwrap();
+        r.right
+    };
+    let name = widths(list)[0];
+    command(hwnd, ui::toolbar::SPLIT);
+    let fitted = widths(list);
+    assert!(fitted[0] < name, "{fitted:?}");
+    assert!(fitted.iter().sum::<i32>() <= client(list), "{fitted:?} in {}", client(list));
+    close_after_capturing_name(hwnd, name);
+}
+
+/// Closes a split window and checks the saved Name width is the unsplit one.
+fn close_after_capturing_name(hwnd: HWND, name: i32) {
+    close(hwnd);
+    assert_eq!(ui::take_final_settings().unwrap().columns[0], name);
+}
+
+#[test]
+fn unsplitting_restores_the_name_width() {
+    let t = TempDir::new("unsplit-columns");
+    std::fs::write(t.0.join("a.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt"]));
+    unsafe { SetWindowPos(hwnd, None, 0, 0, 1600, 700, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE) }.unwrap();
+    let width = || unsafe { SendMessageW(list, LVM_GETCOLUMNWIDTH, Some(WPARAM(0)), None) }.0 as i32;
+    let name = width();
+    command(hwnd, ui::toolbar::SPLIT);
+    assert!(width() < name);
+    command(hwnd, ui::toolbar::SPLIT);
+    assert_eq!(width(), name);
+    close(hwnd);
+}
+
+#[test]
+fn the_command_palette_finds_commands_by_name_or_key_and_runs_them() {
+    let _desktop = desktop();
+    let t = TempDir::new("palette");
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    ctrl_key(list, VK_T, false);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 2));
+    ctrl_key(ui::active_list().unwrap(), VK_P, true);
+    assert!(pump_until(WAIT, || unsafe { FindWindowW(w!("KestrelPalette"), None) }.is_ok()));
+    let palette = unsafe { FindWindowW(w!("KestrelPalette"), None) }.unwrap();
+    let search = find(palette, w!("Edit"));
+    let commands = find(palette, w!("SysListView32"));
+    assert!(rows(commands).len() > 40, "every command is listed");
+    // A key finds its command, and the shortcut column shows it.
+    type_into(search, "ctrl+w");
+    assert!(
+        pump_until(WAIT, || rows(commands).first().is_some_and(|r| r == "Tabs: Close tab")),
+        "{:?}",
+        rows(commands)
+    );
+    type_into(search, "close tab");
+    assert!(pump_until(WAIT, || rows(commands).first().is_some_and(|r| r == "Tabs: Close tab")));
+    key(search, VK_RETURN);
+    assert!(pump_until(WAIT, || tab_labels(hwnd).len() == 1), "Enter ran the command");
+    assert!(unsafe { FindWindowW(w!("KestrelPalette"), None) }.is_err(), "and closed the palette");
+    close(hwnd);
+}
+
+#[test]
+fn sort_and_group_commands_set_rather_than_toggle() {
+    let t = TempDir::new("sort-group");
+    std::fs::write(t.0.join("a.txt"), "").unwrap();
+    std::fs::write(t.0.join("b.txt"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt", "b.txt"]));
+    command(hwnd, ui::toolbar::SORT_DOWN);
+    assert!(pump_until(WAIT, || rows(list) == ["b.txt", "a.txt"]));
+    command(hwnd, ui::toolbar::SORT_DOWN);
+    assert!(pump_until(WAIT, || rows(list) == ["b.txt", "a.txt"]), "a second Descending keeps it");
+    command(hwnd, ui::toolbar::SORT_UP);
+    assert!(pump_until(WAIT, || rows(list) == ["a.txt", "b.txt"]));
+    command(hwnd, ui::toolbar::GROUP_DATE);
+    assert!(pump_until(WAIT, || !group_headers(list).is_empty()));
+    command(hwnd, ui::toolbar::GROUP_DATE);
+    assert!(pump_until(WAIT, || !group_headers(list).is_empty()), "a second Date keeps the groups");
+    command(hwnd, ui::toolbar::GROUP_NONE);
+    let grouped = || unsafe { SendMessageW(list, LVM_ISGROUPVIEWENABLED, None, None) }.0 != 0;
+    assert!(pump_until(WAIT, || !grouped()));
+    close(hwnd);
+}
+
+#[test]
+fn settings_hide_extensions_and_change_date_style_at_once() {
+    let _desktop = desktop();
+    let t = TempDir::new("prefs-files");
+    std::fs::create_dir(t.0.join("sub.d")).unwrap();
+    std::fs::write(t.0.join("report.pdf"), "").unwrap();
+    std::fs::write(t.0.join(".gitignore"), "").unwrap();
+    let hwnd = open(&t.0);
+    let list = list_of(hwnd);
+    assert!(pump_until(WAIT, || rows(list) == ["sub.d", ".gitignore", "report.pdf"]), "{:?}", rows(list));
+    command(hwnd, ui::toolbar::SETTINGS);
+    let dialog = unsafe { FindWindowW(w!("KestrelSettings"), None) }.unwrap();
+    let field = |id| unsafe { GetDlgItem(Some(dialog), id) }.unwrap();
+    unsafe {
+        SendMessageW(field(46), BM_SETCHECK, Some(WPARAM(0)), None); // file name extensions
+        SendMessageW(field(53), CB_SETCURSEL, Some(WPARAM(2)), None); // ISO dates
+    }
+    command(dialog, 3); // Apply
+    let reset = || kestrel::prefs::set(kestrel::prefs::Prefs::default());
+    let shown = pump_until(WAIT, || rows(list) == ["sub.d", ".gitignore", "report"]);
+    let date = cell(list, 2, 1);
+    command(dialog, IDCANCEL.0 as usize);
+    close(hwnd);
+    reset();
+    assert!(shown, "folders and dot-files keep their names; files lose the extension: {:?}", rows(list));
+    let iso = date.len() == 16 && date.as_bytes()[4] == b'-' && date.as_bytes()[10] == b' ';
+    assert!(iso, "{date}");
+}
+
+#[test]
+fn the_keyboard_page_binds_a_command_to_new_keys() {
+    let _desktop = desktop();
+    let t = TempDir::new("prefs-keys");
+    let hwnd = open(&t.0);
+    command(hwnd, ui::toolbar::SETTINGS);
+    let dialog = unsafe { FindWindowW(w!("KestrelSettings"), None) }.unwrap();
+    let field = |id| unsafe { GetDlgItem(Some(dialog), id) }.unwrap();
+    let commands = field(62);
+    let row = rows(commands).iter().position(|r| r == "Tabs: New tab").expect("New tab is listed");
+    select_row(commands, row);
+    // Ctrl+Q in the key box: HKM_SETHOTKEY takes the key and HOTKEYF_CONTROL (2) above it.
+    unsafe { SendMessageW(field(63), WM_USER + 1, Some(WPARAM(b'Q' as usize | (2 << 8))), None) };
+    command(dialog, 64); // Assign
+    assert!(cell(commands, row, 1).starts_with("Ctrl+Q"), "{}", cell(commands, row, 1));
+    command(dialog, IDOK.0 as usize);
+    ctrl_key(list_of(hwnd), VK_Q, false);
+    let opened = pump_until(WAIT, || tab_labels(hwnd).len() == 2);
+    close(hwnd);
+    kestrel::keys::save(&[]).unwrap();
+    assert!(opened, "Ctrl+Q opened a tab without a restart");
 }
 
 #[test]
@@ -2382,6 +2842,19 @@ fn render_review_windows() {
         assert!(pump_until(WAIT, || rows(ui::active_list().unwrap()).len() == 4));
         pump_until(Duration::from_millis(250), || false);
         capture(hwnd, &out.join(format!("{name}-main.bmp")));
+        command(hwnd, 240); // new tab
+        command(hwnd, ui::toolbar::VERTICAL_TABS);
+        pump_until(Duration::from_millis(250), || false);
+        capture(hwnd, &out.join(format!("{name}-vertical.bmp")));
+        command(hwnd, ui::toolbar::TABS_COLLAPSE);
+        pump_until(Duration::from_millis(250), || false);
+        capture(hwnd, &out.join(format!("{name}-collapsed.bmp")));
+        unsafe { SendMessageW(ui::tab_list().unwrap(), WM_TIMER, Some(WPARAM(7)), None) };
+        pump_until(Duration::from_millis(250), || false);
+        capture(hwnd, &out.join(format!("{name}-peek.bmp")));
+        unsafe { SendMessageW(ui::tab_list().unwrap(), WM_MOUSELEAVE, None, None) };
+        command(hwnd, ui::toolbar::TABS_COLLAPSE);
+        command(hwnd, ui::toolbar::VERTICAL_TABS);
         command(hwnd, ui::toolbar::GRID);
         pump_until(Duration::from_millis(500), || false);
         capture(hwnd, &out.join(format!("{name}-grid.bmp")));
@@ -2389,11 +2862,14 @@ fn render_review_windows() {
         command(hwnd, ui::toolbar::SETTINGS);
         let settings = unsafe { FindWindowW(w!("KestrelSettings"), None) }.unwrap();
         let pages = unsafe { GetDlgItem(Some(settings), 5) }.unwrap();
-        unsafe {
-            SendMessageW(pages, TCM_SETCURSEL, Some(WPARAM(1)), None);
+        for page in 0..7 {
+            unsafe {
+                SendMessageW(pages, TCM_SETCURSEL, Some(WPARAM(page)), None);
+            }
+            notify(settings, hdr(pages, TCN_SELCHANGE));
+            pump_until(Duration::from_millis(100), || false);
+            capture(settings, &out.join(format!("{name}-settings-{page}.bmp")));
         }
-        notify(settings, hdr(pages, TCN_SELCHANGE));
-        capture(settings, &out.join(format!("{name}-settings.bmp")));
         command(settings, IDCANCEL.0 as usize);
         key(ui::active_list().unwrap(), VK_F1);
         assert!(pump_until(WAIT, || unsafe { FindWindowW(w!("KestrelShortcuts"), None) }.is_ok()));

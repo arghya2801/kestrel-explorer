@@ -6,6 +6,35 @@ Add a line under **Unreleased** with each change. When cutting a release, rename
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-05
+
+### Added
+- Tabs: a close button on the active and hovered tab; drag tabs to reorder them; Ctrl+Shift+T reopens the last 10 closed tabs; Ctrl+1 to Ctrl+8 pick a tab and Ctrl+9 the last; the tab menu has Move left/right, Reopen closed tab, Close other tabs and Close tabs to the right.
+- Middle-click a folder to open it in a tab behind the current one.
+- A full tab strip scrolls with the mouse wheel, and keeps + and a new all-tabs menu at its right.
+- Deep or squeezed addresses show "…" for the folders left out; click it to go to one.
+- A command palette (Ctrl+Shift+P, or Help > Find a command or shortcut) finds any command by name or by its keys and runs it.
+- Toolbar buttons have tooltips naming their command and shortcut; every menu item shows its shortcut.
+- A Sort button with the sort key, its direction and Group by. View now has the layout, then Show, Panes and Tabs submenus.
+- This PC shows drives as tiles under "Devices and drives" and "Network locations", with a bar for the space used and "X free of Y".
+- Vertical tabs have their own full-height column at the right, with a "Tabs" heading and its own +, a clear active row, close buttons and drag to reorder. Drag its edge to resize it. It collapses to lettered badges, and resting the mouse on the collapsed column widens it over the file list to show the names. Each window remembers the width and whether it's collapsed.
+- Settings has seven pages and many new options: accent color, text size, row spacing, toolbar labels, status bar, title path; file name extensions, protected system files, folders first, single-click opening, double-click to go up, asking before recycling, size units, date style; where new tabs open, close buttons, closing the last tab; sidebar sections and following the open folder; the terminal; and a Keyboard page that rebinds any command without a restart.
+
+### Changed
+- Tab names dim the parent folder. A split tab is named by its left pane, and its tooltip shows both paths.
+- Duplicate tab copies both panes and the split.
+- Splitting narrows the Name column so Type and Size stay visible; unsplitting restores it.
+- The active pane's path label no longer starts with "Active:", except in high contrast.
+
+### Fixed
+- Arrow keys in the vertical tab list no longer switch tabs as they move, or open a new tab from the last row; Enter or a click chooses.
+- Shortcuts such as Ctrl+W work while a tab control has the focus, and Tab reaches the tab strip or list.
+- Ctrl+Shift+T opened a blank tab.
+- Clicking between split panes renamed the tab.
+- New tabs showed "Loading…" before their folder name.
+- Dark mode Settings: readable checkbox labels, dark page tabs, combo boxes and buttons, and no grey bands behind labels.
+- Switching tabs no longer flickers. New lists are styled once, a switch repaints the window once, the old tab's list no longer leaves a blank frame, and the toolbar and address fields are drawn off-screen before they reach the screen.
+
 ## [1.3.2] - 2026-11-04
 
 ### Fixed

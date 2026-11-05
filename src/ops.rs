@@ -355,8 +355,11 @@ fn run_inner(op: &Op, mode: Mode) -> Result<(Option<String>, Option<Op>), String
         match op {
             Op::Delete { paths, recycle } => {
                 flags = if *recycle {
-                    // Explorer doesn't ask before recycling; the Recycle Bin is the undo.
-                    flags | FOFX_RECYCLEONDELETE | FOF_NOCONFIRMATION
+                    // Explorer doesn't ask before recycling (the Recycle Bin is the undo), unless
+                    // Settings asks to.
+                    let ask = crate::prefs::get().confirm_recycle && matches!(mode, Mode::Interactive(_));
+                    let quiet = if ask { FILEOPERATION_FLAGS(0) } else { FOF_NOCONFIRMATION };
+                    flags | FOFX_RECYCLEONDELETE | quiet
                 } else {
                     FILEOPERATION_FLAGS(flags.0 & !FOF_ALLOWUNDO.0)
                 };

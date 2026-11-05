@@ -193,6 +193,18 @@ pub fn system_image_list() -> Option<(HIMAGELIST, i32)> {
     Some((HIMAGELIST(list), folder))
 }
 
+/// The system's large (32 px) icon list, for This PC's drive tiles. Same indices as the small one.
+pub fn large_image_list() -> Option<HIMAGELIST> {
+    static LIST: std::sync::OnceLock<Option<isize>> = std::sync::OnceLock::new();
+    let list = (*LIST.get_or_init(|| {
+        let name: Vec<u16> = "folder".encode_utf16().collect();
+        // No SHGFI_SMALLICON: the large list.
+        let flags = SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES;
+        shfileinfo(&name, FILE_ATTRIBUTE_DIRECTORY, flags).map(|(list, _)| list as isize)
+    }))?;
+    Some(HIMAGELIST(list))
+}
+
 /// Runs jobs until every sender is gone. Per-file jobs for an older folder are skipped.
 pub fn spawn_worker(
     rx: Receiver<Job>,

@@ -64,12 +64,20 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
                 .into_iter()
                 .chain(a.toolbar.iter().copied())
                 .chain(std::iter::once(a.address_edit_button))
+                .chain(std::iter::once(a.crumb_more))
+                .chain(a.tab_buttons)
                 .chain(a.breadcrumbs.iter().map(|p| p.0))
                 .collect::<Vec<_>>(),
         )
     }) else {
         return;
     };
+    // Settings can pick an accent instead of Windows' own.
+    let mut palette = palette;
+    let accent = crate::prefs::get().accent;
+    if accent > 0 && !crate::theme::high_contrast() {
+        palette.accent = crate::prefs::ACCENTS[accent.min(crate::prefs::ACCENTS.len() - 1)].1;
+    }
     let brushes = Brushes::new(&palette);
     with_app(|a| {
         a.palette = palette;
@@ -82,11 +90,12 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &flag as *const _ as *const _, 4);
 
         for &list in &lists {
-            let _ = SetWindowTheme(list, style(w!("Explorer"), w!("DarkMode_Explorer")), None);
-            let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as _);
-            let _ = SetWindowTheme(header, style(PCWSTR::null(), w!("DarkMode_ItemsView")), None);
+            style_list(list, palette);
         }
         let _ = SetWindowTheme(tree, style(w!("Explorer"), w!("DarkMode_Explorer")), None);
+        if let Some(tips) = with_app(|a| a.tips) {
+            let _ = SetWindowTheme(tips, style(PCWSTR::null(), w!("DarkMode_Explorer")), None);
+        }
         for edit in [address, filter] {
             let _ = SetWindowTheme(edit, style(PCWSTR::null(), w!("DarkMode_CFD")), None);
         }
@@ -95,11 +104,6 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
         }
 
         let (bg, fg) = (LPARAM(palette.window as isize), LPARAM(palette.text as isize));
-        for &list in &lists {
-            SendMessageW(list, LVM_SETBKCOLOR, None, Some(bg));
-            SendMessageW(list, LVM_SETTEXTBKCOLOR, None, Some(bg));
-            SendMessageW(list, LVM_SETTEXTCOLOR, None, Some(fg));
-        }
         // -1: the tree's own default colors.
         let (tbg, tfg) = if dark { (bg, fg) } else { (LPARAM(-1), LPARAM(-1)) };
         SendMessageW(tree, TVM_SETBKCOLOR, None, Some(tbg));
@@ -108,12 +112,32 @@ pub(super) fn apply(hwnd: HWND, palette: Palette) {
         for c in [strip, status] {
             let _ = SetWindowSubclass(c, Some(paint_dark), 1, 0);
         }
-        // Column header text: the header tells the list (not us) when it draws.
-        for &list in &lists {
-            let _ = SetWindowSubclass(list, Some(header_text), 2, 0);
-        }
         let _ =
             RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+    }
+}
+
+/// A list's theme, colors and header drawing for `palette`.
+fn style_list(list: HWND, palette: Palette) {
+    let dark = palette.dark;
+    unsafe {
+        let _ = SetWindowTheme(list, if dark { w!("DarkMode_Explorer") } else { w!("Explorer") }, None);
+        let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as _);
+        let _ = SetWindowTheme(header, if dark { w!("DarkMode_ItemsView") } else { PCWSTR::null() }, None);
+        let (bg, fg) = (LPARAM(palette.window as isize), LPARAM(palette.text as isize));
+        SendMessageW(list, LVM_SETBKCOLOR, None, Some(bg));
+        SendMessageW(list, LVM_SETTEXTBKCOLOR, None, Some(bg));
+        SendMessageW(list, LVM_SETTEXTCOLOR, None, Some(fg));
+        // Column header text: the header tells the list (not us) when it draws.
+        let _ = SetWindowSubclass(list, Some(header_text), 2, 0);
+    }
+}
+
+/// Gives a list made after the window was themed (a new tab's or the second pane's) the
+/// current look, without repainting the rest of the window.
+pub(super) fn style_new_list(list: HWND) {
+    if let Some(palette) = with_app(|a| a.palette) {
+        style_list(list, palette);
     }
 }
 
@@ -148,6 +172,114 @@ pub(super) fn label_colors(hdc: HDC, active: bool) -> Option<LRESULT> {
         SetBkColor(hdc, COLORREF(back));
     }
     Some(LRESULT(if active { active_brush.0 } else { chrome.0 } as isize))
+}
+
+/// Dark mode for a dialog (Settings, the guides): a dark title bar and dark-styled controls.
+/// Its page tabs are painted like the window's tab strip; checkbox labels by `checkbox`.
+pub(super) fn apply_dialog(hwnd: HWND) {
+    let Some(palette) = with_app(|a| a.palette) else { return };
+    if !palette.dark || crate::theme::high_contrast() {
+        return;
+    }
+    unsafe {
+        let flag = BOOL::from(true);
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &flag as *const _ as *const _, 4);
+        let mut c = GetWindow(hwnd, GW_CHILD).unwrap_or_default();
+        while !c.is_invalid() {
+            let mut class = [0u16; 32];
+            let n = GetClassNameW(c, &mut class) as usize;
+            match String::from_utf16_lossy(&class[..n]).as_str() {
+                "Button" => _ = SetWindowTheme(c, w!("DarkMode_Explorer"), None),
+                "Edit" if GetWindowLongPtrW(c, GWL_STYLE) as u32 & ES_MULTILINE as u32 != 0 => {
+                    _ = SetWindowTheme(c, w!("DarkMode_Explorer"), None)
+                }
+                "Edit" | "ComboBox" => _ = SetWindowTheme(c, w!("DarkMode_CFD"), None),
+                "SysTabControl32" => _ = SetWindowSubclass(c, Some(paint_dark), 1, 0),
+                _ => {}
+            }
+            c = GetWindow(c, GW_HWNDNEXT).unwrap_or_default();
+        }
+    }
+}
+
+/// A dialog's labels and checkboxes (WM_CTLCOLORSTATIC) on the dialog's own background, in
+/// either theme. `None` in high contrast: Windows' colors.
+pub(super) fn static_colors(hdc: HDC) -> Option<LRESULT> {
+    let (palette, brush) = with_app(|a| (a.palette, a.brushes.as_ref().map(|b| b.chrome)))?;
+    if crate::theme::high_contrast() {
+        return None;
+    }
+    unsafe {
+        SetTextColor(hdc, COLORREF(palette.text));
+        SetBkColor(hdc, COLORREF(palette.chrome));
+    }
+    Some(LRESULT(brush?.0 as isize))
+}
+
+/// Dark mode checkboxes: the theme draws their labels black whatever the text color, so draw
+/// the box from the theme and the label ourselves. `None`: let Windows draw it.
+pub(super) unsafe fn checkbox(nm: &NMCUSTOMDRAW) -> Option<LRESULT> {
+    let palette = with_app(|a| a.palette)?;
+    let button = nm.hdr.hwndFrom;
+    let style = unsafe { GetWindowLongPtrW(button, GWL_STYLE) } as u32 & BS_TYPEMASK as u32;
+    if !palette.dark
+        || crate::theme::high_contrast()
+        || style != BS_AUTOCHECKBOX as u32
+        || nm.dwDrawStage != CDDS_PREPAINT
+    {
+        return None;
+    }
+    unsafe {
+        let hdc = nm.hdc;
+        let back = CreateSolidBrush(COLORREF(palette.chrome));
+        FillRect(hdc, &nm.rc, back);
+        let _ = DeleteObject(HGDIOBJ(back.0));
+        let checked = SendMessageW(button, BM_GETCHECK, None, None).0 == BST_CHECKED.0 as isize;
+        let state = nm.uItemState;
+        let offset = if state.contains(CDIS_DISABLED) {
+            3
+        } else if state.contains(CDIS_SELECTED) {
+            2
+        } else if state.contains(CDIS_HOT) {
+            1
+        } else {
+            0
+        };
+        let part_state = if checked { CBS_CHECKEDNORMAL.0 } else { CBS_UNCHECKEDNORMAL.0 } + offset;
+        let theme = OpenThemeData(Some(button), w!("Button"));
+        let size =
+            GetThemePartSize(theme, Some(hdc), BP_CHECKBOX.0, part_state, None, TS_TRUE).unwrap_or_default();
+        let top = (nm.rc.top + nm.rc.bottom - size.cy) / 2;
+        let boxed = RECT { left: nm.rc.left, top, right: nm.rc.left + size.cx, bottom: top + size.cy };
+        let _ = DrawThemeBackground(theme, hdc, BP_CHECKBOX.0, part_state, &boxed, None);
+        let _ = CloseThemeData(theme);
+        let mut text = [0u16; 260];
+        let len = GetWindowTextW(button, &mut text) as usize;
+        let mut r = RECT { left: boxed.right + super::scale(button, 6), ..nm.rc };
+        SetBkMode(hdc, TRANSPARENT);
+        let ink = if state.contains(CDIS_DISABLED) {
+            crate::theme::mix(palette.chrome, palette.text, 45)
+        } else {
+            palette.text
+        };
+        SetTextColor(hdc, COLORREF(ink));
+        let hide_prefix =
+            if state.contains(CDIS_SHOWKEYBOARDCUES) { DRAW_TEXT_FORMAT(0) } else { DT_HIDEPREFIX };
+        DrawTextW(hdc, &mut text[..len], &mut r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | hide_prefix);
+        if state.contains(CDIS_FOCUS) && state.contains(CDIS_SHOWKEYBOARDCUES) {
+            let mut measured = r;
+            DrawTextW(hdc, &mut text[..len], &mut measured, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
+            let h = measured.bottom - measured.top;
+            let focus = RECT {
+                left: r.left - 1,
+                top: (r.top + r.bottom - h) / 2 - 1,
+                right: measured.right + 1,
+                bottom: (r.top + r.bottom + h) / 2 + 1,
+            };
+            let _ = DrawFocusRect(hdc, &focus);
+        }
+    }
+    Some(LRESULT(CDRF_SKIPDEFAULT as isize))
 }
 
 /// Main window background (WM_ERASEBKGND).
@@ -279,12 +411,14 @@ unsafe fn paint(hwnd: HWND, p: Palette) {
             let count = SendMessageW(hwnd, TCM_GETITEMCOUNT, None, None).0.max(0) as usize;
             let selected = SendMessageW(hwnd, TCM_GETCURSEL, None, None).0;
             let radius = super::scale(hwnd, 6);
+            // The window's tab strip has close buttons and hover; the Settings pages don't.
+            let main = with_app(|a| a.tab_strip == hwnd).unwrap_or(false);
+            let (hot, close_hot) = if main { super::tabbar::hot() } else { (None, false) };
+            let focused = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() == hwnd;
             for i in 0..count {
-                let mut r = RECT::default();
-                SendMessageW(hwnd, TCM_GETITEMRECT, Some(WPARAM(i)), Some(LPARAM(&mut r as *mut _ as isize)));
-                r.top = client.top + super::scale(hwnd, 4);
-                r.bottom = client.bottom;
+                let mut r = super::tabbar::tab_rect(hwnd, i);
                 let selected = i as isize == selected;
+                let back = if selected { p.window } else { p.chrome };
                 if selected {
                     let tab = RECT { bottom: r.bottom + radius, ..r };
                     super::chrome::round_outline(hdc, &tab, p.window, super::chrome::stroke(&p), radius);
@@ -293,11 +427,12 @@ unsafe fn paint(hwnd: HWND, p: Palette) {
                     let fill = CreateSolidBrush(COLORREF(p.window));
                     FillRect(hdc, &gap, fill);
                     let _ = DeleteObject(HGDIOBJ(fill.0));
+                } else if hot == Some(i) {
+                    let hover = crate::theme::mix(p.chrome, p.text, 7);
+                    let tab = RECT { bottom: r.bottom - super::scale(hwnd, 3), ..r };
+                    super::chrome::round_outline(hdc, &tab, hover, hover, radius);
                 }
-                SetTextColor(
-                    hdc,
-                    COLORREF(if selected { p.text } else { crate::theme::mix(p.chrome, p.text, 70) }),
-                );
+                let ink = if selected { p.text } else { crate::theme::mix(p.chrome, p.text, 70) };
                 let mut buf = [0u16; 260];
                 let mut item = TCITEMW {
                     mask: TCIF_TEXT,
@@ -307,14 +442,54 @@ unsafe fn paint(hwnd: HWND, p: Palette) {
                 };
                 SendMessageW(hwnd, TCM_GETITEMW, Some(WPARAM(i)), Some(LPARAM(&mut item as *mut _ as isize)));
                 let len = buf.iter().position(|&c| c == 0).unwrap_or(0);
-                r.left += super::scale(hwnd, 6);
-                r.right -= super::scale(hwnd, 6);
-                DrawTextW(
-                    hdc,
-                    &mut buf[..len],
-                    &mut r,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
-                );
+                let flags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX;
+                if !main {
+                    r.left += super::scale(hwnd, 6);
+                    r.right -= super::scale(hwnd, 6);
+                    SetTextColor(hdc, COLORREF(ink));
+                    let centered = (flags & !DT_LEFT) | DT_CENTER;
+                    DrawTextW(hdc, &mut buf[..len], &mut r, centered);
+                    continue;
+                }
+                // "folder · parent": the folder in full color, the parent dimmed, and the
+                // ellipsis takes the parent first.
+                let text = &mut buf[..len];
+                let split = text.windows(3).position(|w| w == [0x20, 0xB7, 0x20]).unwrap_or(len);
+                let mut area = super::tabbar::text_rect(hwnd, &r);
+                let mut size = windows::Win32::Foundation::SIZE::default();
+                let _ = GetTextExtentPoint32W(hdc, &text[..split], &mut size);
+                let (name, rest) = text.split_at_mut(split);
+                let mut name_area = RECT { right: (area.left + size.cx).min(area.right), ..area };
+                SetTextColor(hdc, COLORREF(ink));
+                DrawTextW(hdc, name, &mut name_area, flags);
+                if !rest.is_empty() && name_area.right < area.right {
+                    area.left = name_area.right;
+                    SetTextColor(
+                        hdc,
+                        COLORREF(crate::theme::mix(back, p.text, if selected { 55 } else { 45 })),
+                    );
+                    DrawTextW(hdc, rest, &mut area, flags);
+                }
+                if super::tabbar::shows_close(hwnd, i) {
+                    let mut close = super::tabbar::close_rect(hwnd, &r);
+                    let pressing = hot == Some(i) && close_hot;
+                    if pressing {
+                        let ring = crate::theme::mix(back, p.text, 14);
+                        super::chrome::round_outline(hdc, &close, ring, ring, super::scale(hwnd, 4));
+                    }
+                    let color = if pressing { p.text } else { ink };
+                    super::chrome::icon(hdc, hwnd, '\u{E711}', &mut close, color, DT_CENTER);
+                }
+                if selected && focused {
+                    let inset = super::scale(hwnd, 2);
+                    let ring = RECT {
+                        left: r.left + inset,
+                        top: r.top + inset,
+                        right: r.right - inset,
+                        bottom: r.bottom - inset,
+                    };
+                    super::chrome::outline(hdc, &ring, p.text, radius - inset, 1);
+                }
             }
         } else {
             // Status bar: one text part.
@@ -339,7 +514,7 @@ pub(super) unsafe fn column_lines(cd: &NMLVCUSTOMDRAW, p: Palette) -> Option<LRE
     }
     let (list, hdc) = (cd.nmcd.hdr.hwndFrom, cd.nmcd.hdc);
     unsafe {
-        if GetWindowLongPtrW(list, GWL_STYLE) as u32 & LVS_TYPEMASK != LVS_REPORT {
+        if SendMessageW(list, LVM_GETVIEW, None, None).0 as u32 != LV_VIEW_DETAILS {
             return None;
         }
         let header = HWND(SendMessageW(list, LVM_GETHEADER, None, None).0 as _);

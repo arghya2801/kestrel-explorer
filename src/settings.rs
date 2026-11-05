@@ -33,13 +33,19 @@ pub struct Settings {
     pub pins: Vec<PathBuf>,
     /// Known folders (Desktop, Downloads...) removed from Quick access.
     pub unpinned: Vec<PathBuf>,
-    /// Tabs listed above the sidebar instead of along the top.
+    /// Tabs listed in a column at the right instead of along the top.
     pub vertical_tabs: bool,
+    /// The vertical tab column's width in 96-DPI pixels, once its edge was dragged.
+    pub tabs_width: Option<i32>,
+    /// The vertical tab column shrunk to a strip of badges.
+    pub tabs_collapsed: bool,
     pub recent: Vec<PathBuf>,
     /// Folders shown grouped by date.
     pub grouped: Vec<PathBuf>,
     /// Folders sorted other than `sort`, the default.
     pub folder_sorts: Vec<(PathBuf, Sort)>,
+    /// Appearance, files, tabs, sidebar and terminal preferences.
+    pub prefs: crate::prefs::Prefs,
 }
 
 impl Default for Settings {
@@ -65,9 +71,12 @@ impl Default for Settings {
             pins: Vec::new(),
             unpinned: Vec::new(),
             vertical_tabs: false,
+            tabs_width: None,
+            tabs_collapsed: false,
             recent: Vec::new(),
             grouped: Vec::new(),
             folder_sorts: Vec::new(),
+            prefs: crate::prefs::Prefs::default(),
         }
     }
 }
@@ -155,6 +164,8 @@ impl Settings {
                     }
                 }
                 "vertical_tabs" => s.vertical_tabs = flag(value).unwrap_or(false),
+                "tabs_width" => s.tabs_width = value.parse().ok().filter(|&w: &i32| w > 0),
+                "tabs_collapsed" => s.tabs_collapsed = flag(value).unwrap_or(false),
                 "folder_sort" => {
                     let mut parts = value.splitn(3, ',');
                     if let (Some(p), Some(k), Some(d)) = (parts.next(), parts.next(), parts.next())
@@ -184,7 +195,9 @@ impl Settings {
                 }
                 "active_tab" => s.active_tab = value.parse().unwrap_or(0),
                 "last_folder" => s.last_folder = (!value.is_empty()).then(|| PathBuf::from(value)),
-                _ => {}
+                _ => {
+                    s.prefs.parse(key, value);
+                }
             }
         }
         s.active_tab = s.active_tab.min(s.tabs.len().saturating_sub(1));
@@ -224,6 +237,11 @@ impl Settings {
             out += &format!("unpin={}\n", encode_path(p));
         }
         out += &format!("vertical_tabs={}\n", self.vertical_tabs);
+        if let Some(w) = self.tabs_width {
+            out += &format!("tabs_width={w}\n");
+        }
+        out += &format!("tabs_collapsed={}\n", self.tabs_collapsed);
+        out += &self.prefs.to_text();
         for (p, sort) in self.folder_sorts.iter().filter(|(p, _)| rememberable(p)) {
             let key = KEYS.iter().find(|(k, _)| *k == sort.key).map_or("Name", |k| k.1);
             out += &format!("folder_sort={},{key},{}\n", encode_path(p), sort.descending);
@@ -348,12 +366,15 @@ mod tests {
             pins: vec![PathBuf::from(r"C:\pinned,=Ü")],
             unpinned: vec![PathBuf::from(r"C:\Users\me\Music")],
             vertical_tabs: true,
+            tabs_width: Some(180),
+            tabs_collapsed: true,
             recent: vec![PathBuf::from(r"D:\recent")],
             grouped: vec![PathBuf::from(r"C:\Users\me\Downloads")],
             folder_sorts: vec![(
                 PathBuf::from(r"C:\Users\me\Downloads"),
                 Sort { key: SortKey::Modified, descending: true },
             )],
+            prefs: crate::prefs::Prefs { show_extensions: false, accent: 2, ..Default::default() },
         };
         assert_eq!(Settings::parse(&s.to_text()), s);
     }

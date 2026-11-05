@@ -50,24 +50,27 @@ pub(super) unsafe fn create(parent: HWND) -> Result<HWND> {
 
 /// Adds the root groups and returns the "This PC" node. Call once the app state exists.
 pub(super) fn populate() -> usize {
-    let quick = insert(None, "Quick access", None, true);
-    let shown = quick_access();
+    let prefs = crate::prefs::get();
+    let quick = prefs.sidebar_quick_access.then(|| insert(None, "Quick access", None, true));
+    let shown = if quick.is_some() { quick_access() } else { Vec::new() };
     for (path, name) in shown.iter().zip(places::short_names(&shown)) {
-        let node = insert(Some(quick), &name, Some(path.clone()), true);
+        let node = insert(quick, &name, Some(path.clone()), true);
         with_app(|a| a.view.icons.request_node((a.tree_epoch << 32) | node, path.clone()));
     }
     // This PC opens the drives page; its drives are already below it, so it never loads.
     let pc = insert(None, places::THIS_PC, Some(places::this_pc()), true);
     with_app(|a| a.nodes[pc].state = State::Loaded);
     add_drives(pc);
-    for group in [quick, pc] {
+    for group in quick.into_iter().chain([pc]) {
         expand(group);
     }
-    let network = insert(None, "Network", None, true);
-    with_app(|a| {
-        a.nodes[network].network = true;
-        a.nodes[network].state = State::Unloaded;
-    });
+    if prefs.sidebar_network {
+        let network = insert(None, "Network", None, true);
+        with_app(|a| {
+            a.nodes[network].network = true;
+            a.nodes[network].state = State::Unloaded;
+        });
+    }
     pc
 }
 
@@ -611,7 +614,14 @@ mod tests {
         let device = || {
             vec![(
                 "Test phone".into(),
-                places::DriveRow { root: root.clone(), detail: "Device".into(), icon: 0 },
+                places::DriveRow {
+                    root: root.clone(),
+                    detail: "Device".into(),
+                    icon: 0,
+                    free: 0,
+                    total: 0,
+                    network: false,
+                },
             )]
         };
         on_devices(generation - 1, Ok(device()));

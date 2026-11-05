@@ -672,7 +672,14 @@ mod tests {
         let job = b.go(crate::places::this_pc());
         let mut s = Snapshot::new(job.dir);
         s.add(&w("Android phone"), windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY.0, 0, 0);
-        s.drives.push(crate::places::DriveRow { root: device.clone(), detail: "Device".into(), icon: 0 });
+        s.drives.push(crate::places::DriveRow {
+            root: device.clone(),
+            detail: "Device".into(),
+            icon: 0,
+            free: 0,
+            total: 0,
+            network: false,
+        });
         b.on_listed(job.generation, Ok((s, vec![0])), &[]);
         assert_eq!(b.path_at(0), Some((device, true)));
         assert!(!crate::places::is_shell_device(Path::new(r"E:\")));
